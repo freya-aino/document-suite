@@ -1,0 +1,19 @@
+FROM pytorch/pytorch:2.4.1-cuda12.4-cudnn9-devel
+
+RUN apt-get update
+
+# # load models
+# RUN pip install transformers
+# RUN python -c "from transformers import Blip2Processor; Blip2Processor.from_pretrained('Salesforce/blip2-opt-2.7b')"
+# RUN python -c "from transformers import Blip2ForConditionalGeneration; Blip2ForConditionalGeneration.from_pretrained('Salesforce/blip2-opt-2.7b')"
+
+RUN pip install \
+    fastapi \
+    uvicorn \
+    python-multipart
+
+WORKDIR /app
+COPY . .
+
+# ENTRYPOINT [ "/bin/bash" ]
+ENTRYPOINT [ "uvicorn", "run:app", "--host", "0.0.0.0", "--port", "10000" ]

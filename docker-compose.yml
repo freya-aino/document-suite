@@ -1,0 +1,5 @@
+name: document-processing
+
+include:
+  - main-system/docker-compose.yml
+  - extraction-processes/docker-compose.yml
