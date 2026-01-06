@@ -1,0 +1,5 @@
+*
+!README.md
+!poetry.lock
+!pyproject.toml
+!run.py
