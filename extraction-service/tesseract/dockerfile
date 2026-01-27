@@ -1,0 +1,22 @@
+FROM golang:latest
+# TODO - change latest to fixed
+
+# Update
+RUN apt-get update -y
+
+# install tesseract and language packs
+RUN apt-get install -y libtesseract-dev libleptonica-dev
+RUN apt-get install -y tesseract-ocr-eng tesseract-ocr-deu
+
+# install deps
+WORKDIR /tmp/app
+COPY go.mod go.sum ./
+RUN go mod download
+
+# build project
+COPY . .
+RUN go build -o /app/main .
+
+# serve
+WORKDIR /app
+ENTRYPOINT ["./main"]
