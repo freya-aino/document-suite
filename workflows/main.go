@@ -1,29 +1,38 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"log"
-	"os"
+	"net/http"
+	"time"
 
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/worker"
 
+	"github.com/gin-gonic/gin"
+
 	src "workflows/src"
 )
 
-func StartWorker(task_queue_name string) {
+var TASK_QUEUE_NAME = "main-task-queue"
 
+func startWorker() {
 	client, err := client.Dial(src.LoadTemporalConfigs("test"))
 	if err != nil {
 		log.Fatalln("Unable to create client", err)
 	}
 	defer client.Close()
 
-	w := worker.New(client, task_queue_name, worker.Options{})
+	w := worker.New(client, TASK_QUEUE_NAME, worker.Options{})
+	defer w.Stop()
 
 	w.RegisterWorkflow(src.OCRBucket)
+	w.RegisterWorkflow(src.VectorizeObjectFromS3)
+
 	w.RegisterActivity(src.GetAllS3ObjectIDsInBucket)
+	w.RegisterActivity(src.LoadObjectFromS3)
+
+	log.Println("Registered workflows and activities")
 
 	err = w.Run(worker.InterruptCh())
 	if err != nil {
@@ -31,50 +40,43 @@ func StartWorker(task_queue_name string) {
 	}
 }
 
-func StartWorkflow_OCRBucket(task_queue_name string) {
-
-	c, err := client.Dial(src.LoadTemporalConfigs("test"))
-	if err != nil {
-		log.Fatalln("Unable to create client", err)
-	}
-	defer c.Close()
-
-	we, err := c.ExecuteWorkflow(
-		context.Background(),
-		client.StartWorkflowOptions{
-			ID:        "OCR_BUCKET",
-			TaskQueue: task_queue_name,
-		},
-		src.OCRBucket,
-		"mlflow", // bucket name
-	)
-
-	if err != nil {
-		log.Fatalln("Unable to execute Workflow", err)
-	}
-	log.Println("Started Workflow", "WorkflowID", we.GetID(), "RunID", we.GetRunID())
-
-	var result []string
-	err = we.Get(context.Background(), &result)
-	if err != nil {
-		log.Fatalln("Unable to get workflow result", err)
-	}
-	log.Println("Workflow result:", result)
-}
-
 func main() {
 
-	if len(os.Args) <= 1 {
-		log.Fatalln("Please provide an argument")
-	}
+	go startWorker()
+	log.Println("Worker goroutine started")
 
-	switch os.Args[1] {
-	case "start-worker":
-		StartWorker("default-task-queue")
-	case "start-workflow":
-		StartWorkflow_OCRBucket("default-task-queue")
-	default:
-		fmt.Println("no valid argument ('start-worker')")
-	}
+	router := gin.Default()
+	router.GET("/list_bucket", func(c *gin.Context) {
+		tmpID := fmt.Sprintf("list_bucket-%d", time.Now().UnixNano())
+		go src.StartWorkflow(
+			client.StartWorkflowOptions{
+				ID:        tmpID,
+				TaskQueue: TASK_QUEUE_NAME,
+			},
+			src.OCRBucket,
+			"documents", // bucket name
+		)
 
+		c.JSON(http.StatusOK, gin.H{"content": "workflow started"})
+	})
+	router.GET("/vectorize", func(c *gin.Context) {
+
+		name := c.Query("name")
+
+		log.Println("Tryping to vectorize ", name)
+
+		tmpID := fmt.Sprintf("vectorize_obj-%d", time.Now().UnixNano())
+		go src.StartWorkflow(
+			client.StartWorkflowOptions{
+				ID:        tmpID,
+				TaskQueue: TASK_QUEUE_NAME,
+			},
+			src.VectorizeObjectFromS3,
+			"documents", // bucket name
+			name,
+		)
+
+		c.JSON(http.StatusOK, gin.H{"content": "workflow started"})
+	})
+	router.Run("0.0.0.0:10000")
 }

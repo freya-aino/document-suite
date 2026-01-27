@@ -1,6 +1,6 @@
 # Default profile for local development
 [profile.test]
-address = "localhost:7233"
+address = "temporal:7233"
 namespace = "default"
 
 # # Custom gRPC headers

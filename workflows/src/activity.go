@@ -2,6 +2,8 @@ package src
 
 import (
 	"context"
+	"io"
+	"log"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -15,7 +17,8 @@ func GetAllS3ObjectIDsInBucket(ctx context.Context, bucket_name string) ([]strin
 		Bucket: aws.String(bucket_name),
 	})
 	if err != nil {
-		return []string{}, nil
+		log.Fatalln("Listing Objects from bucket failed: ", err)
+		// return []string{}, nil
 	}
 
 	var out []string
@@ -24,6 +27,25 @@ func GetAllS3ObjectIDsInBucket(ctx context.Context, bucket_name string) ([]strin
 	}
 
 	return out, nil
+}
+
+func LoadObjectFromS3(ctx context.Context, bucket_name string, obj_name string) ([]byte, error) {
+	client := S3Client()
+
+	resp, err := client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(bucket_name),
+		Key:    aws.String(obj_name),
+	})
+	if err != nil {
+		log.Fatalln("Failed to get object from bucket: ", err)
+	}
+	defer resp.Body.Close()
+
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Fatalln("Failed to read response body from S3 Object")
+	}
+	return data, nil
 }
 
 // func RabbitMQ()
