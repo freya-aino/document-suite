@@ -1,8 +1,0 @@
-go 1.24.5
-
-use (
-	./document-information-extraction
-	./external-services/go-tesseract
-	./llm-agents
-	./web-interface
-)
