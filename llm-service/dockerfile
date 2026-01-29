@@ -1,0 +1,33 @@
+# FROM python:3.10-slim-bullseye
+
+# RUN apt-get update && apt-get install -y \
+#     libgl1-mesa-glx \
+#     libglib2.0-0
+
+# RUN pip install \
+#     langchain \
+#     langchain-community \
+#     langchain-openai \
+#     openai
+
+# WORKDIR /app
+# COPY . . 
+
+FROM golang:latest
+# TODO - change latest to fixed
+
+# Update
+RUN apt-get update -y
+
+# install deps
+WORKDIR /tmp/app
+COPY ./server/go.mod ./server/go.sum ./
+RUN go mod download
+
+# build project
+COPY ./server .
+RUN go build -o /app/main ./main.go
+
+# serve
+WORKDIR /app
+CMD [ "./main" ]
