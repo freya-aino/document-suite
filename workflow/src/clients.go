@@ -1,8 +1,9 @@
 package src
 
 import (
+	"database/sql"
+	"errors"
 	"fmt"
-	"log"
 	"os"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -12,7 +13,28 @@ import (
 	"github.com/qdrant/go-client/qdrant"
 )
 
-func S3Client() *s3.Client {
+func PostgresClient() (*sql.DB, error) {
+
+	pgUser := os.Getenv("PG_USER")
+	pgPassword := os.Getenv("PG_PASSWORD")
+
+	if pgUser == "" {
+		return nil, errors.New("pgUser not provided")
+	}
+	if pgPassword == "" {
+		return nil, errors.New("pgPassword not provided")
+	}
+
+	connectionString := fmt.Sprintf("postgres://%s:%s@postgres/", pgUser, pgPassword) // TODO - add ssl
+	db, err := sql.Open("postgres", connectionString)
+	if err != nil {
+		return nil, err
+	}
+	return db, nil
+
+}
+
+func S3Client() (*s3.Client, error) {
 
 	region := os.Getenv("AWS_REGION")
 	endpoint := fmt.Sprintf("http://%s:%s", os.Getenv("RUSTFS_ADDRESS"), os.Getenv("RUSTFS_PORT"))
@@ -20,16 +42,16 @@ func S3Client() *s3.Client {
 	secretAccessKey := os.Getenv("RUSTFS_SECRET_KEY")
 
 	if accessKeyID == "" {
-		log.Fatalln("S3 accessKeyID env variable not set")
+		return nil, errors.New("S3 accessKeyID env variable not set")
 	}
 	if secretAccessKey == "" {
-		log.Fatalln("S3 secretAccessKey env variable not set")
+		return nil, errors.New("S3 secretAccessKey env variable not set")
 	}
 	if region == "" {
-		log.Fatalln("S3 region env variable not set")
+		return nil, errors.New("S3 region env variable not set")
 	}
 	if endpoint == "" {
-		log.Fatalln("S3 endpoint env variable not set")
+		return nil, errors.New("S3 endpoint env variable not set")
 	}
 
 	// build aws.Config
@@ -43,17 +65,17 @@ func S3Client() *s3.Client {
 		o.BaseEndpoint = aws.String(endpoint)
 	})
 
-	return client
+	return client, nil
 }
 
-func QdrantClient() *qdrant.Client {
+func QdrantClient() (*qdrant.Client, error) {
 
 	client, err := qdrant.NewClient(&qdrant.Config{
 		Host: "qdrant",
 		Port: 6334,
 	})
 	if err != nil {
-		log.Fatalln("Unable to open Qdrant Client: ", err)
+		return nil, err
 	}
-	return client
+	return client, err
 }
