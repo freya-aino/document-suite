@@ -1,8 +1,6 @@
 package main
 
 import (
-	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"workflow-worker/activities"
@@ -108,24 +106,24 @@ func main() {
 		// 	return
 		// }
 
-		// open file
-		fileSource, err := file.Open()
+		// extract byte data
+		fileData, err := src.GetFileData(file)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to open file: %s", err)})
-			return
-		}
-		defer fileSource.Close()
-
-		data, err := io.ReadAll(fileSource)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Faled to read byte data from file: %s", err)})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err})
 		}
 
+		// write to tmp
+		tmpPath, err := src.WriteAsTemp(&fileData)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err})
+		}
+
+		// run workflow
 		_, err = src.StartWorkflow(
 			taskQueueName,
 			workflows.IngresFileWorkflow,
 			"documents", // bucket_name
-			data,
+			tmpPath,
 		)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "workflow error"})
