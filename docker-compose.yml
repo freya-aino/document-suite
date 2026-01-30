@@ -1,6 +1,6 @@
 name: "document-suite"
 
-volumes:
+# volumes:
   # minio_data: null
   # rustfs_data: null
   # rustfs_logs: null
@@ -13,7 +13,7 @@ services:
 # --- WORKFLOW ENGINE ----
   workflows:
     build:
-      context: ./workflows
+      context: ./workflow-worker
     container_name: workflows
     depends_on:
       - temporal
@@ -22,14 +22,14 @@ services:
       - mlflow
       - rustfs
       - qdrant
-    ports:
-      - "10000:10000"
     environment:
       - AWS_REGION=${AWS_REGION}
       - RUSTFS_PORT=9001
       - RUSTFS_ADDRESS=rustfs
       - RUSTFS_ACCESS_KEY=${RUSTFS_ACCESS_KEY}
       - RUSTFS_SECRET_KEY=${RUSTFS_SECRET_KEY}
+    ports:
+      - "10001:8080"
 
   temporal:
     image: temporalio/auto-setup:${TEMPORAL_VERSION}
@@ -70,7 +70,7 @@ services:
       - TEMPORAL_ADDRESS=temporal:7233
       - TEMPORAL_CORS_ORIGINS=http://localhost:3000
     ports:
-      - "8080:8080"
+      - "10000:8080"
 
 
 # --- VECTOR DB ----
