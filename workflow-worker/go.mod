@@ -1,4 +1,4 @@
-module workflows
+module workflow-worker
 
 go 1.24.5
 

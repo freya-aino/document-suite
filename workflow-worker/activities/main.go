@@ -1,24 +1,33 @@
-package src
+package activities
 
 import (
+	"bytes"
 	"context"
+	"crypto/md5"
+	"encoding/hex"
 	"io"
 	"log"
+	"workflow-worker/src"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 )
 
+func CheckHealth(ctx context.Context) error {
+	log.Println("helath check")
+	return nil
+}
+
 func GetAllS3ObjectIDsInBucket(ctx context.Context, bucket_name string) ([]string, error) {
 
-	client := S3Client()
+	client := src.S3Client()
 
 	resp, err := client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
 		Bucket: aws.String(bucket_name),
 	})
 	if err != nil {
-		log.Fatalln("Listing Objects from bucket failed: ", err)
-		// return []string{}, nil
+		log.Println("Listing Objects from bucket failed: ", err)
+		return []string{}, err
 	}
 
 	var out []string
@@ -29,23 +38,51 @@ func GetAllS3ObjectIDsInBucket(ctx context.Context, bucket_name string) ([]strin
 	return out, nil
 }
 
-func LoadObjectFromS3(ctx context.Context, bucket_name string, obj_name string) ([]byte, error) {
-	client := S3Client()
+func S3_GET(ctx context.Context, bucket_name string, obj_name string) ([]byte, error) {
+	client := src.S3Client()
 
 	resp, err := client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(bucket_name),
 		Key:    aws.String(obj_name),
 	})
 	if err != nil {
-		log.Fatalln("Failed to get object from bucket: ", err)
+		log.Println("Failed to get object from bucket: ", err)
+		return []byte{}, err
 	}
 	defer resp.Body.Close()
 
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
-		log.Fatalln("Failed to read response body from S3 Object")
+		log.Println("Failed to read response body from S3 Object")
+		return []byte{}, err
 	}
+
 	return data, nil
+}
+
+func S3_PUT(ctx context.Context, bucket_name string, file_id string, file []byte) error {
+
+	client := src.S3Client()
+	data := bytes.NewReader(file)
+
+	// put object into S3
+	_, err := client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket: aws.String(bucket_name),
+		Key:    aws.String(file_id),
+		Body:   data,
+	})
+	if err != nil {
+		log.Println("upload object failed: ", err)
+		return err
+	}
+
+	return nil
+}
+
+func ComputeFileHash(ctx context.Context, file []byte) (string, error) {
+	sum := md5.Sum(file)
+	hashSum := hex.EncodeToString(sum[:])
+	return hashSum, nil
 }
 
 // func RabbitMQ()
