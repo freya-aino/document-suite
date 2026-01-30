@@ -3,9 +3,9 @@ package main
 import (
 	"log"
 	"net/http"
-	"workflow-worker/activities"
-	"workflow-worker/src"
-	"workflow-worker/workflows"
+	"workflow/activities"
+	"workflow/src"
+	"workflow/workflows"
 
 	"github.com/gin-gonic/gin"
 	"go.temporal.io/sdk/client"
@@ -25,8 +25,9 @@ func startWorker(task_queue_name string) {
 	worker_.RegisterWorkflow(workflows.HealthCheckWorkflow)
 	worker_.RegisterWorkflow(workflows.IngresFileWorkflow)
 
-	worker_.RegisterActivity(activities.S3_GET)
-	worker_.RegisterActivity(activities.S3_PUT)
+	worker_.RegisterActivity(activities.S3Get)
+	worker_.RegisterActivity(activities.S3Put)
+	worker_.RegisterActivity(activities.S3FileExists)
 	worker_.RegisterActivity(activities.ComputeFileHash)
 	worker_.RegisterActivity(activities.CheckHealth)
 
@@ -119,7 +120,7 @@ func main() {
 		}
 
 		// run workflow
-		_, err = src.StartWorkflow(
+		ret, err := src.StartWorkflow(
 			taskQueueName,
 			workflows.IngresFileWorkflow,
 			"documents", // bucket_name
@@ -130,8 +131,8 @@ func main() {
 			return
 		}
 
-		c.JSON(http.StatusOK, gin.H{})
+		c.JSON(http.StatusOK, gin.H{"note": ret})
 	})
 
-	router.Run("0.0.0.0:8080")
+	router.Run("0.0.0.0:9090")
 }

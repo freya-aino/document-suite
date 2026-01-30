@@ -2,7 +2,7 @@ package workflows
 
 import (
 	"time"
-	"workflow-worker/activities"
+	"workflow/activities"
 
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
@@ -65,29 +65,33 @@ WORKFLOWS TODO:
 // 	return "", nil
 // }
 
-func IngresFileWorkflow(ctx workflow.Context, bucket_name string, tmpPath string) error {
+func IngresFileWorkflow(ctx workflow.Context, bucket_name string, tmpPath string) (string, error) {
 	ctx = workflow.WithActivityOptions(ctx, activityOptionGenerator(SafeRetry))
 
 	// generate file hash for ID
 	var fileHash string
 	err := workflow.ExecuteActivity(ctx, activities.ComputeFileHash, tmpPath).Get(ctx, &fileHash)
 	if err != nil {
-		return err
+		return "", err
 	}
 
-	var hasDuplicate bool
-	err = workflow.ExecuteActivity(ctx, activities.S3_CHECK_DUPLICATE, fileHash).Get(ctx, &hasDuplicate)
+	var fileExists bool
+	err = workflow.ExecuteActivity(ctx, activities.S3FileExists, bucket_name, fileHash).Get(ctx, &fileExists)
 	if err != nil {
-		return err
+		return "", err
 	}
 
-	// put into S3
-	err = workflow.ExecuteActivity(ctx, activities.S3_PUT, bucket_name, fileHash, tmpPath).Get(ctx, nil)
-	if err != nil {
-		return err
-	}
+	if !fileExists {
 
-	return nil
+		// put into S3
+		err = workflow.ExecuteActivity(ctx, activities.S3Put, bucket_name, fileHash, tmpPath).Get(ctx, nil)
+		if err != nil {
+			return "", err
+		}
+
+		return "no-duplicate", nil
+	}
+	return "duplicate", nil
 }
 
 func HealthCheckWorkflow(ctx workflow.Context) error {
