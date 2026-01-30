@@ -65,18 +65,24 @@ WORKFLOWS TODO:
 // 	return "", nil
 // }
 
-func IngresFileWorkflow(ctx workflow.Context, bucket_name string, file []byte) error {
+func IngresFileWorkflow(ctx workflow.Context, bucket_name string, tmpPath string) error {
 	ctx = workflow.WithActivityOptions(ctx, activityOptionGenerator(SafeRetry))
 
 	// generate file hash for ID
 	var fileHash string
-	err := workflow.ExecuteActivity(ctx, activities.ComputeFileHash, file).Get(ctx, &fileHash)
+	err := workflow.ExecuteActivity(ctx, activities.ComputeFileHash, tmpPath).Get(ctx, &fileHash)
+	if err != nil {
+		return err
+	}
+
+	var hasDuplicate bool
+	err = workflow.ExecuteActivity(ctx, activities.S3_CHECK_DUPLICATE, fileHash).Get(ctx, &hasDuplicate)
 	if err != nil {
 		return err
 	}
 
 	// put into S3
-	err = workflow.ExecuteActivity(ctx, activities.S3_PUT, bucket_name, fileHash, file).Get(ctx, nil)
+	err = workflow.ExecuteActivity(ctx, activities.S3_PUT, bucket_name, fileHash, tmpPath).Get(ctx, nil)
 	if err != nil {
 		return err
 	}

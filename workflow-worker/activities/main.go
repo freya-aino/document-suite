@@ -1,12 +1,12 @@
 package activities
 
 import (
-	"bytes"
 	"context"
-	"crypto/md5"
+	"crypto/sha256"
 	"encoding/hex"
 	"io"
 	"log"
+	"os"
 	"workflow-worker/src"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -60,28 +60,62 @@ func S3_GET(ctx context.Context, bucket_name string, obj_name string) ([]byte, e
 	return data, nil
 }
 
-func S3_PUT(ctx context.Context, bucket_name string, file_id string, file []byte) error {
+func S3_PUT(ctx context.Context, bucket_name string, file_id string, filePath string) error {
 
+	// create client
 	client := src.S3Client()
-	data := bytes.NewReader(file)
+
+	// open file buffer
+	file, err := os.Open(filePath)
+	if err != nil {
+		return err
+	}
 
 	// put object into S3
-	_, err := client.PutObject(ctx, &s3.PutObjectInput{
+	_, err = client.PutObject(ctx, &s3.PutObjectInput{
 		Bucket: aws.String(bucket_name),
 		Key:    aws.String(file_id),
-		Body:   data,
+		Body:   file,
 	})
 	if err != nil {
-		log.Println("upload object failed: ", err)
 		return err
 	}
 
 	return nil
 }
 
-func ComputeFileHash(ctx context.Context, file []byte) (string, error) {
-	sum := md5.Sum(file)
-	hashSum := hex.EncodeToString(sum[:])
+func S3_CHECK_DUPLICATE(ctx context.Context, bucket_name string, file_id string) (bool, error) {
+
+	// create client
+	client := src.S3Client()
+
+	// get object from S3
+	_, err := client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(bucket_name),
+		Key:    aws.String(file_id),
+	})
+	if err != nil {
+		return false, nil
+	}
+
+	return true, nil
+}
+
+func ComputeFileHash(ctx context.Context, filePath string) (string, error) {
+
+	// open file buffer
+	file, err := os.Open(filePath)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+
+	hasher := sha256.New()
+	_, err = io.Copy(hasher, file)
+	if err != nil {
+		return "", err
+	}
+	hashSum := hex.EncodeToString(hasher.Sum(nil))
 	return hashSum, nil
 }
 
