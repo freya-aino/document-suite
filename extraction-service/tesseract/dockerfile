@@ -1,12 +1,11 @@
-FROM golang:latest
-# TODO - change latest to fixed
+FROM golang:alpine3.23
 
 # Update
-RUN apt-get update -y
+RUN apk update
 
 # install tesseract and language packs
-RUN apt-get install -y libtesseract-dev libleptonica-dev
-RUN apt-get install -y tesseract-ocr-eng tesseract-ocr-deu
+RUN apk install -y libtesseract-dev libleptonica-dev
+RUN apk install -y tesseract-ocr-eng tesseract-ocr-deu
 
 # install deps
 WORKDIR /tmp/app
