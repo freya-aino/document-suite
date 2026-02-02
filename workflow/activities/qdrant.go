@@ -7,7 +7,7 @@ import (
 	"github.com/qdrant/go-client/qdrant"
 )
 
-func CreateCollection(ctx context.Context, collectionName string, vectorSize uint64, distance qdrant.Distance) error {
+func QdrantCreateCollection(ctx context.Context, collectionName string, vectorSize uint64, distance qdrant.Distance) error {
 
 	client, err := src.QdrantClient()
 	if err != nil {
@@ -49,7 +49,7 @@ func QdrantPutIntoCollection(ctx context.Context, collectionName string, documen
 		},
 	}
 
-	opInfo, err := client.Upsert(ctx, &point)
+	_, err = client.Upsert(ctx, &point)
 	if err != nil {
 		return err
 	}
@@ -73,7 +73,7 @@ func QdrantPutIntoCollection(ctx context.Context, collectionName string, documen
 // 	// info.SegmentsCount
 // }
 
-func QueryCollection(ctx context.Context, collectionName string, queryVector []float32) ([]src.VectorQueryResult, error) {
+func QdrantQueryCollection(ctx context.Context, collectionName string, queryVector []float32) ([]src.VectorQueryResult, error) {
 
 	client, err := src.QdrantClient()
 	if err != nil {

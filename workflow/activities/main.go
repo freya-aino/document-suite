@@ -32,6 +32,18 @@ func ComputeFileHash(ctx context.Context, filePath string) (string, error) {
 	return hashSum, nil
 }
 
+func SeperatePages(ctx context.Context, filePath string) ([]string, error) {
+
+	file, err := os.Open(filePath)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	// TODO
+	return nil, nil
+}
+
 // func RabbitMQ()
 // conn, err := amqp.Dial("amqp://guest:guest@localhost:5672/")
 // if err != nil {

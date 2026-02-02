@@ -27,11 +27,16 @@ func startWorker(task_queue_name string) {
 	worker_.RegisterWorkflow(workflows.HealthCheckWorkflow)
 	worker_.RegisterWorkflow(workflows.IngresFileWorkflow)
 
-	worker_.RegisterActivity(activities.S3Get)
-	worker_.RegisterActivity(activities.S3Put)
-	worker_.RegisterActivity(activities.S3FileExists)
-	worker_.RegisterActivity(activities.ComputeFileHash)
 	worker_.RegisterActivity(activities.CheckHealth)
+	worker_.RegisterActivity(activities.ComputeFileHash)
+
+	worker_.RegisterActivity(activities.S3GetDocument)
+	worker_.RegisterActivity(activities.S3PutDocument)
+	worker_.RegisterActivity(activities.S3DocumentExists)
+
+	worker_.RegisterActivity(activities.QdrantCreateCollection)
+	worker_.RegisterActivity(activities.QdrantQueryCollection)
+	worker_.RegisterActivity(activities.QdrantPutIntoCollection)
 
 	log.Println("Registered workflows and activities")
 

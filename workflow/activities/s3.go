@@ -14,7 +14,7 @@ import (
 	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 )
 
-func GetAllS3ObjectIDsInBucket(ctx context.Context, bucket_name string) ([]string, error) {
+func GetAllS3ObjectIDsInBucket(ctx context.Context, bucketName string) ([]string, error) {
 
 	client, err := src.S3Client()
 	if err != nil {
@@ -22,7 +22,7 @@ func GetAllS3ObjectIDsInBucket(ctx context.Context, bucket_name string) ([]strin
 	}
 
 	resp, err := client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
-		Bucket: aws.String(bucket_name),
+		Bucket: aws.String(bucketName),
 	})
 	if err != nil {
 		return []string{}, err
@@ -36,30 +36,36 @@ func GetAllS3ObjectIDsInBucket(ctx context.Context, bucket_name string) ([]strin
 	return out, nil
 }
 
-func S3Get(ctx context.Context, bucket_name string, obj_name string) ([]byte, error) {
+func S3GetDocument(ctx context.Context, bucketName string, documentId string) (string, error) {
 	client, err := src.S3Client()
 	if err != nil {
-		return []byte{}, err
+		return "", err
 	}
 
 	resp, err := client.GetObject(ctx, &s3.GetObjectInput{
-		Bucket: aws.String(bucket_name),
-		Key:    aws.String(obj_name),
+		Bucket: aws.String(bucketName),
+		Key:    aws.String(documentId),
 	})
 	if err != nil {
-		return []byte{}, err
+		return "", err
 	}
 	defer resp.Body.Close()
 
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return []byte{}, err
+		return "", err
 	}
 
-	return data, nil
+	// write as tmp
+	location, err := src.WriteAsTemp(&data)
+	if err != nil {
+		return "", err
+	}
+
+	return location, nil
 }
 
-func S3Put(ctx context.Context, bucketName string, fileUUID string, filePath string) error {
+func S3PutDocument(ctx context.Context, bucketName string, documentId string, documentPath string) error {
 
 	// create client
 	client, err := src.S3Client()
@@ -67,8 +73,8 @@ func S3Put(ctx context.Context, bucketName string, fileUUID string, filePath str
 		return err
 	}
 
-	// open file buffer
-	file, err := os.Open(filePath)
+	// open document buffer
+	document, err := os.Open(documentPath)
 	if err != nil {
 		return err
 	}
@@ -76,8 +82,8 @@ func S3Put(ctx context.Context, bucketName string, fileUUID string, filePath str
 	// put object into S3
 	_, err = client.PutObject(ctx, &s3.PutObjectInput{
 		Bucket: aws.String(bucketName),
-		Key:    aws.String(fileUUID),
-		Body:   file,
+		Key:    aws.String(documentId),
+		Body:   document,
 	})
 	if err != nil {
 		return err
@@ -86,7 +92,7 @@ func S3Put(ctx context.Context, bucketName string, fileUUID string, filePath str
 	return nil
 }
 
-func S3FileExists(ctx context.Context, bucket_name string, file_id string) (bool, error) {
+func S3DocumentExists(ctx context.Context, bucketName string, documentId string) (bool, error) {
 
 	// create client
 	client, err := src.S3Client()
@@ -96,8 +102,8 @@ func S3FileExists(ctx context.Context, bucket_name string, file_id string) (bool
 
 	// get object from S3 if available
 	_, err = client.HeadObject(ctx, &s3.HeadObjectInput{
-		Bucket: aws.String(bucket_name),
-		Key:    aws.String(file_id),
+		Bucket: aws.String(bucketName),
+		Key:    aws.String(documentId),
 	})
 	if err != nil {
 
