@@ -1,8 +1,10 @@
 package main
 
 import (
+	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"workflow/activities"
 	"workflow/src"
 	"workflow/workflows"
@@ -134,5 +136,9 @@ func main() {
 		c.JSON(http.StatusOK, gin.H{"note": ret})
 	})
 
-	router.Run("0.0.0.0:9090")
+	port := os.Getenv("WORKFLOW_PORT")
+	if port == "" {
+		log.Fatalln("'WORKFLOW_PORT' environment variable not set")
+	}
+	router.Run(fmt.Sprintf("0.0.0.0:%s", port))
 }

@@ -15,8 +15,9 @@ import (
 
 func PostgresClient() (*sql.DB, error) {
 
-	pgUser := os.Getenv("PG_USER")
-	pgPassword := os.Getenv("PG_PASSWORD")
+	pgUser := os.Getenv("POSTGRES_USER")
+	pgPassword := os.Getenv("POSTGRES_PASSWORD")
+	pgPort := os.Getenv("POSTGRES_PORT")
 
 	if pgUser == "" {
 		return nil, errors.New("pgUser not provided")
@@ -25,7 +26,7 @@ func PostgresClient() (*sql.DB, error) {
 		return nil, errors.New("pgPassword not provided")
 	}
 
-	connectionString := fmt.Sprintf("postgres://%s:%s@postgres/", pgUser, pgPassword) // TODO - add ssl
+	connectionString := fmt.Sprintf("postgres://%s:%s@postgres:%s/", pgUser, pgPassword, pgPort) // TODO - add ssl
 	db, err := sql.Open("postgres", connectionString)
 	if err != nil {
 		return nil, err
@@ -73,6 +74,8 @@ func QdrantClient() (*qdrant.Client, error) {
 	client, err := qdrant.NewClient(&qdrant.Config{
 		Host: "qdrant",
 		Port: 6334,
+		// UseTLS: , # TODO
+		// APIKey: , # TODO
 	})
 	if err != nil {
 		return nil, err
