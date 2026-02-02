@@ -59,7 +59,7 @@ func S3Get(ctx context.Context, bucket_name string, obj_name string) ([]byte, er
 	return data, nil
 }
 
-func S3Put(ctx context.Context, bucket_name string, file_id string, filePath string) error {
+func S3Put(ctx context.Context, bucketName string, fileUUID string, filePath string) error {
 
 	// create client
 	client, err := src.S3Client()
@@ -75,8 +75,8 @@ func S3Put(ctx context.Context, bucket_name string, file_id string, filePath str
 
 	// put object into S3
 	_, err = client.PutObject(ctx, &s3.PutObjectInput{
-		Bucket: aws.String(bucket_name),
-		Key:    aws.String(file_id),
+		Bucket: aws.String(bucketName),
+		Key:    aws.String(fileUUID),
 		Body:   file,
 	})
 	if err != nil {

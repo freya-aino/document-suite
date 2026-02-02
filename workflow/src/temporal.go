@@ -14,14 +14,11 @@ func LoadTemporalConfigs(profile string) client.Options {
 
 	// TODO get stage to insert into loading the config for devel, test, depl, etc.
 	// STAGE := os.Getenv("STAGE")
-
-	config, err := envconfig.LoadClientOptions(envconfig.LoadClientOptionsRequest{
-		ConfigFilePath:    "./config.toml",
-		ConfigFileProfile: profile,
-	})
-	if err != nil {
-		log.Fatalln("Unable to find config file:", err)
-	}
+	// config, err := envconfig.LoadClientOptions(envconfig.LoadClientOptionsRequest{
+	// 	ConfigFilePath:    "./config.toml",
+	// 	ConfigFileProfile: profile,
+	// })
+	config := envconfig.MustLoadDefaultClientOptions()
 	return config
 }
 

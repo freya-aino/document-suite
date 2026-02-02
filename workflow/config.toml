@@ -1,7 +1,7 @@
-# Default profile for local development
-[profile.test]
-address = "temporal:7233"
-namespace = "default"
+# # Default profile for local development
+# [profile.test]
+# address = "temporal:${TEMPORAL_PORT}"
+# namespace = "default"
 
 # # Custom gRPC headers
 # [profile.default.grpc_meta]

@@ -1,8 +1,7 @@
-FROM golang:latest
-# TODO - change latest to fixed
+FROM golang:alpine3.23
 
 # Update
-RUN apt-get update -y
+RUN apk update
 
 # install deps
 WORKDIR /tmp/app
