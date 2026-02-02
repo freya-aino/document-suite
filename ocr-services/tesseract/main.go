@@ -5,6 +5,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -132,5 +133,9 @@ func main() {
 		client.SetLanguage("eng")
 	})
 
-	router.Run("0.0.0.0:8080")
+	port := os.Getenv("OCR_PORT")
+	if port == "" {
+		log.Fatalln("environment variable 'OCR_PORT' not set")
+	}
+	router.Run(fmt.Sprintf("0.0.0.0:%s", port))
 }

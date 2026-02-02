@@ -40,12 +40,13 @@ services:
     ports:
       - "${WORKFLOW_PORT}:${WORKFLOW_PORT}"
     healthcheck:
-      test: [
-        "CMD", 
-        "/bin/sh",
-        "-c",
-        "wget -qO- http://localhost:${WORKFLOW_PORT}/health"
-      ]
+      test:
+        [
+          "CMD",
+          "/bin/sh",
+          "-c",
+          "wget -qO- http://localhost:${WORKFLOW_PORT}/health",
+        ]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -103,6 +104,13 @@ services:
     #   - "${QDRANT_PORT}:6333"
     # volumes:
     #   - qdrant_data:/qdrant/
+
+  ocr:
+    build:
+      context: ocr-services/tesseract
+    container_name: ocr
+    environment:
+      OCR_PORT: ${OCR_PORT}
 
   # --- DATA SERVICES ----
   mlflow:
