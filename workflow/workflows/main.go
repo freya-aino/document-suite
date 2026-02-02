@@ -65,34 +65,67 @@ WORKFLOWS TODO:
 // 	return "", nil
 // }
 
-func IngresFileWorkflow(ctx workflow.Context, bucket_name string, tmpPath string) (string, error) {
+func IngresDocumentWorkflow(ctx workflow.Context, bucket_name string, tmpPath string) (string, error) {
 	ctx = workflow.WithActivityOptions(ctx, activityOptionGenerator(SafeRetry))
 
 	// generate file hash for ID
-	var fileHash string
-	err := workflow.ExecuteActivity(ctx, activities.ComputeFileHash, tmpPath).Get(ctx, &fileHash)
+	var documentHash string
+	err := workflow.ExecuteActivity(ctx, activities.ComputeFileHash, tmpPath).Get(ctx, &documentHash)
 	if err != nil {
 		return "", err
 	}
 
-	var fileExists bool
-	err = workflow.ExecuteActivity(ctx, activities.S3FileExists, bucket_name, fileHash).Get(ctx, &fileExists)
+	var documentExists bool
+	err = workflow.ExecuteActivity(ctx, activities.S3DocumentExists, bucket_name, documentHash).Get(ctx, &documentExists)
 	if err != nil {
 		return "", err
 	}
 
-	if !fileExists {
-
-		// put into S3
-		err = workflow.ExecuteActivity(ctx, activities.S3Put, bucket_name, fileHash, tmpPath).Get(ctx, nil)
+	// if no duplicate exist, put into S3
+	if !documentExists {
+		err = workflow.ExecuteActivity(ctx, activities.S3PutDocument, bucket_name, documentHash, tmpPath).Get(ctx, nil)
 		if err != nil {
 			return "", err
 		}
-
 		return "no-duplicate", nil
 	}
+
+	// get the file type
+
+	// check if exists in postgres and create (with UUID) if not
+
+	// seperate pages
+
+	// for each page generate S3ID and UUID, then upload
+
+	// update postgres with individual page references
+
 	return "duplicate", nil
 }
+
+// func OCRWorkflow
+// load all document IDs
+// check OCR status and OCR version from PG
+// filter non-ocr'ed
+// fech all page IDs
+// load and OCR each page
+// check chuking status for document
+// if not chunked with this chunking policy -> chuk Text
+// save text chunks to PG
+// update chuk status
+
+// func VectorizeWorkflow
+// load all document IDs
+// check if OCR'ed and chunked -> else trigger OCRWorkflow
+// load chuks associated with document and chunk policy
+// check Vectorization status and version from PG for each
+// filer unvectorized
+// [unclear if this would just happen on setup, similar to the documents bucket] (check if qdrant collection exists -> create qdrant collection if not)
+// vectorize each text chunk (TODO - add vectorization engine)
+// store content and metadata in vectordb
+// update vectorization status and version in PG
+
+// func QueryVectorDBWorkflow (tool)
 
 func HealthCheckWorkflow(ctx workflow.Context) error {
 	ctx = workflow.WithActivityOptions(ctx, activityOptionGenerator(FastRetry))

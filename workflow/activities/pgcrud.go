@@ -1,6 +1,6 @@
 package activities
 
-// func CreateFileDataIndex(ctx context.Context, fileS3ID string, s3BucketName string) error {
+// func CreateDocumentDataIndex(ctx context.Context, DocumentS3ID string, s3BucketName string) error {
 
 // 	client, err := src.PostgresClient()
 // 	if err != nil {
@@ -15,3 +15,5 @@ package activities
 
 // 	return nil
 // }
+
+// func PGDocumentExists(ctx context.Context, )

@@ -6,6 +6,7 @@ import (
 
 type Document struct {
 	UUID uuidv7.UUID `json:"UUID"`
+	S3ID string      `json:"S3ID"`
 	Name string      `json:"Name"`
 }
 
