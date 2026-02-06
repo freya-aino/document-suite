@@ -28,15 +28,21 @@ services:
     environment:
       AWS_REGION: ${AWS_REGION}
       RUSTFS_PORT: ${RUSTFS_PORT}
-      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_ADDRESS: ${TEMPORAL_CONTAINER_NAME}:7233
       TEMPORAL_NAMESPACE: default
+      
+      POSTGRES_ADDRESS: ${POSTGRES_CONTAINER_NAME}
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      POSTGRES_PORT: 5432 # ${POSTGRES_PORT}
-      RUSTFS_ADDRESS: rustfs
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB} # TODO - change to its own databse based on migration {POSTGRES_WORKFLOW_DB}
+      
+      RUSTFS_ADDRESS: ${RUSTFS_CONTAINER_NAME}
       RUSTFS_ACCESS_KEY: ${RUSTFS_ACCESS_KEY}
       RUSTFS_SECRET_KEY: ${RUSTFS_SECRET_KEY}
       WORKFLOW_PORT: ${WORKFLOW_PORT}
+
+      DOCUMENT_S3_BUCKET: ${DOCUMENT_S3_BUCKET}
     ports:
       - "${WORKFLOW_PORT}:${WORKFLOW_PORT}"
     healthcheck:
@@ -54,23 +60,21 @@ services:
 
   temporal:
     image: temporalio/auto-setup:${TEMPORAL_VERSION}
-    container_name: temporal
+    container_name: ${TEMPORAL_CONTAINER_NAME}
     networks: [document-network]
-    # ports:
-    #   - "${TEMPORAL_PORT}:7233"
     # volumes:
     #   - temporal_data:/etc/temporal/config/dynamicconfig
     depends_on:
-      - postgres
+      - ${POSTGRES_CONTAINER_NAME}
     environment:
       DB: postgres12
-      DB_PORT: 5432 # ${POSTGRES_PORT}
+      DB_PORT: 5432
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PWD: ${POSTGRES_PASSWORD}
       POSTGRES_SEEDS: postgres # TODO : find out what this means
       # DYNAMIC_CONFIG_FILE_PATH: config/dynamicconfig/development-sql.yaml
-      TEMPORAL_ADDRESS: temporal:7233
-      TEMPORAL_CLI_ADDRESS: temporal:7233
+      TEMPORAL_ADDRESS: ${TEMPORAL_CONTAINER_NAME}:7233
+      TEMPORAL_CLI_ADDRESS: ${TEMPORAL_CONTAINER_NAME}:7233
 
   # temporal-admin-tools:
   #   image: temporalio/admin-tools:${TEMPORAL_ADMINTOOLS_VERSION}
@@ -90,29 +94,18 @@ services:
     depends_on:
       - temporal
     environment:
-      TEMPORAL_ADDRESS: temporal:7233
-      TEMPORAL_CORS_ORIGINS: http://localhost:3000
+      TEMPORAL_ADDRESS: ${TEMPORAL_CONTAINER_NAME}:7233
+      # TEMPORAL_CORS_ORIGINS: http://localhost:3000
     ports:
       - "${TEMPORAL_UI_PORT}:8080"
-
-  # --- VECTOR DB ----
-  qdrant:
-    image: qdrant/qdrant:${QDRANT_VERSION}
-    networks: [document-network]
-    container_name: qdrant
-    # ports:
-    #   - "${QDRANT_PORT}:6333"
-    # volumes:
-    #   - qdrant_data:/qdrant/
 
   ocr:
     build:
       context: ocr-services/tesseract
     container_name: ocr
     environment:
-      OCR_PORT: ${OCR_PORT}
+      OCR_ADDRESS: ${OCR_ADDRESS}
 
-  # --- DATA SERVICES ----
   mlflow:
     # TODO - use a dedicated postgres database instead of maindb
     image: ghcr.io/mlflow/mlflow:${MLFLOW_VERSION}
@@ -129,7 +122,7 @@ services:
         condition: service_completed_successfully
     environment:
       MLFLOW_BACKEND_STORE_URI: ${MLFLOW_BACKEND_STORE_URI}
-      MLFLOW_S3_ENDPOINT_URL: ${MLFLOW_S3_ENDPOINT_URL}
+      MLFLOW_S3_ENDPOINT_URL: ${S3_ENDPOINT_URL}
       MLFLOW_ARTIFACTS_DESTINATION: ${MLFLOW_ARTIFACTS_DESTINATION}
 
       AWS_ACCESS_KEY_ID: ${RUSTFS_ACCESS_KEY}
@@ -137,7 +130,7 @@ services:
       AWS_DEFAULT_REGION: ${AWS_REGION}
       MLFLOW_S3_IGNORE_TLS: "true" # TODO
 
-      MLFLOW_HOST: 0.0.0.0
+      MLFLOW_HOST: ${MLFLOW_HOST}
       MLFLOW_PORT: ${MLFLOW_PORT}
     ports:
       - "${MLFLOW_PORT}:${MLFLOW_PORT}"
@@ -150,21 +143,34 @@ services:
           --backend-store-uri ${MLFLOW_BACKEND_STORE_URI} \
           --artifacts-destination ${MLFLOW_ARTIFACTS_DESTINATION} \
           --serve-artifacts \
-          --host 0.0.0.0 \
+          --host ${MLFLOW_HOST} \
           --port ${MLFLOW_PORT}
+
+# ------------------------------------ ------------------------------------
+
+
+# ------------------------------------ STORAGE ------------------------------------
+
+  qdrant:
+    image: qdrant/qdrant:${QDRANT_VERSION}
+    networks: [document-network]
+    container_name: qdrant
+    # ports:
+    #   - "${QDRANT_PORT}:6333"
+    # volumes:
+    #   - qdrant_data:/qdrant/
 
   postgres:
     image: postgres:12
-    container_name: postgres
+    container_name: ${POSTGRES_CONTAINER_NAME}
     networks: [document-network]
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
+      
     # volumes:
     #   - pg_data:/var/lib/postgresql/data
-    # ports:
-    #   - "${POSTGRES_PORT}:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -d ${POSTGRES_DB} -U ${POSTGRES_USER}"]
       interval: 5s
@@ -172,24 +178,9 @@ services:
       retries: 10
       start_period: 5s
 
-  #TODO
-  # postgres-migration:
-  #   # TODO - use a dedicated postgres database instead of maindb
-  #   build:
-  #     context: ./migration
-  #   container_name: migration
-  #   depends_on:
-  #     postgres:
-  #       condition: service_healthy
-  #   environment:
-  #     POSTGRES_USER: ${POSTGRES_USER}
-  #     POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-  #     POSTGRES_DB: ${POSTGRES_DB}
-  #   restart: "no"
-
   rustfs:
     image: rustfs/rustfs:${RUSTFS_VERSION}
-    container_name: rustfs
+    container_name: ${RUSTFS_CONTAINER_NAME}
     networks: [document-network]
     ports:
       # - "${RUSTFS_PORT}:${RUSTFS_PORT}"
@@ -199,8 +190,8 @@ services:
     #   - rustfs_logs:/app/logs
     # (missing) tls cert mount
     environment:
-      RUSTFS_ADDRESS: 0.0.0.0:${RUSTFS_PORT}
-      RUSTFS_CONSOLE_ADDRESS: 0.0.0.0:${RUSTFS_CONSOLE_PORT}
+      RUSTFS_ADDRESS: ${RUSTFS_HOST}:${RUSTFS_PORT}
+      RUSTFS_CONSOLE_ADDRESS: ${RUSTFS_HOST}:${RUSTFS_CONSOLE_PORT}
       RUSTFS_ACCESS_KEY: ${RUSTFS_ACCESS_KEY}
       RUSTFS_SECRET_KEY: ${RUSTFS_SECRET_KEY}
       RUSTFS_CONSOLE_ENABLE: ${RUSTFS_CONSOLE_ENABLE}
@@ -229,7 +220,9 @@ services:
       retries: 3
       start_period: 40s
 
-  # ---- AUTOMATED INITIALIZATION ----
+
+# ------------------------------------ INITIALIZATION ------------------------------------
+
   rustfs-create-bucket:
     image: minio/mc:${MINIO_MC_VERSION}
     networks: [document-network]
@@ -240,10 +233,33 @@ services:
       - /bin/sh
       - -c
       - |
-        mc alias set rustfs http://rustfs:${RUSTFS_PORT} "${RUSTFS_ACCESS_KEY}" "${RUSTFS_SECRET_KEY}"
-        mc mb --ignore-existing "rustfs/mlflow"
-        mc mb --ignore-existing "rustfs/documents"
+        mc alias set rustfs http://${RUSTFS_CONTAINER_NAME}:${RUSTFS_PORT} "${RUSTFS_ACCESS_KEY}" "${RUSTFS_SECRET_KEY}"
+        mc mb --ignore-existing "rustfs/${MLFLOW_ARTIFACT_S3_BUCKET}"
+        mc mb --ignore-existing "rustfs/${DOCUMENT_S3_BUCKET}"
     restart: "no"
+
+  # TODO
+  # user init for pg
+
+
+  # TODO
+  # postgres-migration:
+  #   # TODO - use a dedicated postgres database instead of maindb
+  #   build:
+  #     context: ./migration
+  #   container_name: migration
+  #   depends_on:
+  #     postgres:
+  #       condition: service_healthy
+  #   environment:
+  #     POSTGRES_USER: ${POSTGRES_USER}
+  #     POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+  #     POSTGRES_DB: ${POSTGRES_DB}
+  #   restart: "no"
+
+
+
+# ------------------------------------ SYSTEM MONITOR ------------------------------------
 
   # rabbitmq:
   #   image: rabbitmq:${RABBITMQ_VERSION}
