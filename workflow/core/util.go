@@ -1,8 +1,10 @@
-package src
+package core
 
 import (
 	"bytes"
 	"encoding/hex"
+	"errors"
+	"fmt"
 	"io"
 	"mime/multipart"
 	"os"
@@ -12,6 +14,23 @@ import (
 
 	"github.com/samborkent/uuidv7"
 )
+
+func PGConnectionString() (string, error) {
+	pgUser := os.Getenv("POSTGRES_USER")
+	pgPassword := os.Getenv("POSTGRES_PASSWORD")
+	pgPort := os.Getenv("POSTGRES_PORT")
+	pgAddress := os.Getenv("POSTGRES_ADDRESS")
+
+	if pgUser == "" {
+		return "", errors.New("pgUser not provided")
+	}
+	if pgPassword == "" {
+		return "", errors.New("pgPassword not provided")
+	}
+
+	connectionString := fmt.Sprintf("postgres://%s:%s@%s:%s/", pgUser, pgPassword, pgAddress, pgPort)
+	return connectionString, nil
+}
 
 func UUIDFromString(s string) (uuidv7.UUID, error) {
 	// strip the hyphens

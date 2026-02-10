@@ -1,4 +1,4 @@
-package src
+package core
 
 import (
 	"context"
@@ -10,7 +10,7 @@ import (
 	"go.temporal.io/sdk/contrib/envconfig"
 )
 
-func LoadTemporalConfigs(profile string) client.Options {
+func LoadTemporalConfigs() client.Options {
 
 	// TODO get stage to insert into loading the config for devel, test, depl, etc.
 	// STAGE := os.Getenv("STAGE")
@@ -24,7 +24,7 @@ func LoadTemporalConfigs(profile string) client.Options {
 
 func StartWorkflow(task_queue_name string, workflow_ interface{}, args ...interface{}) (any, error) {
 
-	client_, err := client.Dial(LoadTemporalConfigs("test"))
+	client_, err := client.Dial(LoadTemporalConfigs())
 	if err != nil {
 		log.Println("Unable to create client", err)
 		return nil, err

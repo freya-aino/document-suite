@@ -3,10 +3,10 @@ package activities
 import (
 	"context"
 	"errors"
-	"io"
 	"net/http"
 	"os"
-	"workflow/src"
+	"time"
+	"workflow/core"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -16,7 +16,7 @@ import (
 
 func GetAllS3ObjectIDsInBucket(ctx context.Context, bucketName string) ([]string, error) {
 
-	client, err := src.S3Client()
+	client, err := core.S3Client()
 	if err != nil {
 		return []string{}, err
 	}
@@ -36,45 +36,41 @@ func GetAllS3ObjectIDsInBucket(ctx context.Context, bucketName string) ([]string
 	return out, nil
 }
 
-func S3GetDocument(ctx context.Context, bucketName string, documentId string) (string, error) {
-	client, err := src.S3Client()
+func S3GetPresignedDocumentURL(ctx context.Context, bucketName string, documentId string, expirationSeconds int) (string, error) {
+	client, err := core.S3Client()
 	if err != nil {
 		return "", err
 	}
 
-	resp, err := client.GetObject(ctx, &s3.GetObjectInput{
-		Bucket: aws.String(bucketName),
-		Key:    aws.String(documentId),
-	})
+	expires := time.Duration(expirationSeconds) * time.Second
+	presignClient := s3.NewPresignClient(client)
+	presigned, err := presignClient.PresignGetObject(
+		ctx,
+		&s3.GetObjectInput{
+			Bucket: aws.String(bucketName),
+			Key:    aws.String(documentId),
+		},
+		s3.WithPresignExpires(expires),
+	)
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
 
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", err
-	}
-
-	// write as tmp
-	location, err := src.WriteAsTemp(&data)
-	if err != nil {
-		return "", err
-	}
+	location := presigned.URL
 
 	return location, nil
 }
 
-func S3PutDocument(ctx context.Context, bucketName string, documentId string, documentPath string) error {
+func S3PutDocument(ctx context.Context, bucketName string, documentId string, tmpPath string) error {
 
 	// create client
-	client, err := src.S3Client()
+	client, err := core.S3Client()
 	if err != nil {
 		return err
 	}
 
 	// open document buffer
-	document, err := os.Open(documentPath)
+	document, err := os.Open(tmpPath)
 	if err != nil {
 		return err
 	}
@@ -95,7 +91,7 @@ func S3PutDocument(ctx context.Context, bucketName string, documentId string, do
 func S3DocumentExists(ctx context.Context, bucketName string, documentId string) (bool, error) {
 
 	// create client
-	client, err := src.S3Client()
+	client, err := core.S3Client()
 	if err != nil {
 		return true, err
 	}

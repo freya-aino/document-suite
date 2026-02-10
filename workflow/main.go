@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"os"
 	"workflow/activities"
-	"workflow/src"
+	"workflow/core"
 	"workflow/workflows"
 
 	"github.com/gin-gonic/gin"
@@ -15,7 +15,7 @@ import (
 )
 
 func startWorker(task_queue_name string) {
-	client, err := client.Dial(src.LoadTemporalConfigs("test"))
+	client, err := client.Dial(core.LoadTemporalConfigs())
 	if err != nil {
 		log.Fatalln("Unable to create client", err)
 	}
@@ -25,12 +25,12 @@ func startWorker(task_queue_name string) {
 	defer worker_.Stop()
 
 	worker_.RegisterWorkflow(workflows.HealthCheckWorkflow)
-	worker_.RegisterWorkflow(workflows.IngresFileWorkflow)
+	worker_.RegisterWorkflow(workflows.IngresDocumentWorkflow)
 
 	worker_.RegisterActivity(activities.CheckHealth)
 	worker_.RegisterActivity(activities.ComputeFileHash)
 
-	worker_.RegisterActivity(activities.S3GetDocument)
+	worker_.RegisterActivity(activities.S3GetPresignedDocumentURL)
 	worker_.RegisterActivity(activities.S3PutDocument)
 	worker_.RegisterActivity(activities.S3DocumentExists)
 
@@ -55,41 +55,10 @@ func main() {
 
 	// create http router
 	router := gin.Default()
-	// router.GET("/list_bucket", func(c *gin.Context) {
-	// 	tmpID := fmt.Sprintf("list_bucket-%d", time.Now().UnixNano())
-	// 	go src.StartWorkflow(
-	// 		client.StartWorkflowOptions{
-	// 			ID:        tmpID,
-	// 			TaskQueue: TASK_QUEUE_NAME,
-	// 		},
-	// 		src.OCRBucket,
-	// 		"documents", // bucket name
-	// 	)
-
-	// 	c.JSON(http.StatusOK, gin.H{"content": "workflow started"})
-	// })
-	// router.GET("/vectorize", func(c *gin.Context) {
-
-	// 	name := c.Query("name")
-
-	// 	log.Println("Tryping to vectorize ", name)
-
-	// 	go src.StartWorkflow(
-	// 		client.StartWorkflowOptions{
-	// 			ID:        tmpID,
-	// 			TaskQueue: TASK_QUEUE_NAME,
-	// 		},
-	// 		src.VectorizeObjectFromS3,
-	// 		"documents", // bucket name
-	// 		name,
-	// 	)
-
-	// 	c.JSON(http.StatusOK, gin.H{"content": "workflow started"})
-	// })
 
 	router.GET("/health", func(c *gin.Context) {
 
-		_, err := src.StartWorkflow(taskQueueName, workflows.HealthCheckWorkflow)
+		_, err := core.StartWorkflow(taskQueueName, workflows.HealthCheckWorkflow)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"status": "unhealthy"})
 			return
@@ -115,22 +84,25 @@ func main() {
 		// }
 
 		// extract byte data
-		fileData, err := src.GetFileData(file)
+		fileData, err := core.GetFileData(file)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err})
 		}
 
 		// write to tmp
-		tmpPath, err := src.WriteAsTemp(&fileData)
+		tmpPath, err := core.WriteAsTemp(&fileData)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err})
 		}
 
+		// get bucket name
+		bucketName := os.Getenv("DOCUMENT_S3_BUCKET")
+
 		// run workflow
-		ret, err := src.StartWorkflow(
+		ret, err := core.StartWorkflow(
 			taskQueueName,
-			workflows.IngresFileWorkflow,
-			"documents", // bucket_name
+			workflows.IngresDocumentWorkflow,
+			bucketName, // bucket_name
 			tmpPath,
 		)
 		if err != nil {

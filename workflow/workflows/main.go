@@ -4,6 +4,7 @@ import (
 	"time"
 	"workflow/activities"
 
+	"github.com/samborkent/uuidv7"
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
 )
@@ -47,7 +48,6 @@ WORKFLOWS TODO:
 	- create buckets
 	- migrate database
 	- etc.
-
 */
 
 // func VectorizeObjectFromS3(ctx workflow.Context, bucket_name string, obj_name string) (string, error) {
@@ -65,34 +65,41 @@ WORKFLOWS TODO:
 // 	return "", nil
 // }
 
-func IngresDocumentWorkflow(ctx workflow.Context, bucket_name string, tmpPath string) (string, error) {
+func IngresDocumentWorkflow(ctx workflow.Context, bucketName string, tmpPath string) (string, error) {
 	ctx = workflow.WithActivityOptions(ctx, activityOptionGenerator(SafeRetry))
 
-	// generate file hash for ID
-	var documentHash string
-	err := workflow.ExecuteActivity(ctx, activities.ComputeFileHash, tmpPath).Get(ctx, &documentHash)
+	// // generate file hash for ID
+	// var documentHash string
+	// err := workflow.ExecuteActivity(ctx, activities.ComputeFileHash, tmpPath).Get(ctx, &documentHash)
+	// if err != nil {
+	// 	return "", err
+	// }
+
+	// var documentExistsS3 bool
+	// err = workflow.ExecuteActivity(ctx, activities.S3DocumentExists, bucket_name, documentHash).Get(ctx, &documentExistsS3)
+	// if err != nil {
+	// 	return "", err
+	// }
+
+	tableName := "DocumentHub" // TODO - dont hardcode name or enter into migration
+
+	// set UUID
+	uuid := uuidv7.New()
+
+	// enter into S3
+	err := workflow.ExecuteActivity(ctx, activities.S3PutDocument, bucketName, uuid, tmpPath).Get(ctx, nil)
 	if err != nil {
 		return "", err
-	}
-
-	var documentExists bool
-	err = workflow.ExecuteActivity(ctx, activities.S3DocumentExists, bucket_name, documentHash).Get(ctx, &documentExists)
-	if err != nil {
-		return "", err
-	}
-
-	// if no duplicate exist, put into S3
-	if !documentExists {
-		err = workflow.ExecuteActivity(ctx, activities.S3PutDocument, bucket_name, documentHash, tmpPath).Get(ctx, nil)
-		if err != nil {
-			return "", err
-		}
-		return "no-duplicate", nil
 	}
 
 	// get the file type
+	// TODO
 
-	// check if exists in postgres and create (with UUID) if not
+	// create entry in Postgres
+	err = workflow.ExecuteActivity(ctx, activities.PGCreateDocument, tableName, bucketName, uuid).Get(ctx, nil)
+	if err != nil {
+		return "", err
+	}
 
 	// seperate pages
 
@@ -126,6 +133,7 @@ func IngresDocumentWorkflow(ctx workflow.Context, bucket_name string, tmpPath st
 // update vectorization status and version in PG
 
 // func QueryVectorDBWorkflow (tool)
+// func RemoveDuplicates
 
 func HealthCheckWorkflow(ctx workflow.Context) error {
 	ctx = workflow.WithActivityOptions(ctx, activityOptionGenerator(FastRetry))
