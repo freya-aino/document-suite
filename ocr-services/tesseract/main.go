@@ -133,9 +133,9 @@ func main() {
 		client.SetLanguage("eng")
 	})
 
-	port := os.Getenv("OCR_PORT")
-	if port == "" {
-		log.Fatalln("environment variable 'OCR_PORT' not set")
+	address := os.Getenv("OCR_ADDRESS")
+	if address == "" {
+		log.Fatalln("environment variable 'OCR_ADDRESS' not set")
 	}
-	router.Run(fmt.Sprintf("0.0.0.0:%s", port))
+	router.Run(address)
 }
