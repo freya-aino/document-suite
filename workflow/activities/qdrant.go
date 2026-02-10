@@ -2,20 +2,20 @@ package activities
 
 import (
 	"context"
-	src "workflow/src"
+	"workflow/core"
 
 	"github.com/qdrant/go-client/qdrant"
 )
 
 func QdrantCreateCollection(ctx context.Context, collectionName string, vectorSize uint64, distance qdrant.Distance) error {
 
-	client, err := src.QdrantClient()
+	client, err := core.QdrantClient()
 	if err != nil {
 		return err
 	}
 	defer client.Close()
 
-	client.CreateCollection(context.Background(), &qdrant.CreateCollection{
+	client.CreateCollection(ctx, &qdrant.CreateCollection{
 		CollectionName: collectionName,
 		VectorsConfig: qdrant.NewVectorsConfig(&qdrant.VectorParams{
 			Size:     vectorSize,
@@ -26,9 +26,9 @@ func QdrantCreateCollection(ctx context.Context, collectionName string, vectorSi
 	return nil
 }
 
-func QdrantPutIntoCollection(ctx context.Context, collectionName string, documentChunk src.DocumentChunk, vector []float32) error {
+func QdrantPutIntoCollection(ctx context.Context, collectionName string, documentChunk core.DocumentChunk, vector []float32) error {
 
-	client, err := src.QdrantClient()
+	client, err := core.QdrantClient()
 	if err != nil {
 		return err
 	}
@@ -61,7 +61,7 @@ func QdrantPutIntoCollection(ctx context.Context, collectionName string, documen
 
 // TODO - mainly for collection exists or similar parameters
 // func GetCollectionInfo(ctx context.Context, collectionName string) {
-// 	client, err := src.QdrantClient()
+// 	client, err := core.QdrantClient()
 // 	if err != nil {
 // 		return err
 // 	}
@@ -73,21 +73,21 @@ func QdrantPutIntoCollection(ctx context.Context, collectionName string, documen
 // 	// info.SegmentsCount
 // }
 
-func QdrantQueryCollection(ctx context.Context, collectionName string, queryVector []float32) ([]src.VectorQueryResult, error) {
+func QdrantQueryCollection(ctx context.Context, collectionName string, queryVector []float32) ([]core.VectorQueryResult, error) {
 
-	client, err := src.QdrantClient()
+	client, err := core.QdrantClient()
 	if err != nil {
 		return nil, err
 	}
 	defer client.Close()
 
-	searchResult, err := client.Query(context.Background(), &qdrant.QueryPoints{
+	searchResult, err := client.Query(ctx, &qdrant.QueryPoints{
 		CollectionName: collectionName,
 		Query:          qdrant.NewQuery(queryVector...),
 		// Filter: , // TODO - add a filter option (for example for filtering for document, document type, etc.)
 	})
 
-	var results []src.VectorQueryResult
+	var results []core.VectorQueryResult
 	for _, ell := range searchResult {
 		// ell.OrderValue
 		// ell.Payload
@@ -97,19 +97,19 @@ func QdrantQueryCollection(ctx context.Context, collectionName string, queryVect
 		// ell.ShardKey
 		// ell.Vectors
 
-		uuid, err := src.UUIDFromString(ell.Payload["UUID"].GetStringValue())
+		uuid, err := core.UUIDFromString(ell.Payload["UUID"].GetStringValue())
 		if err != nil {
 			return nil, err
 		}
-		parentUuid, err := src.UUIDFromString(ell.Payload["ParentDocumentUUID"].GetStringValue())
+		parentUuid, err := core.UUIDFromString(ell.Payload["ParentDocumentUUID"].GetStringValue())
 		if err != nil {
 			return nil, err
 		}
 		content := ell.Payload["value"].GetStringValue()
 
-		results = append(results, src.VectorQueryResult{
+		results = append(results, core.VectorQueryResult{
 			Similarity: ell.Score,
-			DocumentChunk: src.DocumentChunk{
+			DocumentChunk: core.DocumentChunk{
 				UUID:               uuid,
 				ParentDocumentUUID: parentUuid,
 				Content:            content,

@@ -1,0 +1,26 @@
+version: "2"
+cloud:
+  organization: ""
+  project: ""
+  hostname: ""
+servers: []
+sql:
+  - engine: "postgresql"
+    schema: "./migrations"
+    queries: "./queries"
+    database:
+      uri: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_ADDRESS}:5432/${POSTGRES_DB}
+    gen:
+      go:
+        package: "datamodel"
+        out: "datamodel"
+        emit_exact_table_names: true
+        emit_empty_slices: true
+        overrides:
+          - db_type: "uuid"
+            go_type:
+              import: "github.com/samborkent/uuidv7"
+              type: "UUID"
+plugins: []
+rules: []
+options: {}

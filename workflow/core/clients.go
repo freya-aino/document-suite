@@ -1,9 +1,8 @@
-package src
+package core
 
 import (
 	"database/sql"
 	"errors"
-	"fmt"
 	"os"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -14,20 +13,12 @@ import (
 )
 
 func PostgresClient() (*sql.DB, error) {
-
-	pgUser := os.Getenv("POSTGRES_USER")
-	pgPassword := os.Getenv("POSTGRES_PASSWORD")
-	pgPort := os.Getenv("POSTGRES_PORT")
-
-	if pgUser == "" {
-		return nil, errors.New("pgUser not provided")
+	// TODO - ?sslmode=enable
+	connStr, err := PGConnectionString()
+	if err != nil {
+		return nil, err
 	}
-	if pgPassword == "" {
-		return nil, errors.New("pgPassword not provided")
-	}
-
-	connectionString := fmt.Sprintf("postgres://%s:%s@postgres:%s/", pgUser, pgPassword, pgPort) // TODO - add ssl
-	db, err := sql.Open("postgres", connectionString)
+	db, err := sql.Open("postgres", connStr)
 	if err != nil {
 		return nil, err
 	}
@@ -38,7 +29,7 @@ func PostgresClient() (*sql.DB, error) {
 func S3Client() (*s3.Client, error) {
 
 	region := os.Getenv("AWS_REGION")
-	endpoint := fmt.Sprintf("http://%s:%s", os.Getenv("RUSTFS_ADDRESS"), os.Getenv("RUSTFS_PORT"))
+	endpoint := os.Getenv("S3_ENDPOINT_URL")
 	accessKeyID := os.Getenv("RUSTFS_ACCESS_KEY")
 	secretAccessKey := os.Getenv("RUSTFS_SECRET_KEY")
 
