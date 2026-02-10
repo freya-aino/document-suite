@@ -17,4 +17,8 @@ dependencies = [
     "langgraph-sdk>=0.3.3",
     "mcp[cli]>=1.26.0",
     "streamlit>=1.53.1",
+    "pandas>=2.3.3",
+    "mlflow[genai]>=3.9.0",
+    "openai>=2.16.0",
+    "pydantic>=2.12.5",
 ]
