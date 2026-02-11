@@ -84,7 +84,7 @@ func IngresDocumentWorkflow(ctx workflow.Context, bucketName string, tmpPath str
 	tableName := "DocumentHub" // TODO - dont hardcode name or enter into migration
 
 	// set UUID
-	uuid := uuidv7.New()
+	uuid := uuidv7.New().String()
 
 	// enter into S3
 	err := workflow.ExecuteActivity(ctx, activities.S3PutDocument, bucketName, uuid, tmpPath).Get(ctx, nil)
@@ -107,7 +107,7 @@ func IngresDocumentWorkflow(ctx workflow.Context, bucketName string, tmpPath str
 
 	// update postgres with individual page references
 
-	return "duplicate", nil
+	return "", nil
 }
 
 // func OCRWorkflow
