@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -33,6 +32,8 @@ func startWorker(task_queue_name string) {
 	worker_.RegisterActivity(activities.S3GetPresignedDocumentURL)
 	worker_.RegisterActivity(activities.S3PutDocument)
 	worker_.RegisterActivity(activities.S3DocumentExists)
+
+	worker_.RegisterActivity(activities.PGCreateDocument)
 
 	worker_.RegisterActivity(activities.QdrantCreateCollection)
 	worker_.RegisterActivity(activities.QdrantQueryCollection)
@@ -113,9 +114,9 @@ func main() {
 		c.JSON(http.StatusOK, gin.H{"note": ret})
 	})
 
-	port := os.Getenv("WORKFLOW_PORT")
-	if port == "" {
-		log.Fatalln("'WORKFLOW_PORT' environment variable not set")
+	bind := os.Getenv("WORKFLOW_BIND")
+	if bind == "" {
+		log.Fatalln("'WORKFLOW_BIND' environment variable not set")
 	}
-	router.Run(fmt.Sprintf("0.0.0.0:%s", port))
+	router.Run(bind)
 }

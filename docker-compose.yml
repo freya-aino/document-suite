@@ -26,8 +26,8 @@ services:
       - rustfs
       - qdrant
     environment:
-      AWS_REGION: ${AWS_REGION}
-      RUSTFS_PORT: ${RUSTFS_PORT}
+      WORKFLOW_BIND: ${WORKFLOW_ADDRESS}:${WORKFLOW_PORT}
+
       TEMPORAL_ADDRESS: ${TEMPORAL_CONTAINER_NAME}:7233
       TEMPORAL_NAMESPACE: default
       
@@ -37,10 +37,10 @@ services:
       POSTGRES_PORT: 5432
       POSTGRES_DB: ${POSTGRES_DB} # TODO - change to its own databse based on migration {POSTGRES_WORKFLOW_DB}
       
-      RUSTFS_ADDRESS: ${RUSTFS_CONTAINER_NAME}
+      AWS_REGION: ${AWS_REGION}
+      S3_ENDPOINT_URL: ${S3_ENDPOINT_URL}
       RUSTFS_ACCESS_KEY: ${RUSTFS_ACCESS_KEY}
       RUSTFS_SECRET_KEY: ${RUSTFS_SECRET_KEY}
-      WORKFLOW_PORT: ${WORKFLOW_PORT}
 
       DOCUMENT_S3_BUCKET: ${DOCUMENT_S3_BUCKET}
     ports:
@@ -104,7 +104,7 @@ services:
       context: ocr-services/tesseract
     container_name: ocr
     environment:
-      OCR_ADDRESS: ${OCR_ADDRESS}
+      OCR_ADDRESS: ${OCR_ADDRESS}:${OCR_PORT}
 
   mlflow:
     # TODO - use a dedicated postgres database instead of maindb

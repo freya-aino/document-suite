@@ -2,33 +2,25 @@ package activities
 
 import (
 	"context"
-	"errors"
-	"fmt"
-	"os"
+	"log"
 	"workflow/core"
-
-	"github.com/samborkent/uuidv7"
 )
 
-func PGCreateDocument(ctx context.Context, tableName string, s3BucketName string, documentUUID uuidv7.UUID) error {
+func PGCreateDocument(ctx context.Context, tableName string, s3BucketName string, documentUUID string) error {
 
-	pgdb := os.Getenv("POSTGRES_DB")
-	if pgdb == "" {
-		return errors.New("'POSGRES_DB' environment variable not found")
-	}
-
-	client, err := core.PostgresClient()
+	conn, err := core.PostgresClient(ctx)
 	if err != nil {
 		return err
 	}
-	defer client.Close()
+	defer conn.Close(ctx)
 
-	_, err = client.Query(fmt.Sprintf(
-		"INSERT INTO %s", tableName,
-	))
-	if err != nil {
-		return err
-	}
+	// _, err = client.Query(fmt.Sprintf(
+	// 	"INSERT INTO %s", tableName,
+	// ))
+	// if err != nil {
+	// 	return err
+	// }
+	log.Println("PG Entry created (TODO)")
 
 	return nil
 }

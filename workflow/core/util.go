@@ -20,15 +20,25 @@ func PGConnectionString() (string, error) {
 	pgPassword := os.Getenv("POSTGRES_PASSWORD")
 	pgPort := os.Getenv("POSTGRES_PORT")
 	pgAddress := os.Getenv("POSTGRES_ADDRESS")
+	pgDB := os.Getenv("POSTGRES_DB")
 
 	if pgUser == "" {
-		return "", errors.New("pgUser not provided")
+		return "", errors.New("'POSTGRES_USER' env variable not provided")
 	}
 	if pgPassword == "" {
-		return "", errors.New("pgPassword not provided")
+		return "", errors.New("'POSTGRES_PASSWORD' env variable not provided")
+	}
+	if pgPort == "" {
+		return "", errors.New("'POSTGRES_PORT' env variable not provided")
+	}
+	if pgAddress == "" {
+		return "", errors.New("'POSTGRES_ADDRESS' env variable not provided")
+	}
+	if pgDB == "" {
+		return "", errors.New("'POSTGRES_DB' env variable not provided")
 	}
 
-	connectionString := fmt.Sprintf("postgres://%s:%s@%s:%s/", pgUser, pgPassword, pgAddress, pgPort)
+	connectionString := fmt.Sprintf("postgres://%s:%s@%s:%s/%s", pgUser, pgPassword, pgAddress, pgPort, pgDB)
 	return connectionString, nil
 }
 

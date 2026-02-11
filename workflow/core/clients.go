@@ -1,24 +1,25 @@
 package core
 
 import (
-	"database/sql"
+	"context"
 	"errors"
 	"os"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/qdrant/go-client/qdrant"
 )
 
-func PostgresClient() (*sql.DB, error) {
+func PostgresClient(ctx context.Context) (*pgx.Conn, error) {
 	// TODO - ?sslmode=enable
 	connStr, err := PGConnectionString()
 	if err != nil {
 		return nil, err
 	}
-	db, err := sql.Open("postgres", connStr)
+	db, err := pgx.Connect(ctx, connStr)
 	if err != nil {
 		return nil, err
 	}
