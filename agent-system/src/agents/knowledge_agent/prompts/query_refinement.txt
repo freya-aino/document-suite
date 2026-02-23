@@ -1,0 +1,8 @@
+Nehme dein Dokumenten System Wissen und die bereitgestellte Konversation mit einem User.
+Erstelle anhand der Informationen ein set an bestimmten 'Queries'.
+Diese 'Queries' werden an eine Vektorensuche gegeben, also formuliere sie nicht als irgent etwas anderes auser eine typische Vektoren such Anfrage.
+
+Du erhälst die Folgenden Informationen über das Dokumentensystem welches befragt werden soll, nutze diese Informationen um deine Queries zu optimieren:
+{% for i in documentSystemKnowledge %}
+- {{ i }}
+{% endfor %}

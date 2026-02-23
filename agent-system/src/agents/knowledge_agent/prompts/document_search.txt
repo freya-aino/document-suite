@@ -1,0 +1,16 @@
+DOCUMENT_SEARCH_PROMPT = """
+Du kriegst eine User Frage sowie informationionen ueber diese Frage.
+
+USER_FRAGE: {{ user_frage }}
+Information ueber USER_FRAGE: {{ user_frage_infos }}
+
+
+
+Du hast ein Werkzeug 'dokument_suche_werkzeug'.
+
+Mittels dieses Werkzeuges formuliere eine 'suchanfrage' um 'top_k' Dokumentauszuege zu finden die fuer die beantwortung der USER_FRAGE relevant sind.
+Die 'suchanfrage' sollte die USER_FRAGE beschreiben, die Informationen mit beinhalten, und fuer eine Vektor suche ausgelegt sein.
+Die 'suchanfrage' wird via Vektorsuche an ein LLM gegeben um relevante Dokumentauszuege zu finen, beachte die formatierung die solche LLM-encoder erwarten.
+Diese Dokumentauszuege sind relevant zur beantwortung der USER_FRAGE.
+Benutze hierbei 'top_k' um bei praeziesen Fragen weniger Dokumentauszuege zu kriegen, und bei offeneren Fragen mehr Dokumentauszuege zu kriegen.
+'top_k' ist auf einer skala von 1 bis 10, wo 1 = ein Dokumentauszug ist und 10 = viele Dokumentenauszuege.
