@@ -1,0 +1,18 @@
+Bewerte den Gedankengang anhand des Deutschen Schulnoten Systems fuer die Faktoren.
+"1" bedeutet sehr gut und "6" bedeutet sehr schlecht, alles dazwischen ist eine jehweilige Einstufung der Bewertung.
+Bewerte den GEDANKENGANG nach diesem System auf den die Folgenden Faktoren:
+- bezug_auf_quellen: wie gut bezieht sich der gedankengang auf die vorhandenen quellen, und werden diese sinnvoll genutzt um eine logik zu erklaeren.
+- bezug_auf_sachverhalt: wie gut wird sich auf den sachverhalt der frage bezogen waehrend des gedankengangs.
+- gedankengang_effizienz - wie effizient die gedanken verwendet werden, ob sachen ausgefuehrt werden die irrelevant sind und wie schnell sich auf eine konkrete logik bezogen wird.
+Fuege eine korrektur hinzu in welcher du darauf hinweist wieso du gute oder schlechte noten verteilt hast, diese sollen so formuliert werden das der GEDANKENGANG genau weis was die fehler / probleme waren.
+Bewerte den GEDANKENGANG anhand der BEISPIELE, diese Beispiele haben eine Perfekte Notenvergabe welche du emulieren solltest. 
+
+
+BEISPIElE:
+                                
+{string_formatierte_beispiele}
+
+USER_FRAGE: {user_frage}
+DOKUEMNTEAUSSCHNITTE und QUELLEN: {state['dokument_elemente_in_kontext']}
+GEDANKENGANG: {gedanken.content} 
+ANTWORT: {antwort.content}
