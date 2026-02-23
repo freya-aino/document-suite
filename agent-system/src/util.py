@@ -1,23 +1,13 @@
-# import mcp
-# import asyncio
-# import pandas as pd
-
-# from typing import AsyncGenerator
-
-# from mcp.client.streamable_http import streamable_http_client
-# from mcp import ClientSession
-
-# from langchain_mcp_adapters.tools import load_mcp_tools
-# from langchain.agents import create_agent
-# from langchain_anthropic import ChatAnthropic
-# from langchain.messages import HumanMessage, AIMessage, AIMessageChunk
-
-# from typing import List
-
-
-from mlflow import genai
-from pydantic import BaseModel
 import os
+import dotenv
+import mlflow
+
+
+def init_mlflow():    
+    print("mlflow - initializing...")
+    mlflow.set_tracking_uri(f"http://{os.environ['MLFLOW_HOST']}:{os.environ['MLFLOW_PORT']}") 
+    mlflow.set_experiment("test experiment") # TODO - dont hardcode experiment
+    print("mlflow - initialized!")
 
 
 # def evaluate_examples(examples: pd.DataFrame):
