@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"os"
 	"time"
-	"workflow/core"
+	"workflow/shared"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -16,7 +16,7 @@ import (
 
 func GetAllS3ObjectIDsInBucket(ctx context.Context, bucketName string) ([]string, error) {
 
-	client, err := core.S3Client()
+	client, err := shared.S3Client()
 	if err != nil {
 		return []string{}, err
 	}
@@ -37,7 +37,7 @@ func GetAllS3ObjectIDsInBucket(ctx context.Context, bucketName string) ([]string
 }
 
 func S3GetPresignedDocumentURL(ctx context.Context, bucketName string, documentId string, expirationSeconds int) (string, error) {
-	client, err := core.S3Client()
+	client, err := shared.S3Client()
 	if err != nil {
 		return "", err
 	}
@@ -64,7 +64,7 @@ func S3GetPresignedDocumentURL(ctx context.Context, bucketName string, documentI
 func S3PutDocument(ctx context.Context, bucketName string, documentId string, tmpPath string) error {
 
 	// create client
-	client, err := core.S3Client()
+	client, err := shared.S3Client()
 	if err != nil {
 		return err
 	}
@@ -91,7 +91,7 @@ func S3PutDocument(ctx context.Context, bucketName string, documentId string, tm
 func S3DocumentExists(ctx context.Context, bucketName string, documentId string) (bool, error) {
 
 	// create client
-	client, err := core.S3Client()
+	client, err := shared.S3Client()
 	if err != nil {
 		return true, err
 	}

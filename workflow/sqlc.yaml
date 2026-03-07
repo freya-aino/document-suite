@@ -6,14 +6,14 @@ cloud:
 servers: []
 sql:
   - engine: "postgresql"
-    schema: "./migrations"
-    queries: "./queries"
+    schema: "./migration/migrations"
+    queries: "./migration/queries"
     database:
-      uri: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_ADDRESS}:5432/${POSTGRES_DB}
+      uri: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_CONTAINER_NAME}:5432/${POSTGRES_DB}
     gen:
       go:
         package: "datamodel"
-        out: "datamodel"
+        out: "./datamodel"
         emit_exact_table_names: true
         emit_empty_slices: true
         overrides:

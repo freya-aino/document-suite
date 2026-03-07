@@ -2,14 +2,16 @@ package activities
 
 import (
 	"context"
-	"workflow/core"
 
 	"github.com/qdrant/go-client/qdrant"
+
+	"workflow/datamodel"
+	"workflow/shared"
 )
 
 func QdrantCreateCollection(ctx context.Context, collectionName string, vectorSize uint64, distance qdrant.Distance) error {
 
-	client, err := core.QdrantClient()
+	client, err := shared.QdrantClient()
 	if err != nil {
 		return err
 	}
@@ -26,9 +28,9 @@ func QdrantCreateCollection(ctx context.Context, collectionName string, vectorSi
 	return nil
 }
 
-func QdrantPutIntoCollection(ctx context.Context, collectionName string, documentChunk core.DocumentChunk, vector []float32) error {
+func QdrantPutIntoCollection(ctx context.Context, collectionName string, documentChunk datamodel.DocumentChunk, vector []float32) error {
 
-	client, err := core.QdrantClient()
+	client, err := shared.QdrantClient()
 	if err != nil {
 		return err
 	}
@@ -73,9 +75,9 @@ func QdrantPutIntoCollection(ctx context.Context, collectionName string, documen
 // 	// info.SegmentsCount
 // }
 
-func QdrantQueryCollection(ctx context.Context, collectionName string, queryVector []float32) ([]core.VectorQueryResult, error) {
+func QdrantQueryCollection(ctx context.Context, collectionName string, queryVector []float32) ([]datamodel.VectorQueryResult, error) {
 
-	client, err := core.QdrantClient()
+	client, err := shared.QdrantClient()
 	if err != nil {
 		return nil, err
 	}
@@ -87,7 +89,7 @@ func QdrantQueryCollection(ctx context.Context, collectionName string, queryVect
 		// Filter: , // TODO - add a filter option (for example for filtering for document, document type, etc.)
 	})
 
-	var results []core.VectorQueryResult
+	var results []datamodel.VectorQueryResult
 	for _, ell := range searchResult {
 		// ell.OrderValue
 		// ell.Payload
@@ -97,19 +99,19 @@ func QdrantQueryCollection(ctx context.Context, collectionName string, queryVect
 		// ell.ShardKey
 		// ell.Vectors
 
-		uuid, err := core.UUIDFromString(ell.Payload["UUID"].GetStringValue())
+		uuid, err := shared.UUIDFromString(ell.Payload["UUID"].GetStringValue())
 		if err != nil {
 			return nil, err
 		}
-		parentUuid, err := core.UUIDFromString(ell.Payload["ParentDocumentUUID"].GetStringValue())
+		parentUuid, err := shared.UUIDFromString(ell.Payload["ParentDocumentUUID"].GetStringValue())
 		if err != nil {
 			return nil, err
 		}
 		content := ell.Payload["value"].GetStringValue()
 
-		results = append(results, core.VectorQueryResult{
+		results = append(results, datamodel.VectorQueryResult{
 			Similarity: ell.Score,
-			DocumentChunk: core.DocumentChunk{
+			DocumentChunk: datamodel.DocumentChunk{
 				UUID:               uuid,
 				ParentDocumentUUID: parentUuid,
 				Content:            content,
