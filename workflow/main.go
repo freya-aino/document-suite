@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"os"
 	"workflow/activities"
-	"workflow/core"
+	"workflow/shared"
 	"workflow/workflows"
 
 	"github.com/gin-gonic/gin"
@@ -14,7 +14,7 @@ import (
 )
 
 func startWorker(task_queue_name string) {
-	client, err := client.Dial(core.LoadTemporalConfigs())
+	client, err := client.Dial(shared.LoadTemporalConfigs())
 	if err != nil {
 		log.Fatalln("Unable to create client", err)
 	}
@@ -59,7 +59,7 @@ func main() {
 
 	router.GET("/health", func(c *gin.Context) {
 
-		_, err := core.StartWorkflow(taskQueueName, workflows.HealthCheckWorkflow)
+		_, err := shared.StartWorkflow(taskQueueName, workflows.HealthCheckWorkflow)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"status": "unhealthy"})
 			return
@@ -85,13 +85,13 @@ func main() {
 		// }
 
 		// extract byte data
-		fileData, err := core.GetFileData(file)
+		fileData, err := shared.GetFileData(file)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err})
 		}
 
 		// write to tmp
-		tmpPath, err := core.WriteAsTemp(&fileData)
+		tmpPath, err := shared.WriteAsTemp(&fileData)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err})
 		}
@@ -100,7 +100,7 @@ func main() {
 		bucketName := os.Getenv("DOCUMENT_S3_BUCKET")
 
 		// run workflow
-		ret, err := core.StartWorkflow(
+		ret, err := shared.StartWorkflow(
 			taskQueueName,
 			workflows.IngresDocumentWorkflow,
 			bucketName, // bucket_name

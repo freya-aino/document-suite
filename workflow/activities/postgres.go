@@ -3,12 +3,12 @@ package activities
 import (
 	"context"
 	"log"
-	"workflow/core"
+	"workflow/shared"
 )
 
 func PGCreateDocument(ctx context.Context, tableName string, s3BucketName string, documentUUID string) error {
 
-	conn, err := core.PostgresClient(ctx)
+	conn, err := shared.PostgresClient(ctx)
 	if err != nil {
 		return err
 	}
