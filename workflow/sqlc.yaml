@@ -8,8 +8,6 @@ sql:
   - engine: "postgresql"
     schema: "./migration/migrations"
     queries: "./migration/queries"
-    database:
-      uri: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_CONTAINER_NAME}:5432/${POSTGRES_DB}
     gen:
       go:
         package: "datamodel"
