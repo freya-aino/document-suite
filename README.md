@@ -1,16 +1,11 @@
 # Document Information Extraction
 
+- [ ] Document detection
+- [ ] Document classification
+
+- [ ] Classical OCR
+- [ ] VLM OCR
+
 ## Named Entety Recognition
-
 ## Relation Extraction
-
 ## Event Extraction
-
-# Techinques
-
-## Few-shot
-## Zero-shot
-## Data Augmentation
-## Prompt Design
-## Constrained Decoding Generation
-## Supervised Fine-tuning
