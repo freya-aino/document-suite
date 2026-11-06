@@ -9,6 +9,14 @@ request rate, independently of the workers.
 All endpoints are tenant-scoped; the tenant comes from the auth token (mTLS or JWT from
 your service-api — to be decided), never from the body.
 
+**Current state:** until auth is decided, the tenant is read from the `X-VS-Tenant`
+header (`[A-Za-z0-9_-]+`), which any caller can set. Keep the API on a trusted network
+until this is replaced.
+
+Implemented: `POST /v1/documents` (JSON variant), `GET /v1/jobs/{job_id}`, `/healthz`,
+`/readyz`. The others return `501`. Not yet: multipart upload, `Idempotency-Key`,
+interactive back-pressure (`429`), `/metrics`.
+
 ### `POST /v1/documents`
 
 Upload one document.
@@ -25,6 +33,9 @@ Upload one document.
   | `dag_list_version` | no | active | pin for reproducibility |
   | `external_ref` | no | — | your id, stored in `sat_document_meta` |
 
+- `source_uri` must point under `originals/<tenant>/` or `inbox/<tenant>/` (as
+  `s3://<bucket>/<key>` or a bare key), so a tenant cannot submit another tenant's
+  files; the object must exist (`400` otherwise).
 - Behaviour: stream upload to `originals/<tenant>/<sha256>` (hashing while streaming),
   create `ops.jobs` row (`received`), publish `Task::Ingest` (dedup id `<job_id>:ingest`).
 - Response `202`: `{ job_id, document_hk, run_id, status_url }`.

@@ -1,16 +1,23 @@
 //! Public HTTP API. See `SPEC.md`.
 
+use std::str::FromStr;
+use std::sync::Arc;
+
 use axum::{
-    extract::{Path, State},
-    http::StatusCode,
+    extract::{FromRequestParts, Path, State},
+    http::{request::Parts, StatusCode},
     routing::{get, post},
     Json, Router,
 };
 use clap::Parser;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 
-use vs_core::{LanguageTag, Priority, Profile};
+use vs_core::{JobSpec, LanguageTag, Priority, Profile, RunId, Task, TenantId};
+use vs_infra::blob::{key_from_uri, BlobStore};
+use vs_infra::queue::{Lane, NatsBus, Role, TaskBus};
+use vs_infra::ObjectBlobStore;
+use vs_vault::ops::Ops;
 
 #[derive(Parser)]
 struct Args {
@@ -22,10 +29,10 @@ struct Args {
 
 #[derive(Clone)]
 struct AppState {
-    // pool: sqlx::PgPool,
-    // bus: Arc<dyn vs_infra::TaskBus>,
-    // blob: Arc<dyn vs_infra::BlobStore>,
-    _cfg: Arc<vs_infra::Config>,
+    ops: Arc<Ops>,
+    bus: Arc<dyn TaskBus>,
+    blob: Arc<dyn BlobStore>,
+    bucket: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -49,12 +56,55 @@ struct Accepted {
     status_url: String,
 }
 
+type ApiError = (StatusCode, String);
+
+fn internal(e: impl std::fmt::Display) -> ApiError {
+    tracing::error!(error = %e, "request failed");
+    (StatusCode::INTERNAL_SERVER_ERROR, "internal error".into())
+}
+
+/// Calling tenant.
+///
+/// PLACEHOLDER until the auth decision (mTLS or JWT from the service-api, SPEC.md):
+/// read from the `X-VS-Tenant` header, which any caller can set. Do not expose the API
+/// beyond the trusted network in this state.
+struct Tenant(TenantId);
+
+impl<S: Send + Sync> FromRequestParts<S> for Tenant {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(parts: &mut Parts, _: &S) -> Result<Self, Self::Rejection> {
+        let t = parts
+            .headers
+            .get("x-vs-tenant")
+            .and_then(|v| v.to_str().ok())
+            .map(str::trim)
+            .filter(|t| !t.is_empty() && t.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+            .ok_or((StatusCode::UNAUTHORIZED, "missing or invalid X-VS-Tenant".to_string()))?;
+        Ok(Tenant(TenantId(t.to_string())))
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     let cfg = vs_infra::Config::load(&args.config)?;
     vs_infra::telemetry::init(&cfg.telemetry);
-    let state = AppState { _cfg: Arc::new(cfg) };
+
+    let mut pg = PgConnectOptions::from_str(&cfg.postgres.url)?;
+    if let Some(pw) = &cfg.postgres.password {
+        pg = pg.password(pw);
+    }
+    let pool = PgPoolOptions::new().max_connections(cfg.postgres.max_connections).connect_with(pg).await?;
+    vs_vault::MIGRATOR.run(&pool).await?;
+    let nats = NatsBus::connect(&cfg.bus.nats_url).await?;
+    nats.ensure_topology().await?;
+    let state = AppState {
+        ops: Arc::new(Ops { pool }),
+        bus: Arc::new(nats),
+        blob: Arc::new(ObjectBlobStore::s3(&cfg.blob)?),
+        bucket: cfg.blob.bucket.clone(),
+    };
 
     let app = Router::new()
         .route("/v1/documents", post(create_document))
@@ -75,23 +125,99 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// JSON variant only in the scaffold; multipart streaming upload is listed in SPEC.md.
-async fn create_document(State(_s): State<AppState>, Json(opts): Json<UploadOptions>) -> Result<(StatusCode, Json<Accepted>), (StatusCode, String)> {
-    let Some(_uri) = opts.source_uri.as_ref() else {
-        return Err((StatusCode::BAD_REQUEST, "source_uri required (multipart upload not wired yet)".into()));
+/// Keys a tenant may reference as `source_uri`.
+fn tenant_may_read(key: &str, tenant: &TenantId) -> bool {
+    let t = tenant.as_str();
+    !key.contains("..") && (key.starts_with(&format!("originals/{t}/")) || key.starts_with(&format!("inbox/{t}/")))
+}
+
+/// JSON variant: the original is already in the bucket under the tenant's prefix.
+/// Multipart streaming upload is still to do (SPEC.md).
+async fn create_document(
+    State(s): State<AppState>,
+    Tenant(tenant): Tenant,
+    Json(opts): Json<UploadOptions>,
+) -> Result<(StatusCode, Json<Accepted>), ApiError> {
+    let uri = opts
+        .source_uri
+        .ok_or((StatusCode::BAD_REQUEST, "source_uri required (multipart upload not implemented yet)".into()))?;
+    let key = key_from_uri(&uri, &s.bucket).to_string();
+    if !tenant_may_read(&key, &tenant) {
+        return Err((StatusCode::FORBIDDEN, format!("source_uri must be under originals/{0}/ or inbox/{0}/", tenant.as_str())));
+    }
+    if !s.blob.exists(&key).await.map_err(internal)? {
+        return Err((StatusCode::BAD_REQUEST, format!("object not found: {key}")));
+    }
+
+    let (job_id, run_id) = (uuid::Uuid::now_v7(), RunId::new());
+    let spec = JobSpec {
+        tenant,
+        language: opts.language,
+        priority: opts.priority,
+        profile: opts.profile,
+        dag_list_version: opts.dag_list_version,
+        source_uri: key,
+        external_ref: opts.external_ref,
     };
-    let _ = (&opts.language, opts.priority, opts.profile, &opts.dag_list_version, &opts.external_ref);
-    // 1. verify object exists, read sha256 (or compute)  2. insert ops.jobs  3. publish Task::Ingest
-    Err((StatusCode::NOT_IMPLEMENTED, "create_document".into()))
+    s.ops.create_job(job_id, None, run_id, &spec).await.map_err(internal)?;
+    let task = Task::Ingest { job_id, run_id, spec: spec.clone() };
+    if let Err(e) = s.bus.publish(Role::Ingest, Lane::from(spec.priority), &task, &format!("{job_id}:ingest")).await {
+        let _ = s.ops.set_state(job_id, vs_core::JobState::Failed, Some("could not enqueue ingest")).await;
+        tracing::error!(%job_id, error = %e, "enqueue failed");
+        return Err((StatusCode::SERVICE_UNAVAILABLE, "task bus unavailable, retry later".into()));
+    }
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(Accepted { job_id, document_hk: None, run_id: run_id.0, status_url: format!("/v1/jobs/{job_id}") }),
+    ))
+}
+
+#[derive(Serialize)]
+struct JobStatus {
+    job_id: uuid::Uuid,
+    state: String,
+    document_hk: Option<String>,
+    run_id: uuid::Uuid,
+    pages_total: Option<i32>,
+    pages_done: i32,
+    pages_failed: i32,
+    error: Option<String>,
+    created_at: chrono::DateTime<chrono::Utc>,
+    updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+async fn get_job(State(s): State<AppState>, Tenant(tenant): Tenant, Path(job_id): Path<uuid::Uuid>) -> Result<Json<JobStatus>, ApiError> {
+    let j = s.ops.get_job(&tenant, job_id).await.map_err(internal)?.ok_or((StatusCode::NOT_FOUND, "job not found".into()))?;
+    Ok(Json(JobStatus {
+        job_id: j.job_id,
+        state: j.state,
+        document_hk: j.document_hk,
+        run_id: j.run_id.0,
+        pages_total: j.pages_total,
+        pages_done: j.pages_done,
+        pages_failed: j.pages_failed,
+        error: j.error,
+        created_at: j.created_at,
+        updated_at: j.updated_at,
+    }))
+}
+
+/// Postgres and blob store reachable (the bus connection is checked at startup and
+/// reconnects on its own).
+async fn readyz(State(s): State<AppState>) -> (StatusCode, &'static str) {
+    let pg = sqlx::query("SELECT 1").execute(&s.ops.pool).await.is_ok();
+    let blob = s.blob.exists("readyz-probe").await.is_ok();
+    match (pg, blob) {
+        (true, true) => (StatusCode::OK, "ready"),
+        (false, _) => (StatusCode::SERVICE_UNAVAILABLE, "postgres unreachable"),
+        (_, false) => (StatusCode::SERVICE_UNAVAILABLE, "blob store unreachable"),
+    }
 }
 
 async fn create_batch(State(_s): State<AppState>) -> (StatusCode, &'static str) {
     (StatusCode::NOT_IMPLEMENTED, "create_batch")
 }
 
-async fn get_job(State(_s): State<AppState>, Path(_job_id): Path<uuid::Uuid>) -> (StatusCode, &'static str) {
-    (StatusCode::NOT_IMPLEMENTED, "get_job")
-}
 
 async fn get_batch(State(_s): State<AppState>, Path(_batch_id): Path<uuid::Uuid>) -> (StatusCode, &'static str) {
     (StatusCode::NOT_IMPLEMENTED, "get_batch")
@@ -117,6 +243,3 @@ async fn activate_dag_list(State(_s): State<AppState>, Path(_version): Path<Stri
     (StatusCode::NOT_IMPLEMENTED, "activate_dag_list")
 }
 
-async fn readyz(State(_s): State<AppState>) -> (StatusCode, &'static str) {
-    (StatusCode::SERVICE_UNAVAILABLE, "readiness checks not wired")
-}
