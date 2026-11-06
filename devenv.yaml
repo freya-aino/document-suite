@@ -1,0 +1,20 @@
+# yaml-language-server: $schema=https://devenv.sh/devenv.schema.json
+inputs:
+  nixpkgs:
+    url: github:cachix/devenv-nixpkgs/rolling
+  rust-overlay:
+    url: github:oxalica/rust-overlay
+    inputs:
+      nixpkgs:
+        follows: nixpkgs
+
+# Each service describes its own system dependencies in a devenv.nix next to its code.
+# All of them are merged into the default shell because the cargo workspace builds
+# every crate. Opt-in extras (not needed for normal development) are profiles in
+# devenv.nix.
+imports:
+  - ./crates/vs-infra
+  - ./crates/vs-vault
+  - ./crates/vs-ingest
+  - ./crates/vs-helix
+  - ./crates/vs-worker
