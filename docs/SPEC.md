@@ -207,6 +207,7 @@ rest in the object store.
 | D6 | HelixDB holds the *current* projection; the vault holds full history | RAG reads one consistent view |
 | D7 | Structured model output via guided decoding (JSON schema) | Parseable output, fewer hallucinated formats |
 | D8 | Large intermediate artefacts (page images, page results) live in the object store; queues carry references only | Small messages, no shared FS in Firecracker |
+| D9 | HelixDB accessed only through HelixQL (`.hx` schema, migrations and queries in `vs-helix`); pinned to Helix 2.3.5 | Queries and data model versioned with the code; HelixQL is not available in Helix 3.x |
 
 ## 7. Assumptions (unanswered questions — please confirm or correct)
 
@@ -219,7 +220,7 @@ rest in the object store.
 | A5 | Relational DB is **PostgreSQL** (ops, registry and vault schemas). |
 | A6 | Task bus is **NATS JetStream**; the `TaskBus` trait allows swapping in Kafka. |
 | A7 | Object storage is S3-compatible. |
-| A8 | HelixDB licensing (AGPL vs commercial/cloud) is settled on your side; we talk to it over its HTTP query API. |
+| A8 | HelixDB licensing (AGPL vs commercial/cloud) is settled on your side; we call compiled HelixQL queries over HTTP (D9). |
 | A9 | Traceability at bbox + character-span level. |
 | A10 | New entity/relation types are normalised automatically; new types get `review_status = pending` for optional later review. |
 | A11 | No human review loop in v1; confidence and review status are stored. |
