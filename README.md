@@ -54,7 +54,7 @@ own in a `devenv.nix` next to its code; `devenv.yaml` imports them all:
 | `crates/vs-vault/devenv.nix` | PostgreSQL 17 (:5432, db/user/pass `visual_suite`/`vs`/`vs`), sqlx-cli, `DATABASE_URL`, `vs-migrate` |
 | `crates/vs-ingest/devenv.nix` | pdfium (`PDFIUM_DYNAMIC_LIB_PATH`) |
 | `crates/vs-helix/devenv.nix` | `helix` CLI (no instance started yet) |
-| `crates/vs-worker/devenv.nix` | musl target, `vs-worker-static` |
+| `crates/vs-worker/devenv.nix` | `vs-worker-release` |
 | `deploy/firecracker/devenv.nix` | firecracker, e2fsprogs; opt-in: `devenv --profile firecracker shell` |
 
 ```sh
@@ -100,8 +100,9 @@ cargo build --release
 cargo test
 ```
 
-The worker for Firecracker is built as a static binary:
+The worker for Firecracker is a normal glibc build, shipped in the rootfs with its
+shared libraries (pdfium cannot be loaded from a static musl binary):
 
 ```sh
-cargo build --release --target x86_64-unknown-linux-musl -p vs-worker
+cargo build --release -p vs-worker
 ```

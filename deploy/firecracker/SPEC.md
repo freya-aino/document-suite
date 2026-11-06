@@ -16,19 +16,25 @@ Workers only need network, a root disk and CPU.
 - Rootfs: read-only ext4, built from scratch (no distro package manager in the image):
   ```
   /sbin/init            tiny init (or the worker binary itself as PID 1 via a shim that reaps)
-  /usr/bin/vs-worker    static musl build (cargo build --target x86_64-unknown-linux-musl)
-  /usr/lib/libpdfium.so pdfium build for rendering (ingest role only; same image for simplicity)
+  /usr/bin/vs-worker    glibc build (x86_64-unknown-linux-gnu)
+  /usr/lib/...          the binary's runtime closure: glibc, libgcc_s, libpdfium.so
+                        (pdfium for the ingest role; same image for simplicity)
   /etc/vs/worker.toml   baked defaults; per-VM values via MMDS / env
   /etc/ssl/certs        CA bundle
   ```
-- Scratch: optional second block device (tmpfs-like ext4) for large page renders during
-  ingest; everything else is streamed to the object store (decision D8, Firecracker has no
+- Scratch: second block device (ext4) mounted at `/scratch`; **required for the ingest
+  role**, which spools each original there and renders from the file (sized to
+  `max_upload_bytes` plus headroom); everything else is streamed to the object store (decision D8, Firecracker has no
   shared directories).
 - No SSH, no inbound ports. Metrics are pushed (OTLP) or scraped on the TAP interface by
   the host agent only.
 
 Build script location: `deploy/firecracker/build-rootfs.sh` (to be written; inputs:
-worker binary, pdfium, CA bundle → `rootfs.ext4`).
+worker binary, pdfium, CA bundle → `rootfs.ext4`). The worker is not a static binary:
+a fully static musl binary cannot `dlopen` `libpdfium.so`, and linking pdfium
+statically means building pdfium from source. The rootfs is a full image anyway, so it
+ships the binary with its shared-library closure (simplest: build the closure with Nix
+and copy it into the image).
 
 ## Per-VM configuration
 
