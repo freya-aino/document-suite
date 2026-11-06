@@ -39,6 +39,28 @@ objective, page rules) are implemented with unit tests. I/O-bound parts (model c
 rasterization, stores, queue) have signatures and `todo!`/`NotImplemented` bodies,
 described in each crate's spec.
 
+## Development environment
+
+[devenv](https://devenv.sh) describes the system dependencies. Each service declares its
+own in a `devenv.nix` next to its code; `devenv.yaml` imports them all:
+
+| File | Provides |
+|---|---|
+| `devenv.nix` | Rust stable toolchain, cargo-nextest, `VS_CONFIG=config/worker.dev.toml` |
+| `crates/vs-infra/devenv.nix` | NATS with JetStream (:4222), Garage S3 (:3900, bucket `visual-suite`, fixed dev key), `nats` CLI |
+| `crates/vs-vault/devenv.nix` | PostgreSQL 17 (:5432, db/user/pass `visual_suite`/`vs`/`vs`), sqlx-cli, `DATABASE_URL`, `vs-migrate` |
+| `crates/vs-ingest/devenv.nix` | pdfium (`PDFIUM_DYNAMIC_LIB_PATH`) |
+| `crates/vs-helix/devenv.nix` | `helix` CLI (no instance started yet) |
+| `crates/vs-worker/devenv.nix` | musl target, `vs-worker-static` |
+| `deploy/firecracker/devenv.nix` | firecracker, e2fsprogs; opt-in: `devenv --profile firecracker shell` |
+
+```sh
+devenv up -d          # postgres, nats, garage (layout, bucket and key set up on start)
+devenv shell          # or direnv
+vs-migrate            # apply vs-vault migrations
+devenv down
+```
+
 ## Build
 
 ```sh
