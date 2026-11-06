@@ -24,7 +24,9 @@ interactive lane (batch always keeps at least one); interactive tasks also use t
 shared slots. Handler errors are transient unless marked permanent (bad input,
 unsupported format); transient errors are `nak`ed with the bus backoff
 (10 s / 60 s / 300 s) until the last attempt, then dead-lettered like permanent ones,
-and the handler's `give_up` marks the job or page failed. A role that is not
+and the handler's `give_up` marks the job or page failed. A third loop consumes the role's exhausted tasks (vs-infra SPEC: max-deliveries
+advisories) and runs the same give-up path, so a task whose worker crashed on every
+attempt cannot leave its job stuck. A role that is not
 implemented refuses to start instead of consuming its tasks (currently `page` and
 `doc`).
 
