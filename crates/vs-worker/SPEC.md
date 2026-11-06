@@ -41,8 +41,9 @@ signals, `VaultWriter::write_document`, fan out `Task::Page`.
 
 Implemented in `src/ingest.rs`. Pages whose `signals.json` already exists are not
 re-rendered (signals are written last, so their presence means the page is complete).
-Rendering runs on a blocking thread and streams pages to the uploader through a
-bounded channel (4 pages ahead), so memory does not grow with page count. The DAG-list
+The original is spooled to `scratch_dir` and rendered by the render-child pool
+(vs-ingest SPEC "Render children"); pages render in parallel and are uploaded as they
+arrive. A page that hangs or crashes the renderer fails the document permanently. The DAG-list
 version recorded for the run is the pinned one, else the tenant's or global active
 list, else `none`.
 

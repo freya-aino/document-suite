@@ -24,6 +24,11 @@ max_in_flight = 32
 interactive_share = 0.3
 render_dpi = 200
 max_failed_page_fraction = 0.05
+# Ingest: originals are spooled here and rendered by child processes.
+# scratch_dir = "/scratch"          # default: system temp dir
+# render_processes = 2              # default: available CPUs
+page_render_timeout_s = 60
+# render_mem_limit_mb = 1536
 
 [classify]
 born_digital_min_chars = 50

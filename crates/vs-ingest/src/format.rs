@@ -1,9 +1,21 @@
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Format {
     Pdf,
     Png,
     Jpeg,
     Tiff,
+}
+
+impl Format {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Format::Pdf => "pdf",
+            Format::Png => "png",
+            Format::Jpeg => "jpeg",
+            Format::Tiff => "tiff",
+        }
+    }
 }
 
 /// Detects the format from magic bytes only.
