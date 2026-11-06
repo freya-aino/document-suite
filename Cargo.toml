@@ -1,0 +1,72 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/vs-core",
+    "crates/vs-infra",
+    "crates/vs-api",
+    "crates/vs-ingest",
+    "crates/vs-classify",
+    "crates/vs-dag",
+    "crates/vs-router",
+    "crates/vs-models",
+    "crates/vs-stitch",
+    "crates/vs-extract",
+    "crates/vs-graph",
+    "crates/vs-vault",
+    "crates/vs-helix",
+    "crates/vs-worker",
+    "crates/vs-adapt",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+license = "UNLICENSED"
+publish = false
+
+[workspace.dependencies]
+# internal
+vs-core = { path = "crates/vs-core" }
+vs-infra = { path = "crates/vs-infra" }
+vs-ingest = { path = "crates/vs-ingest" }
+vs-classify = { path = "crates/vs-classify" }
+vs-dag = { path = "crates/vs-dag" }
+vs-router = { path = "crates/vs-router" }
+vs-models = { path = "crates/vs-models" }
+vs-stitch = { path = "crates/vs-stitch" }
+vs-extract = { path = "crates/vs-extract" }
+vs-graph = { path = "crates/vs-graph" }
+vs-vault = { path = "crates/vs-vault" }
+vs-helix = { path = "crates/vs-helix" }
+
+# external
+anyhow = "1"
+async-nats = "0.38"
+async-trait = "0.1"
+axum = { version = "0.8", features = ["multipart"] }
+base64 = "0.22"
+bytes = "1"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive", "env"] }
+futures = "0.3"
+hex = "0.4"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "tiff"] }
+object_store = { version = "0.11", features = ["aws"] }
+pdfium-render = "0.8"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+sqlx = { version = "0.8", default-features = false, features = ["postgres", "runtime-tokio", "tls-rustls", "macros", "chrono", "uuid", "json", "migrate"] }
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+uuid = { version = "1", features = ["v7", "serde"] }
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "abort"
