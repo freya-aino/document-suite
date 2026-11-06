@@ -78,9 +78,26 @@ rendered page per child is held before upload.
 
 | Kind | Signature | Behaviour |
 |------|-----------|-----------|
-| `figure.crop` | `page_image, layout → figure_crops` | Crops `figure`/`chart` regions with `padding` (default 2 %), uploads crops, returns crops. |
+| `figure.crop` | `page_image, layout → figure_crops` | Crops `figure`/`chart` regions with `padding` (default 2 %), returns crops (see below). |
 | `blocks.merge_native` | `text_layer, layout, blocks → blocks` | Assigns native text spans to layout regions (span centre inside region); text regions get native text; regions already covered by recognised blocks (tables, formulas) take those. Spans outside every region become `other` blocks. Confidence: 0.99 for native text. |
 | `blocks.merge` | `blocks, blocks → blocks` | Union of two block sets; overlapping blocks (IoU ≥ 0.5, same kind family) keep the higher-confidence one. |
+
+### `figure.crop`
+
+- Params: `{"padding": f32}`; normalised page fraction added on every side, default
+  `0.02`, must be within `0..=0.5` (else `InvalidParams`). `null` params → defaults.
+- Decodes the page image bytes (PNG/JPEG via the `image` crate), selects `Figure` and
+  `Chart` layout regions in reading order, expands each bbox by `padding` clamped to
+  `[0, 1]`, crops (pixel edges rounded) and encodes each crop as PNG. Regions that
+  collapse to zero pixels are skipped. Decoding/encoding runs on a blocking thread.
+- Output `FigureCrop { region, uri, bytes }`: `region` keeps the source kind, score and
+  reading order but its `bbox` is the **padded** crop area, i.e. the exact page area the
+  crop bytes show (the unpadded bbox is the matching layout region). `StepContext` has no
+  blob store, so crops stay in memory; `uri` is the placeholder
+  `crop://<page_hk>/<node_id>/<n>.png` for the component that uploads them (the worker
+  or a following step), which also sets `BlockContent::Figure.crop_uri`.
+- Crops are taken from the rendered page image at render DPI; re-cropping from the
+  original at a higher DPI is not implemented.
 
 ## Errors
 

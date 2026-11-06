@@ -53,3 +53,16 @@ family = "embedding"
 task = ["embed"]
 endpoints = ["http://embed.gpu.internal:8000/v1"]
 max_concurrency = 64
+dimensions = 1024        # vector size the server returns; required for embedding models
+batch_size = 32          # texts per /embeddings request
+
+# Hosted API example (off unless listed). The key is read from the named environment variable.
+# [[model]]
+# id = "hosted-vlm"
+# revision = "2026-01"
+# family = "generic_json"
+# task = ["figure_describe", "judge"]
+# endpoints = ["https://api.example.com/v1"]
+# served_name = "vendor-model-name"
+# api_key_env = "HOSTED_VLM_API_KEY"
+# max_concurrency = 8

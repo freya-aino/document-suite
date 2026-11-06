@@ -3,34 +3,113 @@
   "templates": [
     {
       "id": "e2e",
-      "slots": { "model": ["paddleocr-vl-1.5", "mineru-2.5"] },
+      "description": "One end-to-end document VLM call per page.",
+      "slots": {
+        "model": [
+          "paddleocr-vl-1.5",
+          "mineru-2.5"
+        ]
+      },
       "dag": {
         "output": "parse",
         "nodes": [
-          { "id": "parse", "step": "page.parse_e2e", "inputs": ["$page_image"], "params": { "model": "{model}" } }
+          {
+            "id": "parse",
+            "step": "page.parse_e2e",
+            "inputs": [
+              "$page_image"
+            ],
+            "params": {
+              "model": "{model}"
+            }
+          }
         ]
       }
     },
     {
       "id": "native-layout-tables",
-      "slots": { "layout_model": ["mineru-2.5"], "table_model": ["paddleocr-vl-1.5", "mineru-2.5"] },
+      "description": "Born-digital pages: native text layer + layout model; tables via a doc VLM, no OCR.",
+      "slots": {
+        "layout_model": [
+          "mineru-2.5"
+        ],
+        "table_model": [
+          "paddleocr-vl-1.5",
+          "mineru-2.5"
+        ]
+      },
       "dag": {
         "output": "merge",
         "nodes": [
-          { "id": "layout", "step": "layout.detect", "inputs": ["$page_image"], "params": { "model": "{layout_model}" } },
-          { "id": "tables", "step": "table.recognize", "inputs": ["$page_image", "layout"], "params": { "model": "{table_model}" }, "optional": true },
-          { "id": "merge", "step": "blocks.merge_native", "inputs": ["$text_layer", "layout", "tables"] }
+          {
+            "id": "layout",
+            "step": "layout.detect",
+            "inputs": [
+              "$page_image"
+            ],
+            "params": {
+              "model": "{layout_model}"
+            }
+          },
+          {
+            "id": "tables",
+            "step": "table.recognize",
+            "inputs": [
+              "$page_image",
+              "layout"
+            ],
+            "params": {
+              "model": "{table_model}"
+            },
+            "optional": true
+          },
+          {
+            "id": "merge",
+            "step": "blocks.merge_native",
+            "inputs": [
+              "$text_layer",
+              "layout",
+              "tables"
+            ]
+          }
         ]
       }
     },
     {
       "id": "layout-region-ocr",
-      "slots": { "layout_model": ["mineru-2.5"], "ocr_model": ["paddleocr-vl-1.5"] },
+      "description": "Scans: layout model, then per-region OCR.",
+      "slots": {
+        "layout_model": [
+          "mineru-2.5"
+        ],
+        "ocr_model": [
+          "paddleocr-vl-1.5"
+        ]
+      },
       "dag": {
         "output": "text",
         "nodes": [
-          { "id": "layout", "step": "layout.detect", "inputs": ["$page_image"], "params": { "model": "{layout_model}" } },
-          { "id": "text", "step": "region.ocr", "inputs": ["$page_image", "layout"], "params": { "model": "{ocr_model}" } }
+          {
+            "id": "layout",
+            "step": "layout.detect",
+            "inputs": [
+              "$page_image"
+            ],
+            "params": {
+              "model": "{layout_model}"
+            }
+          },
+          {
+            "id": "text",
+            "step": "region.ocr",
+            "inputs": [
+              "$page_image",
+              "layout"
+            ],
+            "params": {
+              "model": "{ocr_model}"
+            }
+          }
         ]
       }
     }

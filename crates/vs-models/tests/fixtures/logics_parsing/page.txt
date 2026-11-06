@@ -1,0 +1,16 @@
+```html
+<div class="title" data-bbox="110 70 890 120"><h1>Synthesis of Novel Heterocyclic Compounds</h1></div>
+<div class="header" data-bbox="110 20 500 40">Journal of Organic Chemistry, Vol. 12</div>
+<div class="text" data-bbox="110 150 890 300">We report a concise route to functionalised pyridines starting from commercially available aldehydes. The sequence proceeds in three steps with an overall yield of 62&nbsp;%.</div>
+<div class="title" data-bbox="110 320 600 350"><h2>2. Results and Discussion</h2></div>
+<div class="table" data-bbox="110 380 890 560"><table><thead><tr><th>Entry</th><th>Catalyst</th><th>Yield (%)</th></tr></thead><tbody><tr><td>1</td><td>Pd(OAc)<sub>2</sub></td><td>71</td></tr><tr><td>2</td><td>CuI</td><td>48</td></tr></tbody></table></div>
+<div class="table_caption" data-bbox="110 360 890 378">Table 1. Optimisation of the coupling step.</div>
+<div class="formula" data-bbox="300 580 700 630">$$k = A e^{-E_a / RT}$$</div>
+<div class="chemistry" data-bbox="300 650 700 720">CC(=O)Oc1ccccc1C(=O)O</div>
+<div class="image" data-bbox="110 740 890 1100"><img src="figure_1.png" alt="Reaction scheme"/></div>
+<div class="figure_caption" data-bbox="110 1105 890 1125">Figure 1. Proposed catalytic cycle.</div>
+<div class="code" data-bbox="110 1140 890 1200"><pre>for step in range(3):
+    run(step)</pre></div>
+<div class="footnote" data-bbox="110 1210 890 1230">&dagger; Corresponding author.</div>
+<div class="page_number" data-bbox="480 1250 520 1270">1</div>
+```

@@ -1,0 +1,19 @@
+```json
+{
+  "layout_parsing_result": {
+    "parsing_res_list": [
+      {"block_label": "doc_title", "block_bbox": [112, 88, 1128, 152], "block_content": "Attention Is All You Need", "block_order": 0},
+      {"block_label": "text", "block_bbox": [112, 180, 1128, 330], "block_content": "The dominant sequence transduction models are based on complex recurrent or convolutional neural networks that include an encoder and a decoder.", "block_order": 1},
+      {"block_label": "paragraph_title", "block_bbox": [112, 360, 600, 392], "block_content": "1 Introduction", "block_order": 2},
+      {"block_label": "table", "block_bbox": [112, 420, 1128, 700], "block_content": "<table><tr><th>Model</th><th>BLEU</th></tr><tr><td>Transformer (base)</td><td>27.3</td></tr><tr><td>Transformer (big)</td><td>28.4</td></tr></table>", "block_order": 4},
+      {"block_label": "table_title", "block_bbox": [112, 400, 1128, 418], "block_content": "Table 1: Results on WMT 2014", "block_order": 3},
+      {"block_label": "formula", "block_bbox": [300, 720, 940, 790], "block_content": "\\mathrm{Attention}(Q, K, V) = \\mathrm{softmax}\\left(\\frac{QK^T}{\\sqrt{d_k}}\\right)V", "block_order": 5},
+      {"block_label": "formula_number", "block_bbox": [1050, 740, 1128, 770], "block_content": "(1)", "block_order": 6},
+      {"block_label": "image", "block_bbox": [112, 820, 1128, 1400], "block_content": "", "block_order": 7},
+      {"block_label": "figure_title", "block_bbox": [112, 1410, 1128, 1440], "block_content": "Figure 1: The Transformer model architecture.", "block_order": 8},
+      {"block_label": "footnote", "block_bbox": [112, 1500, 1128, 1540], "block_content": "* Equal contribution.", "block_order": 9},
+      {"block_label": "number", "block_bbox": [600, 1580, 640, 1600], "block_content": "1", "block_order": 10}
+    ]
+  }
+}
+```

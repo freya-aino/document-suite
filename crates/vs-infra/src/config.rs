@@ -12,9 +12,15 @@ pub struct Config {
     pub worker: WorkerConfig,
     #[serde(default)]
     pub telemetry: TelemetryConfig,
+    /// `vs-api` only.
+    #[serde(default)]
+    pub api: ApiConfig,
     /// Passed through to `vs-classify` (`ClassifyConfig`).
     #[serde(default = "empty_table")]
     pub classify: toml::Value,
+    /// Stage 2 (`doc` role) and page-classifier models; `page` and `doc` workers only.
+    #[serde(default)]
+    pub stage2: Stage2Config,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -95,6 +101,71 @@ impl Default for WorkerConfig {
     }
 }
 
+/// Models and thresholds of the `page` classifier and the `doc` role. Model names are
+/// registry ids (`[models].registry`).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct Stage2Config {
+    /// Extraction LLM.
+    pub extraction_model: String,
+    /// Verification LLM (may equal `extraction_model`).
+    pub verify_model: String,
+    /// Text embedder for ontology matching, corpus resolution and graph vectors.
+    pub embedding_model: String,
+    /// LLM judge for ambiguous corpus-resolution candidates; none = thresholds only.
+    pub judge_model: Option<String>,
+    /// Tier 1 page classifier (VLM). None = rules-only classification.
+    pub classifier_model: Option<String>,
+    /// Characters per extraction window.
+    pub window_chars: usize,
+    /// Cosine threshold for mapping raw types onto the ontology.
+    pub type_match_threshold: f32,
+    /// Corpus resolution: score at or above which an entity links without a judge.
+    pub link_threshold: f32,
+    /// Corpus resolution: score band in which the judge decides.
+    pub judge_band: (f32, f32),
+    /// Texts per embedding request (0 = registry default).
+    pub embed_batch_size: usize,
+    /// How long a worker trusts its cached "active DAG list" mapping.
+    pub dag_list_refresh_s: u64,
+}
+
+impl Default for Stage2Config {
+    fn default() -> Self {
+        Self {
+            extraction_model: "extract-llm".into(),
+            verify_model: "extract-llm".into(),
+            embedding_model: "embed-text".into(),
+            judge_model: None,
+            classifier_model: None,
+            window_chars: 12_000,
+            type_match_threshold: 0.85,
+            link_threshold: 0.92,
+            judge_band: (0.80, 0.92),
+            embed_batch_size: 0,
+            dag_list_refresh_s: 60,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct ApiConfig {
+    /// Multipart upload size limit (413 above it). Default 2 GiB.
+    pub max_upload_bytes: u64,
+    /// Interactive requests get 429 while the interactive ingest lane has more pending
+    /// messages than this.
+    pub interactive_max_pending: u64,
+    /// Where multipart uploads are spooled while hashing. Default: system temp dir.
+    pub scratch_dir: Option<PathBuf>,
+}
+
+impl Default for ApiConfig {
+    fn default() -> Self {
+        Self { max_upload_bytes: 2 * 1024 * 1024 * 1024, interactive_max_pending: 1000, scratch_dir: None }
+    }
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct TelemetryConfig {
     pub otlp_endpoint: Option<String>,
@@ -115,9 +186,13 @@ impl Config {
 
 fn apply_env_overrides(value: &mut toml::Value, vars: impl Iterator<Item = (String, String)>) {
     'vars: for (k, v) in vars {
-        let Some(rest) = k.strip_prefix("VS__") else { continue };
+        let Some(rest) = k.strip_prefix("VS__") else {
+            continue;
+        };
         let path: Vec<String> = rest.split("__").map(|s| s.to_ascii_lowercase()).collect();
-        let Some((leaf, parents)) = path.split_last() else { continue };
+        let Some((leaf, parents)) = path.split_last() else {
+            continue;
+        };
         let mut cur = &mut *value;
         for seg in parents {
             // Match on the reference by value so the borrow moves into `cur`.
@@ -158,7 +233,21 @@ mod tests {
             let cfg = Config::load(&root.join(name)).unwrap_or_else(|e| panic!("{name}: {e}"));
             assert_eq!(cfg.blob.bucket, "visual-suite");
             assert!(cfg.classify.is_table());
+            assert_eq!(cfg.api.interactive_max_pending, 1000);
+            assert_eq!(cfg.stage2.embedding_model, "embed-text");
+            assert_eq!(cfg.stage2.dag_list_refresh_s, 60);
         }
+    }
+
+    #[test]
+    fn stage2_defaults_when_section_missing() {
+        let v: toml::Value = toml::from_str("x = 1\n").unwrap();
+        let s2: Stage2Config = v.get("stage2").cloned().map(|v| v.try_into().unwrap()).unwrap_or_default();
+        assert_eq!(s2.extraction_model, "extract-llm");
+        assert!(s2.classifier_model.is_none());
+        let s2: Stage2Config = toml::from_str("classifier_model = \"page-classifier\"\njudge_band = [0.7, 0.9]\n").unwrap();
+        assert_eq!(s2.classifier_model.as_deref(), Some("page-classifier"));
+        assert_eq!(s2.judge_band, (0.7, 0.9));
     }
 
     #[test]

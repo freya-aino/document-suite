@@ -1,0 +1,5 @@
+# Experimental Setup
+
+We trained on the standard WMT 2014 English-German dataset consisting of about 4.5 million sentence pairs.
+
+Sentences were encoded using byte-pair encoding, which has a shared source-target vocabulary of about 37000 tokens.

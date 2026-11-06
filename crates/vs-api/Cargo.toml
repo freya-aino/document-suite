@@ -13,16 +13,24 @@ path = "src/main.rs"
 
 [dependencies]
 vs-core.workspace = true
+vs-dag.workspace = true
 vs-infra.workspace = true
+vs-models.workspace = true
 vs-router.workspace = true
+vs-steps.workspace = true
 vs-vault.workspace = true
 anyhow.workspace = true
 axum.workspace = true
 bytes.workspace = true
 chrono.workspace = true
 clap.workspace = true
+futures.workspace = true
+hex.workspace = true
+metrics.workspace = true
+metrics-exporter-prometheus.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 sqlx.workspace = true
 tokio.workspace = true
 tracing.workspace = true

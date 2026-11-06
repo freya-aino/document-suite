@@ -1,0 +1,9 @@
+{"blocks": [
+  {"kind": "title", "bbox": [0.08, 0.05, 0.92, 0.09], "text": "Invoice #2025-0042", "confidence": 0.97},
+  {"kind": "paragraph", "bbox": [0.08, 0.11, 0.5, 0.2], "text": "Billed to:\nFreya Example\nExample Street 1\n8000 Zürich", "confidence": 0.93},
+  {"kind": "table", "bbox": [0.08, 0.25, 0.92, 0.6], "html": "<table><tr><th>Item</th><th>Qty</th><th>Price</th></tr><tr><td>Widget</td><td>3</td><td>29.90</td></tr></table>", "text": "ignored when html present", "confidence": 0.9},
+  {"kind": "formula", "bbox": [0.3, 0.62, 0.7, 0.66], "latex": "\\sum_i q_i p_i", "confidence": 0.8},
+  {"kind": "heading", "bbox": [0.08, 0.7, 0.5, 0.73], "text": "Terms", "level": 2, "confidence": 0.9},
+  {"kind": "stamp", "bbox": [0.7, 0.8, 0.9, 0.95], "text": "PAID", "confidence": 0.6},
+  {"kind": "watermark", "bbox": [0.2, 0.4, 0.8, 0.6], "text": "DRAFT", "confidence": 0.5}
+]}

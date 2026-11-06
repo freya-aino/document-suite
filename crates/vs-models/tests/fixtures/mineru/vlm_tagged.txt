@@ -1,0 +1,6 @@
+<|box_start|>102 71 897 118<|box_end|><|ref_start|>title<|ref_end|><|md_start|># Deep Residual Learning for Image Recognition<|md_end|>
+<|box_start|>102 160 897 260<|box_end|><|ref_start|>text<|ref_end|><|md_start|>Deeper neural networks are more difficult to train.<|md_end|>
+<|box_start|>102 650 897 820<|box_end|><|ref_start|>table<|ref_end|><|md_start|><table><tr><td>layer name</td><td>output size</td></tr><tr><td>conv1</td><td>112x112</td></tr></table><|md_end|>
+<|box_start|>320 840 680 880<|box_end|><|ref_start|>equation<|ref_end|><|md_start|>\mathcal{F}(\mathbf{x}) := \mathcal{H}(\mathbf{x}) - \mathbf{x}<|md_end|>
+<|box_start|>102 340 897 620<|box_end|><|ref_start|>image<|ref_end|>
+<|box_start|>102 625 897 645<|box_end|><|ref_start|>image_caption<|ref_end|><|md_start|>Figure 1. Training error on CIFAR-10.<|md_end|>

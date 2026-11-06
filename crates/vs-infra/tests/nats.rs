@@ -28,7 +28,9 @@ fn ingest_task(job_id: uuid::Uuid) -> Task {
 
 fn job_of(t: &Task) -> uuid::Uuid {
     match t {
-        Task::Ingest { job_id, .. } | Task::Page { job_id, .. } | Task::Doc { job_id, .. } => *job_id,
+        Task::Ingest { job_id, .. } | Task::Page { job_id, .. } | Task::Doc { job_id, .. } => {
+            *job_id
+        }
     }
 }
 
@@ -38,7 +40,10 @@ async fn next_for(
     job: uuid::Uuid,
 ) -> Box<dyn vs_infra::queue::Delivery> {
     loop {
-        let d = tokio::time::timeout(Duration::from_secs(10), s.next()).await.expect("timed out").expect("stream ended");
+        let d = tokio::time::timeout(Duration::from_secs(10), s.next())
+            .await
+            .expect("timed out")
+            .expect("stream ended");
         if job_of(d.task()) == job {
             return d;
         }
@@ -56,10 +61,17 @@ async fn publish_dedup_redeliver_ack() {
     let job = uuid::Uuid::now_v7();
     let task = ingest_task(job);
     let dedup = format!("{job}:ingest");
-    bus.publish(Role::Ingest, Lane::Interactive, &task, &dedup).await.unwrap();
-    bus.publish(Role::Ingest, Lane::Interactive, &task, &dedup).await.unwrap(); // de-duplicated
+    bus.publish(Role::Ingest, Lane::Interactive, &task, &dedup)
+        .await
+        .unwrap();
+    bus.publish(Role::Ingest, Lane::Interactive, &task, &dedup)
+        .await
+        .unwrap(); // de-duplicated
 
-    let mut s = bus.subscribe(Role::Ingest, Lane::Interactive).await.unwrap();
+    let mut s = bus
+        .subscribe(Role::Ingest, Lane::Interactive)
+        .await
+        .unwrap();
     let d = next_for(&mut s, job).await;
     assert_eq!(d.task(), &task);
     assert_eq!(d.attempt(), 1);
@@ -72,7 +84,13 @@ async fn publish_dedup_redeliver_ack() {
 
     // The duplicate publish must not show up.
     let extra = tokio::time::timeout(Duration::from_millis(500), s.next()).await;
-    assert!(extra.is_err() || extra.unwrap().map(|d| job_of(d.task()) != job).unwrap_or(true));
+    assert!(
+        extra.is_err()
+            || extra
+                .unwrap()
+                .map(|d| job_of(d.task()) != job)
+                .unwrap_or(true)
+    );
 
     bus.dead_letter(Role::Ingest, &task, "test").await.unwrap();
 }
@@ -86,7 +104,9 @@ async fn exhausted_task_is_reported_and_removed() {
 
     let job = uuid::Uuid::now_v7();
     let task = ingest_task(job);
-    bus.publish(Role::Ingest, Lane::Batch, &task, &format!("{job}:ingest")).await.unwrap();
+    bus.publish(Role::Ingest, Lane::Batch, &task, &format!("{job}:ingest"))
+        .await
+        .unwrap();
 
     // Never ack: nak without delay until deliveries run out.
     let mut s = bus.subscribe(Role::Ingest, Lane::Batch).await.unwrap();
@@ -112,7 +132,10 @@ async fn exhausted_task_is_reported_and_removed() {
 
     let mut ex = bus.subscribe_exhausted(Role::Ingest).await.unwrap();
     let e = loop {
-        let e = tokio::time::timeout(Duration::from_secs(10), ex.next()).await.expect("no advisory").unwrap();
+        let e = tokio::time::timeout(Duration::from_secs(10), ex.next())
+            .await
+            .expect("no advisory")
+            .unwrap();
         if e.task().map(job_of) == Some(job) {
             break e;
         }
@@ -123,7 +146,10 @@ async fn exhausted_task_is_reported_and_removed() {
 
     tokio::time::sleep(Duration::from_millis(300)).await;
     drain.abort();
-    assert!(!redelivered.load(std::sync::atomic::Ordering::SeqCst), "exhausted task was delivered again");
+    assert!(
+        !redelivered.load(std::sync::atomic::Ordering::SeqCst),
+        "exhausted task was delivered again"
+    );
 }
 
 #[tokio::test]
@@ -134,8 +160,10 @@ async fn consumers_use_ack_wait_not_backoff() {
     let stream = bus.js.get_stream(TASKS_STREAM).await.unwrap();
     for role in Role::ALL {
         for lane in Lane::ALL {
-            let mut c: async_nats::jetstream::consumer::PullConsumer =
-                stream.get_consumer(&vs_infra::queue::consumer_name(role, lane)).await.unwrap();
+            let mut c: async_nats::jetstream::consumer::PullConsumer = stream
+                .get_consumer(&vs_infra::queue::consumer_name(role, lane))
+                .await
+                .unwrap();
             let info = c.info().await.unwrap();
             assert!(info.config.backoff.is_empty(), "{}: backoff set", info.name);
             assert_eq!(info.config.ack_wait, role.ack_wait());

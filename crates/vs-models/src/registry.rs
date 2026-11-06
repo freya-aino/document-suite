@@ -21,6 +21,13 @@ pub struct ModelSpec {
     pub api_key_env: Option<String>,
     /// Name the server knows the model by (defaults to `id`).
     pub served_name: Option<String>,
+    /// Embedding models: vector size returned by `/embeddings`. Required for `OpenAiEmbedder`.
+    pub dimensions: Option<usize>,
+    /// Embedding models: texts per `/embeddings` request (default 32).
+    pub batch_size: Option<usize>,
+    /// `"base64"` (default) inlines images as data URLs; `"url"` is reserved for presigned
+    /// URLs of very large pages (not implemented yet, treated like `"base64"`).
+    pub image_transport: Option<String>,
 }
 
 fn default_concurrency() -> usize {
@@ -90,5 +97,26 @@ mod tests {
         let m = r.get("paddleocr-vl-1.5").unwrap();
         assert_eq!(m.model_ref(), "paddleocr-vl-1.5@2026-01");
         assert_eq!(m.max_concurrency, 64);
+        assert_eq!(m.dimensions, None);
+    }
+
+    #[test]
+    fn parses_embedding_fields() {
+        let r = ModelRegistry::from_toml(
+            r#"
+            [[model]]
+            id = "embed"
+            revision = "1"
+            family = "embedding"
+            endpoints = ["http://e/v1"]
+            dimensions = 1024
+            batch_size = 16
+            api_key_env = "EMBED_KEY"
+            "#,
+        )
+        .unwrap();
+        let m = r.get("embed").unwrap();
+        assert_eq!((m.dimensions, m.batch_size), (Some(1024), Some(16)));
+        assert_eq!(m.api_key_env.as_deref(), Some("EMBED_KEY"));
     }
 }

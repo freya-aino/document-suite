@@ -9,6 +9,7 @@ members = [
     "crates/vs-dag",
     "crates/vs-router",
     "crates/vs-models",
+    "crates/vs-steps",
     "crates/vs-stitch",
     "crates/vs-extract",
     "crates/vs-graph",
@@ -34,6 +35,7 @@ vs-classify = { path = "crates/vs-classify" }
 vs-dag = { path = "crates/vs-dag" }
 vs-router = { path = "crates/vs-router" }
 vs-models = { path = "crates/vs-models" }
+vs-steps = { path = "crates/vs-steps" }
 vs-stitch = { path = "crates/vs-stitch" }
 vs-extract = { path = "crates/vs-extract" }
 vs-graph = { path = "crates/vs-graph" }
@@ -52,6 +54,8 @@ clap = { version = "4", features = ["derive", "env"] }
 futures = "0.3"
 hex = "0.4"
 libc = "0.2"
+metrics = "0.24"
+metrics-exporter-prometheus = { version = "0.17", default-features = false }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "tiff"] }
 object_store = { version = "0.11", features = ["aws"] }
 # `sync`: one process-wide binding shared across threads (calls are serialised).

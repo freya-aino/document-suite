@@ -9,7 +9,8 @@ Writes everything the pipeline produces into PostgreSQL (assumption A5), in thre
 | `vault` | **Data Vault 2.0 raw vault**: the system of record and audit trail | insert-only |
 
 Migrations: `migrations/0001_ops_registry.sql`, `migrations/0002_vault.sql`,
-`migrations/0003_app_role_privileges.sql`, embedded via `sqlx::migrate!`.
+`migrations/0003_app_role_privileges.sql`, `migrations/0004_api_ops.sql` (idempotency
+keys, job state log, page-level evidence), embedded via `sqlx::migrate!`.
 
 ## Roles and migrations
 
@@ -61,7 +62,7 @@ no deletes (retention is handled by partition drops, if required).
 | `lnk_block_block` | block, block | link kind (stitch) |
 | `lnk_mention` | block, entity | — |
 | `lnk_assertion_arg` | assertion, entity | role |
-| `lnk_assertion_evidence` | assertion, block | — |
+| `lnk_assertion_evidence` | assertion, block **or** page (`Evidence::Region`) | — |
 
 ### Satellites
 
@@ -76,6 +77,9 @@ no deletes (retention is handled by partition drops, if required).
 | `sat_assertion_detail` | hub_assertion | raw predicate, predicate id, kind, qualifiers, literals, confidence, verified, provenance |
 | `sat_mention` (multi-active by `sub_seq`) | lnk_mention | run id, char span, surface, confidence |
 | `sat_evidence` (multi-active by `sub_seq`) | lnk_assertion_evidence | char span or bbox |
+
+Multi-active satellites share one `hash_diff` across the rows of a parent (hash of the
+whole set), so a changed set is re-inserted as a whole under a new `load_dts`.
 | `sat_stitch_link` | lnk_block_block | run id, confidence |
 
 ### Reprocessing (D5 / A12)
@@ -102,14 +106,50 @@ Hash keys for runs, DAGs, models and links come from `vs-core` (`HashKey::run`,
 `HashKey::dag`, `HashKey::model`, `HashKey::link`). `write_document` takes a `RunMeta`
 whose `started_at` is the job creation time, so retries do not add `sat_run` rows.
 
+`write_stage2(run, spec, doc, ext, final_state)` (all implemented):
+
+- Entity key: `DocEntity.entity_hk` when the corpus resolver set it (then
+  `canonical_key` = lowercased name, the resolver's business key is not carried on the
+  struct), else the document-local key `H(tenant | document_hk | local_id)` with
+  `canonical_key = local:<document_hk>:<local_id>` (`local_entity_key`). Entities with a
+  normalised `type_id` get `review_status = approved`, others `pending`.
+- Assertion key: `HashKey::assertion(run, predicate, arg keys)` where literal arguments
+  take part as `H(role | value | unit)`, so two attribute assertions with the same
+  predicate but different values stay distinct. Literals are stored in `literals`.
+- Mentions are linked per `(block, entity)`; evidence per `(assertion, block)` or
+  `(assertion, page)` for regions (`block_hk` is nullable since 0004).
+- `record_source` is `vs/doc/stage2@1/<model or cpu>`; the final `sat_run` row carries
+  `final_state` (`done` / `partial`) and `finished_at`.
+
 ## Operational state (`ops` module)
 
-`Ops` wraps the `ops` schema for the API and the workers: `create_job`, `get_job`
-(tenant-scoped), `set_state`, `start_pages` (end of ingest: page count, page tasks),
-`page_started`, `page_finished`. `page_finished` moves the page task to its final
-state and bumps the job counters in **one statement**; only the first call per page
-counts, so redeliveries cannot double count and exactly one caller sees
-`completed_job()` and publishes the doc task.
+`Ops` wraps the `ops` and `registry` schemas for the API and the workers, plus the
+vault's read side for the API:
+
+- Jobs: `create_job`, `create_job_for_document` (hash key known up front),
+  `create_jobs` (bulk, batches), `get_job` (tenant-scoped), `set_state`, `start_pages`
+  (end of ingest: page count, page tasks), `page_started`, `page_finished`,
+  `job_timings` (created/updated + `ops.job_state_log`, written by `create_jobs`,
+  `set_state` and `start_pages` on every state change), `current_run` (newest job of a
+  tenant for a document; `skip_if_processed`). `page_finished` moves the page task to
+  its final state and bumps the job counters in **one statement**; only the first call
+  per page counts, so redeliveries cannot double count; exactly one caller sees
+  `completed_job()`, while `all_finished()` is true for every call once the last page is
+  final (the page worker publishes the doc task on `all_finished()`, so a redelivery
+  after a lost publish still enqueues it).
+- Batches: `create_batch`, `get_batch` (counts per state + a page of jobs).
+- Documents (vault reads): `document_run` (tenant check via `hub_document`, resolves
+  `run_id` or `v_current_run`), `document_summary`.
+- Idempotency: `get_idempotent` / `put_idempotent` (`ops.idempotency_keys`, 24 h; a live
+  entry is never overwritten), `purge_idempotency_keys`.
+- DAG lists: `dag_lists_list`, `dag_list_insert_candidate`, `dag_list_activate` (one
+  active per scope; retires the previous one in the same transaction under an advisory
+  lock), `dag_list_get`, `active_dag_list` / `active_dag_list_version` (tenant's, else
+  global).
+- Ontology: `entity_types`, `relation_types`, `insert_pending_entity_type`,
+  `insert_pending_relation_type` — plain rows. `PgOntologyStore` (`ontology.rs`)
+  implements `vs_extract::OntologyStore` over them for the `doc` worker; rows with
+  `merged_into` set are hidden so the normaliser only ever returns a live type id.
 
 ## Tests
 
