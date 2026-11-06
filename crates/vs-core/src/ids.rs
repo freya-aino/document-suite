@@ -49,6 +49,35 @@ impl HashKey {
         parts.extend(keys);
         Self::of(&parts)
     }
+
+    /// `H(run_id)`
+    pub fn run(run: &RunId) -> Self {
+        Self::of(&[&run.to_string()])
+    }
+
+    /// `H(dag_id | version)` from a `dag_id@version` reference.
+    pub fn dag(dag_ref: &str) -> Self {
+        let (id, version) = split_ref(dag_ref);
+        Self::of(&[id, version])
+    }
+
+    /// `H(model_id | revision)` from a `model_id@revision` reference.
+    pub fn model(model_ref: &str) -> Self {
+        let (id, revision) = split_ref(model_ref);
+        Self::of(&[id, revision])
+    }
+
+    /// Link key: `H(parent keys in link order | dependent child key)`.
+    pub fn link(parents: &[&HashKey], dependent_child: Option<&str>) -> Self {
+        let mut parts: Vec<&str> = parents.iter().map(|k| k.as_str()).collect();
+        parts.extend(dependent_child);
+        Self::of(&parts)
+    }
+}
+
+/// Splits `id@version` at the last `@` (ids may contain `@`). No `@` → empty version.
+pub fn split_ref(r: &str) -> (&str, &str) {
+    r.rsplit_once('@').unwrap_or((r, ""))
 }
 
 impl fmt::Display for HashKey {
@@ -160,6 +189,14 @@ mod tests {
             HashKey::assertion(&run, "uses", &[&x, &y]),
             HashKey::assertion(&run, "uses", &[&y, &x])
         );
+    }
+
+    #[test]
+    fn refs_split_at_last_at() {
+        assert_eq!(split_ref("born-digital@3"), ("born-digital", "3"));
+        assert_eq!(split_ref("org@model@2026-01"), ("org@model", "2026-01"));
+        assert_eq!(split_ref("plain"), ("plain", ""));
+        assert_eq!(HashKey::dag("a@1"), HashKey::of(&["a", "1"]));
     }
 
     #[test]
