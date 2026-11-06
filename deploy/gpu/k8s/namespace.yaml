@@ -1,0 +1,27 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: vs-gpu
+---
+# Gated weights: `kubectl -n vs-gpu create secret generic hf-token --from-literal=HF_TOKEN=hf_...`
+# (declared here as a reference only; do not commit a real token).
+apiVersion: v1
+kind: Secret
+metadata:
+  name: hf-token
+  namespace: vs-gpu
+type: Opaque
+stringData:
+  HF_TOKEN: "replace-me"
+---
+# Shared weight cache (ReadWriteMany if several nodes; otherwise one PVC per pool or hostPath).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: hf-cache
+  namespace: vs-gpu
+spec:
+  accessModes: ["ReadWriteMany"]
+  resources:
+    requests:
+      storage: 500Gi

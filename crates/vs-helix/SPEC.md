@@ -63,6 +63,9 @@ db/queries.hx             every query the suite and the RAG service call
   duplicate means it exists) followed by `Update*`; `uk` is passed by the client.
 - `helix push` while the port is still taken maps the next free host port but leaves
   the server on the configured one; `vs-helix-up` stops the instance first.
+- `SearchV` results are returned as vectors with their properties and `data`; a `score`
+  field, when present, is a distance whose scale depends on the index, so similarity is
+  computed client-side from `data`.
 
 ## Data model in Helix
 
@@ -94,8 +97,10 @@ predicate ids).
 | `section_text` | Section | title + first paragraph |
 | `entity_name` | Entity | `name (type)` + context sentence; also used for corpus resolution |
 
-Vectors carry `model_ref` and `dimensions`; changing the embedding model means a new
-index, back-filled, then switched — never mixed vectors in one index.
+Vectors carry `model_ref` (the dimension is fixed per Helix instance by the served
+embedding model; `Vectors::dimensions` is informational on the writer side); changing
+the embedding model means a new index, back-filled, then switched — never mixed vectors
+in one index.
 BM25 full-text on `Block.text` and `Entity.name` for hybrid retrieval.
 
 ## Write algorithm (per document run, Stage 2)
@@ -126,13 +131,39 @@ sees one document at a time cannot keep it correct; count `In<Mentions>` when ne
 
 ## Corpus entity resolution (`HelixResolver`)
 
-Implements `vs_extract::resolve::CorpusResolver`:
+Implements `vs_extract::resolve::CorpusResolver` (`HelixResolver::new(store, embedder)`,
+plus `with_judge(client, model)`, `with_thresholds(link, (low, high))`, `with_k`):
 
-1. vector search `entity_name` top-k (k = 10) within tenant, filtered by compatible type;
-2. score = 0.6 × cosine + 0.4 × name similarity (normalised Jaro-Winkler on name/aliases);
-3. ≥ `link_threshold` → link; in `judge_band` → LLM judge (via `vs-models`) with both
-   entities' names, types and context sentences; else new entity
-   (`entity_hk = H(tenant | type_id | normalised name)`).
+1. **Embed** `name (type)` + `\n` + context sentence with the same `Embedder` that fills
+   the `entity_name` index (`HelixResolver::embed_text`; without context this is the
+   `vs-graph` embed-target text).
+2. **Search** `SearchEntityNames(tenant, vector, 4·k)` (k = 10). The query returns the
+   matched `EntityName` vectors (with `entity_hk` and their `data`) and the entities
+   behind them; the client joins them on `entity_hk` and computes **cosine** itself
+   (Helix's own score is an index-dependent distance). A vector that comes back without
+   `data` is re-embedded from `name (type)` as a fallback.
+3. **Filter** to compatible types: same `type_id`, or either side has none
+   (`compatible_type`). HelixQL cannot express "either unknown", so this is client-side.
+4. **Score** = `0.6 · cosine + 0.4 · max Jaro-Winkler` over the normalised name and
+   aliases of both sides (`normalise_name`: collapse whitespace, lowercase; own
+   implementation, no crate). Keep the k best.
+5. **Decide** per candidate in score order: `≥ link_threshold` (0.85) →
+   `Resolution::Link { entity_hk, score }`; in `judge_band` (0.7..0.85) → LLM judge via
+   `vs_models::OpenAiClient::chat` with JSON schema `{"same": bool}`, given both names,
+   types, aliases and the new entity's context sentence; a `same: true` links. No judge
+   configured, or every candidate rejected → `Resolution::New { entity_hk }` with
+   `entity_hk = HashKey::entity(tenant, "<type_id>|<normalised name>")` =
+   `H(tenant | type_id | normalised name)`, `type_id` falling back to the raw type.
+   Candidates below the band stop the scan (the list is sorted).
+
+Deterministic `New` keys mean two documents that both miss the search still meet in the
+same Helix entity: `write_entities` treats the duplicate create as "exists". The caller
+records each `New` with `RunInfo::note_resolution` so `write_run` creates exactly those
+entities with their name vector (`CreateEntity`) and only updates the linked ones.
+
+Not yet stored: the candidate's context sentence (Helix's `Entity` has none), so the
+judge sees the stored entity's name, type and aliases only. Adding `context` to `Entity`
+is a `schema::2` migration.
 
 ## Retrieval patterns for the RAG service (reference)
 

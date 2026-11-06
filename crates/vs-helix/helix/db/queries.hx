@@ -219,12 +219,19 @@ QUERY DropRun(tenant: String, document_hk: String, run_id: String) =>
     RETURN "ok"
 
 // ─────────────────────── Corpus entity resolution ───────────────────────
-// Vector search is post-filtered by tenant, so callers ask for more than they need.
-
+// Vector search is post-filtered by tenant, so callers ask for more than they need
+// (HelixResolver asks for 4·k and keeps the k best after filtering).
+//
+// Returns the matched name vectors (`vectors`: entity_hk, model_ref and the vector
+// `data`, from which the client computes cosine similarity — Helix's own `score` is a
+// distance whose scale differs between index types) and the entities they belong to
+// (`entities`: entity_hk, name, type_id, aliases). The two lists are joined on
+// `entity_hk`; the type filter happens in the client because "either type unknown"
+// has no HelixQL expression.
 QUERY SearchEntityNames(tenant: String, vector: [F64], k: I64) =>
-    vecs <- SearchV<EntityName>(vector, k)::WHERE(_::{tenant}::EQ(tenant))
-    entities <- vecs::In<EntityEmbedding>
-    RETURN entities
+    vectors <- SearchV<EntityName>(vector, k)::WHERE(_::{tenant}::EQ(tenant))
+    entities <- vectors::In<EntityEmbedding>
+    RETURN vectors, entities
 
 QUERY GetEntity(tenant: String, entity_hk: String) =>
     entity <- N<Entity>({entity_hk: entity_hk})::WHERE(_::{tenant}::EQ(tenant))

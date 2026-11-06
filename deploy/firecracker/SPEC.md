@@ -29,18 +29,38 @@ Workers only need network, a root disk and CPU.
 - No SSH, no inbound ports. Metrics are pushed (OTLP) or scraped on the TAP interface by
   the host agent only.
 
-Build script location: `deploy/firecracker/build-rootfs.sh` (to be written; inputs:
-worker binary, pdfium, CA bundle → `rootfs.ext4`). The worker is not a static binary:
-a fully static musl binary cannot `dlopen` `libpdfium.so`, and linking pdfium
-statically means building pdfium from source. The rootfs is a full image anyway, so it
-ships the binary with its shared-library closure (simplest: build the closure with Nix
-and copy it into the image).
+Build script: `deploy/firecracker/build-rootfs.sh` (inputs: worker binary, pdfium, CA
+bundle, config TOML, optional models TOML, size → `rootfs.ext4`; see `README.md`). The
+worker is not a static binary: a fully static musl binary cannot `dlopen`
+`libpdfium.so`, and linking pdfium statically means building pdfium from source. The
+rootfs is a full image anyway, so it ships the binary with its shared-library closure:
+by default the libraries `ldd` resolves (plus the loader), or with `--nix-closure` the
+`/nix/store` runtime closure of a Nix-built worker. The image is populated with
+`mkfs.ext4 -d` from a staging directory (no root, no loop mount). `init.sh` becomes
+`/sbin/init`; busybox provides `sh`, `mount`, `ip`, `wget`, `mkfs.ext4`, `poweroff`.
+
+`init.sh` (PID 1, busybox sh): mounts `/proc`, `/sys`, `/dev`, `/run`, `/tmp`; mounts
+(formatting on first use) `/dev/vdb` at `/scratch`; configures `eth0` from
+`vs.ip=`/`vs.gw=`/`vs.dns=` or the kernel's `ip=`; reads the role from `vs.role=`
+(fallback `VS_ROLE` from the environment, which the kernel fills from a bare
+`VS_ROLE=…` boot argument); fetches `/vs/env` from MMDS (V2 session token) and exports
+each well-formed `VS__SECTION__KEY=value` line; starts `vs-worker --role $ROLE` as a
+child with `VS_CONFIG=/etc/vs/worker.toml` and `TMPDIR=/scratch`, forwards SIGTERM,
+reaps orphans (render children of the ingest role) and powers off when the worker exits,
+which ends the Firecracker process on the host.
 
 ## Per-VM configuration
 
 `vm-config.example.json` (Firecracker API config): vCPU, memory, kernel args with
-`VS_ROLE`, rootfs drive, TAP network interface, MMDS enabled. The worker reads
-role-independent secrets (Postgres password, bucket credentials) from MMDS at start.
+`vs.role=` and the guest address, read-only rootfs drive, writable scratch drive, TAP
+network interface with rate limiters, MMDS V2 on `eth0`. Secrets (Postgres password,
+bucket credentials) are PUT to MMDS as `{"vs": {"env": "VS__…=…\n…"}}` and exported
+by init before the worker starts; the baked `worker.toml` holds everything else.
+
+`firecracker-run.sh` boots one VM locally: creates `tap-vs-<id>` with NAT egress,
+substitutes kernel, rootfs, scratch disk, TAP, MAC and sizes into a copy of the example
+config, starts Firecracker with it and loads a `VS__…` env file into MMDS. It is a
+development wrapper; the host agent below replaces it in production.
 
 ## Fleet management
 
