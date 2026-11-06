@@ -81,6 +81,25 @@ All writes for one call run in **one transaction**, batched with `UNNEST` arrays
 (one statement per table), `ON CONFLICT DO NOTHING` on hubs/links. Satellites use
 `INSERT … SELECT … WHERE NOT EXISTS (same parent with same latest hash_diff)`.
 
+Hash keys for runs, DAGs, models and links come from `vs-core` (`HashKey::run`,
+`HashKey::dag`, `HashKey::model`, `HashKey::link`). `write_document` takes a `RunMeta`
+whose `started_at` is the job creation time, so retries do not add `sat_run` rows.
+
+## Operational state (`ops` module)
+
+`Ops` wraps the `ops` schema for the API and the workers: `create_job`, `get_job`
+(tenant-scoped), `set_state`, `start_pages` (end of ingest: page count, page tasks),
+`page_started`, `page_finished`. `page_finished` moves the page task to its final
+state and bumps the job counters in **one statement**; only the first call per page
+counts, so redeliveries cannot double count and exactly one caller sees
+`completed_job()` and publishes the doc task.
+
+## Tests
+
+`tests/vault.rs` uses `#[sqlx::test]` (fresh migrated database per test) against the
+devenv Postgres; the `vs` role gets `CREATEDB` from a devenv task. Run with
+`cargo test -p vs-vault -- --ignored`.
+
 ## Performance notes
 
 - `vault` tables partitioned by `load_dts` month for satellites with high volume
