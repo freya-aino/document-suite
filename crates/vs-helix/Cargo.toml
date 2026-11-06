@@ -1,0 +1,20 @@
+[package]
+name = "vs-helix"
+description = "HelixDB writer: document graph, vectors, corpus entity resolution"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+vs-core.workspace = true
+vs-graph.workspace = true
+vs-extract.workspace = true
+async-trait.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+# Add the official SDK once the target Helix version is fixed (assumption A8):
+# helix-db = "2"
