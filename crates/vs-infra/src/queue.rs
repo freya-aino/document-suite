@@ -1,5 +1,10 @@
+use async_nats::jetstream::{
+    self,
+    consumer::{self, pull},
+    stream, AckKind,
+};
 use async_trait::async_trait;
-use futures::stream::BoxStream;
+use futures::stream::{BoxStream, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
@@ -14,11 +19,23 @@ pub enum Role {
 }
 
 impl Role {
+    pub const ALL: [Role; 3] = [Role::Ingest, Role::Page, Role::Doc];
+
     pub fn as_str(&self) -> &'static str {
         match self {
             Role::Ingest => "ingest",
             Role::Page => "page",
             Role::Doc => "doc",
+        }
+    }
+
+    /// How long a delivery may stay unacknowledged. Handlers send `in_progress`
+    /// every `ack_wait / 3` for longer work.
+    pub fn ack_wait(&self) -> Duration {
+        match self {
+            Role::Ingest => Duration::from_secs(10 * 60),
+            Role::Page => Duration::from_secs(5 * 60),
+            Role::Doc => Duration::from_secs(30 * 60),
         }
     }
 }
@@ -39,6 +56,8 @@ impl From<Priority> for Lane {
 }
 
 impl Lane {
+    pub const ALL: [Lane; 2] = [Lane::Interactive, Lane::Batch];
+
     pub fn as_str(&self) -> &'static str {
         match self {
             Lane::Interactive => "interactive",
@@ -47,8 +66,19 @@ impl Lane {
     }
 }
 
+pub const TASKS_STREAM: &str = "VS_TASKS";
+pub const DLQ_STREAM: &str = "VS_DLQ";
+/// 1 + 3 retries.
+pub const MAX_DELIVER: u32 = 4;
+/// Redelivery delays after the 1st, 2nd and 3rd attempt.
+pub const BACKOFF: [Duration; 3] = [Duration::from_secs(10), Duration::from_secs(60), Duration::from_secs(300)];
+
 pub fn subject(role: Role, lane: Lane) -> String {
     format!("vs.{}.{}", role.as_str(), lane.as_str())
+}
+
+pub fn consumer_name(role: Role, lane: Lane) -> String {
+    format!("w-{}-{}", role.as_str(), lane.as_str())
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -84,18 +114,65 @@ pub trait TaskBus: Send + Sync {
 
 /// NATS JetStream implementation.
 pub struct NatsBus {
-    pub js: async_nats::jetstream::Context,
+    pub js: jetstream::Context,
+    /// Messages fetched per pull request. Fetched messages count against `ack_wait`
+    /// while they wait in the client, so this stays small; workers bound concurrency
+    /// by pulling only when a slot is free.
+    pub pull_batch: usize,
 }
 
 impl NatsBus {
     pub async fn connect(url: &str) -> Result<Self, QueueError> {
         let client = async_nats::connect(url).await.map_err(|e| QueueError::Connection(e.to_string()))?;
-        Ok(Self { js: async_nats::jetstream::new(client) })
+        Ok(Self { js: jetstream::new(client), pull_batch: 1 })
     }
 
-    /// Creates or updates `VS_TASKS` / `VS_DLQ` streams and the durable consumers.
+    /// Creates or updates the `VS_TASKS` / `VS_DLQ` streams and the durable consumers.
+    /// Idempotent; called by every worker and the API at startup.
     pub async fn ensure_topology(&self) -> Result<(), QueueError> {
-        todo!("create streams and consumers as described in SPEC.md")
+        let conn = |e: &dyn std::fmt::Display| QueueError::Connection(e.to_string());
+        let tasks = stream::Config {
+            name: TASKS_STREAM.into(),
+            subjects: vec!["vs.ingest.*".into(), "vs.page.*".into(), "vs.doc.*".into()],
+            retention: stream::RetentionPolicy::WorkQueue,
+            storage: stream::StorageType::File,
+            duplicate_window: Duration::from_secs(120),
+            ..Default::default()
+        };
+        let dlq = stream::Config {
+            name: DLQ_STREAM.into(),
+            subjects: vec!["vs.dlq.*".into()],
+            retention: stream::RetentionPolicy::Limits,
+            storage: stream::StorageType::File,
+            max_age: Duration::from_secs(14 * 24 * 3600),
+            ..Default::default()
+        };
+        for cfg in [tasks, dlq] {
+            // get_or_create does not apply changed settings to an existing stream.
+            self.js.get_or_create_stream(cfg.clone()).await.map_err(|e| conn(&e))?;
+            self.js.update_stream(cfg).await.map_err(|e| conn(&e))?;
+        }
+
+        let stream = self.js.get_stream(TASKS_STREAM).await.map_err(|e| conn(&e))?;
+        for role in Role::ALL {
+            for lane in Lane::ALL {
+                let name = consumer_name(role, lane);
+                // create_consumer creates or updates.
+                stream
+                    .create_consumer(pull::Config {
+                        durable_name: Some(name),
+                        filter_subject: subject(role, lane),
+                        ack_policy: consumer::AckPolicy::Explicit,
+                        ack_wait: role.ack_wait(),
+                        max_deliver: MAX_DELIVER as i64,
+                        backoff: BACKOFF.to_vec(),
+                        ..Default::default()
+                    })
+                    .await
+                    .map_err(|e| conn(&e))?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -114,8 +191,39 @@ impl TaskBus for NatsBus {
         Ok(())
     }
 
-    async fn subscribe(&self, _role: Role, _lane: Lane) -> Result<BoxStream<'static, Box<dyn Delivery>>, QueueError> {
-        todo!("pull consumer w-<role>-<lane>; wrap messages in a Delivery impl")
+    async fn subscribe(&self, role: Role, lane: Lane) -> Result<BoxStream<'static, Box<dyn Delivery>>, QueueError> {
+        let conn = |e: &dyn std::fmt::Display| QueueError::Connection(e.to_string());
+        let stream = self.js.get_stream(TASKS_STREAM).await.map_err(|e| conn(&e))?;
+        let consumer: consumer::PullConsumer = stream.get_consumer(&consumer_name(role, lane)).await.map_err(|e| conn(&e))?;
+        let messages = consumer
+            .stream()
+            .max_messages_per_batch(self.pull_batch)
+            .messages()
+            .await
+            .map_err(|e| conn(&e))?;
+        Ok(messages
+            .filter_map(move |item| async move {
+                let msg = match item {
+                    Ok(m) => m,
+                    Err(e) => {
+                        tracing::warn!(role = role.as_str(), lane = lane.as_str(), error = %e, "pull error");
+                        return None;
+                    }
+                };
+                match serde_json::from_slice::<Task>(&msg.payload) {
+                    Ok(task) => {
+                        let attempt = msg.info().map(|i| i.delivered.max(1) as u32).unwrap_or(1);
+                        Some(Box::new(NatsDelivery { msg, task, attempt }) as Box<dyn Delivery>)
+                    }
+                    Err(e) => {
+                        // Undecodable messages never become decodable: drop them for good.
+                        tracing::error!(subject = %msg.subject, error = %e, "undecodable task, terminating");
+                        let _ = msg.ack_with(AckKind::Term).await;
+                        None
+                    }
+                }
+            })
+            .boxed())
     }
 
     async fn dead_letter(&self, role: Role, task: &Task, reason: &str) -> Result<(), QueueError> {
@@ -123,7 +231,44 @@ impl TaskBus for NatsBus {
         self.js
             .publish(format!("vs.dlq.{}", role.as_str()), payload.to_string().into())
             .await
+            .map_err(|e| QueueError::Publish(e.to_string()))?
+            .await
             .map_err(|e| QueueError::Publish(e.to_string()))?;
         Ok(())
+    }
+}
+
+struct NatsDelivery {
+    msg: jetstream::Message,
+    task: Task,
+    attempt: u32,
+}
+
+#[async_trait]
+impl Delivery for NatsDelivery {
+    fn task(&self) -> &Task {
+        &self.task
+    }
+
+    fn attempt(&self) -> u32 {
+        self.attempt
+    }
+
+    async fn ack(self: Box<Self>) -> Result<(), QueueError> {
+        // Double ack waits for the server's confirmation, so a crash right after
+        // acking cannot lead to a silent redelivery of finished work.
+        self.msg.double_ack().await.map_err(|e| QueueError::Publish(e.to_string()))
+    }
+
+    async fn nak(self: Box<Self>, delay: Duration) -> Result<(), QueueError> {
+        self.msg.ack_with(AckKind::Nak(Some(delay))).await.map_err(|e| QueueError::Publish(e.to_string()))
+    }
+
+    async fn term(self: Box<Self>) -> Result<(), QueueError> {
+        self.msg.ack_with(AckKind::Term).await.map_err(|e| QueueError::Publish(e.to_string()))
+    }
+
+    async fn in_progress(&self) -> Result<(), QueueError> {
+        self.msg.ack_with(AckKind::Progress).await.map_err(|e| QueueError::Publish(e.to_string()))
     }
 }

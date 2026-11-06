@@ -22,6 +22,12 @@ Default implementation: **NATS JetStream** (assumption A6).
   publishes to `VS_DLQ` and terminates the message.
 - Message id header = `<job_id>:<role>:<page_no?>` → JetStream de-duplication window
   (2 min) prevents duplicate fan-out on API/ingest retries.
+- Pulls fetch `pull_batch` messages per request (default 1): fetched messages count
+  against `ack_wait` while they wait in the client, and workers pull only when a slot
+  is free. Acks are double acks (server-confirmed).
+- Undecodable messages are terminated immediately (no retries).
+- `ensure_topology()` creates or updates both streams and all six consumers; every
+  worker and the API call it at startup.
 - Lane fairness: each worker pulls from `interactive` first, with at most
   `interactive_share` (default 0.3) of its in-flight slots reserved for it.
 - Autoscaling reads consumer `num_pending` per role and lane.
@@ -30,8 +36,11 @@ A Kafka implementation can be added behind the same trait (partition by `documen
 
 ## Blob store (`blob`)
 
-Trait `BlobStore`: `put(key, bytes, content_type)`, `get(key)`, `head(key)`,
-`presign_get(key, ttl)`. Implementation via the `object_store` crate (S3-compatible).
+Trait `BlobStore`: `put(key, bytes, content_type)`, `get(key)`, `exists(key)`,
+`presign_get(key, ttl)`. Implementation via the `object_store` crate:
+`ObjectBlobStore::s3(&BlobConfig)` (credentials from `AWS_*` env, path-style requests,
+plain HTTP allowed when the endpoint is `http://`; Garage locally and in production)
+or `ObjectBlobStore::new(store)` for tests (no presigning).
 
 Key layout (content-addressed where possible):
 
