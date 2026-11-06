@@ -1,0 +1,122 @@
+use serde::Deserialize;
+use std::path::{Path, PathBuf};
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct Config {
+    pub bus: BusConfig,
+    pub blob: BlobConfig,
+    pub postgres: PostgresConfig,
+    pub helix: HelixConfig,
+    pub models: ModelsConfig,
+    #[serde(default)]
+    pub worker: WorkerConfig,
+    #[serde(default)]
+    pub telemetry: TelemetryConfig,
+    /// Passed through to `vs-classify` (`ClassifyConfig`).
+    #[serde(default)]
+    pub classify: toml::Value,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct BusConfig {
+    pub nats_url: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct BlobConfig {
+    pub bucket: String,
+    pub endpoint: Option<String>,
+    pub region: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PostgresConfig {
+    /// Without password; password comes from `VS__POSTGRES__PASSWORD`.
+    pub url: String,
+    #[serde(default = "default_pool")]
+    pub max_connections: u32,
+}
+
+fn default_pool() -> u32 {
+    16
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct HelixConfig {
+    pub url: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ModelsConfig {
+    /// Path to the model registry TOML (see config/models.example.toml).
+    pub registry: PathBuf,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct WorkerConfig {
+    /// Max concurrent tasks per worker process.
+    pub max_in_flight: usize,
+    /// Share of in-flight slots reserved for the interactive lane.
+    pub interactive_share: f32,
+    /// Render DPI for page images.
+    pub render_dpi: u32,
+    /// Fraction of failed pages tolerated before a document fails.
+    pub max_failed_page_fraction: f32,
+}
+
+impl Default for WorkerConfig {
+    fn default() -> Self {
+        Self { max_in_flight: 32, interactive_share: 0.3, render_dpi: 200, max_failed_page_fraction: 0.05 }
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct TelemetryConfig {
+    pub otlp_endpoint: Option<String>,
+    pub metrics_addr: Option<String>,
+    #[serde(default)]
+    pub json_logs: bool,
+}
+
+impl Config {
+    /// Loads TOML, then applies `VS__SECTION__KEY` environment overrides.
+    pub fn load(path: &Path) -> anyhow::Result<Self> {
+        let text = std::fs::read_to_string(path)?;
+        let mut value: toml::Value = toml::from_str(&text)?;
+        apply_env_overrides(&mut value, std::env::vars());
+        Ok(value.try_into()?)
+    }
+}
+
+fn apply_env_overrides(value: &mut toml::Value, vars: impl Iterator<Item = (String, String)>) {
+    for (k, v) in vars {
+        let Some(rest) = k.strip_prefix("VS__") else { continue };
+        let path: Vec<String> = rest.split("__").map(|s| s.to_ascii_lowercase()).collect();
+        let mut cur = &mut *value;
+        for (i, seg) in path.iter().enumerate() {
+            let Some(table) = cur.as_table_mut() else { break };
+            if i + 1 == path.len() {
+                let parsed = v.parse::<i64>().map(toml::Value::Integer)
+                    .or_else(|_| v.parse::<f64>().map(toml::Value::Float))
+                    .or_else(|_| v.parse::<bool>().map(toml::Value::Boolean))
+                    .unwrap_or_else(|_| toml::Value::String(v.clone()));
+                table.insert(seg.clone(), parsed);
+            } else {
+                cur = table.entry(seg.clone()).or_insert_with(|| toml::Value::Table(Default::default()));
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn env_override_sets_nested_key() {
+        let mut v: toml::Value = toml::from_str("[worker]\nmax_in_flight = 4\n").unwrap();
+        apply_env_overrides(&mut v, vec![("VS__WORKER__MAX_IN_FLIGHT".into(), "64".into())].into_iter());
+        assert_eq!(v["worker"]["max_in_flight"].as_integer(), Some(64));
+    }
+}
