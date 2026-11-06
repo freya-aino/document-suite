@@ -3,10 +3,40 @@
 Writes the `vs-graph::DocGraph` and its embeddings to **HelixDB**, which the RAG service
 queries. HelixDB holds the **current** projection (decision D6); history stays in the vault.
 
-> Check against the Helix version you run. Recent Helix releases take queries as a JSON
-> AST built by the Rust SDK (`helix-db` crate, `helix_db::dsl::prelude`) and sent to
-> `POST /v1/query`; older ones used compiled HelixQL. This crate hides that behind the
-> `GraphStore` trait, so only `HelixStore` changes.
+## Access: HelixQL only
+
+HelixDB is addressed **only through HelixQL**: the schema and every query live in
+`.hx` files in this repo, are compiled by the Helix CLI, and are called as named
+endpoints (`POST {helix.url}/{QueryName}` with a JSON object of the query's
+parameters). The JSON operation-tree requests / SDK DSL (`helix_db::dsl`) are not
+used.
+
+**Version pin: HelixDB 2.3.5 (CLI and server).** HelixQL is only supported on the 2.x
+line; Helix 3.x archived it ("HelixQL v1 is archived and is not the current HelixDB
+request model") and accepts only operation-tree requests. The CLI must be 2.3.5 or
+newer within 2.x: earlier 2.x CLIs build against the upstream `main` branch (now
+3.x) and fail; 2.3.5 checks out its own release tag. Upgrading past 2.x requires
+revisiting this decision.
+
+### Helix project (`crates/vs-helix/helix/`)
+
+```
+helix.toml          project + local instance (port 6969)
+db/schema.hx        versioned schema: schema::1 = initial data model, later schema::N
+db/migrations.hx    MIGRATION schema::N => schema::N+1 blocks
+db/queries.hx       every query the suite and the RAG service call
+```
+
+- **Migrations initialise the data model.** `schema::1` declares the model below; every
+  later change adds `schema::N+1` and a `MIGRATION schema::N => schema::N+1 { … }`
+  block mapping old fields to new (`N::Block => _:: { field: field, new_field: default }`).
+  Deploying the project (`helix push <instance>`) applies pending migrations; no code
+  path creates or alters schema at runtime.
+- Queries are part of the deployed project, so a query change is a deploy, versioned
+  with the code that calls it. `helix check` runs in CI.
+- `HelixStore` (the `GraphStore` implementation) is a thin typed client: one Rust
+  function per query, serialising parameters and parsing the declared `RETURN` shape.
+  The query names are the contract with the RAG service.
 
 ## Data model in Helix
 
@@ -52,6 +82,8 @@ BM25 full-text on `Block.text` and `Entity.name` for hybrid retrieval.
 4. Delete the previous run's `Section` / `Block` / `Assertion` nodes of that document
    and their edges (entities stay).
 
+Each step is a HelixQL query in `db/queries.hx` (batch inputs as array parameters where
+the query language allows, otherwise one call per item with bounded concurrency).
 Steps 2–4 in one transaction where Helix supports it. If not: RAG queries filter blocks
 and assertions by `run_id = Document.current_run_id`, and step 4 runs asynchronously.
 

@@ -16,5 +16,5 @@ reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-# Add the official SDK once the target Helix version is fixed (assumption A8):
-# helix-db = "2"
+# No helix-db SDK: HelixDB is called only through compiled HelixQL query endpoints
+# over HTTP (see SPEC.md "Access: HelixQL only").

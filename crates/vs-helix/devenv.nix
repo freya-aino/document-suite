@@ -1,7 +1,8 @@
 # vs-helix: HelixDB graph + vector store.
 # The `helix` CLI deploys local instances (`helix init`, `helix push dev`; uses Docker).
-# No instance is started automatically: the Helix project/schema for the suite is not
-# written yet (target Helix version still open, see crates/vs-helix/SPEC.md).
+# TODO: pin to Helix 2.3.5. nixpkgs ships CLI 2.3.4, which builds against upstream
+# `main` (Helix 3.x, no HelixQL) and fails; see crates/vs-helix/SPEC.md.
+# No instance is started automatically until the Helix project exists.
 { pkgs, ... }:
 
 {
