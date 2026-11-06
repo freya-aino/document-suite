@@ -7,7 +7,8 @@ pub mod prompts;
 pub mod registry;
 pub mod steps;
 
-pub use client::{ChatRequest, Embedder, ModelError, OpenAiClient};
+pub use client::{ChatRequest, ChatResponse, Embedder, ModelError, OpenAiClient, OpenAiEmbedder};
+pub use parsers::{parser_for, OutputParser, ParseError};
 pub use registry::{ModelRegistry, ModelSpec};
 
 use std::sync::Arc;

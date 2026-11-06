@@ -81,3 +81,31 @@ pub struct ExtractionOutput {
     pub dropped_ungrounded: u32,
     pub dropped_unverified: u32,
 }
+
+/// A partial result from one extractor (window, table, bibliography, figure) before merging.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Fragment {
+    pub mentions: Vec<Mention>,
+    pub entities: Vec<DocEntity>,
+    pub assertions: Vec<Assertion>,
+}
+
+impl Fragment {
+    pub fn extend(&mut self, other: Fragment) {
+        self.mentions.extend(other.mentions);
+        self.entities.extend(other.entities);
+        self.assertions.extend(other.assertions);
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.mentions.is_empty() && self.entities.is_empty() && self.assertions.is_empty()
+    }
+}
+
+impl ExtractionOutput {
+    pub fn absorb(&mut self, f: Fragment) {
+        self.mentions.extend(f.mentions);
+        self.entities.extend(f.entities);
+        self.assertions.extend(f.assertions);
+    }
+}

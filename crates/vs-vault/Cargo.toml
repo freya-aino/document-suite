@@ -10,6 +10,7 @@ publish.workspace = true
 [dependencies]
 vs-core.workspace = true
 vs-extract.workspace = true
+vs-router.workspace = true
 vs-stitch.workspace = true
 async-trait.workspace = true
 chrono.workspace = true
@@ -21,4 +22,7 @@ uuid.workspace = true
 
 [dev-dependencies]
 vs-core.workspace = true
+vs-extract.workspace = true
+vs-router.workspace = true
+vs-stitch.workspace = true
 tokio.workspace = true

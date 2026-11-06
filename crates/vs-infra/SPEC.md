@@ -73,7 +73,14 @@ Rendered pages are reused across runs at the same DPI (no re-render on reprocess
 
 TOML file + environment overrides (`VS__SECTION__KEY`). Sections: `bus`, `blob`,
 `postgres`, `helix`, `models` (path to model registry file), `classify`, `worker`,
-`telemetry`. Secrets only from environment. See `config/worker.example.toml`.
+`stage2`, `api`, `telemetry`. Secrets only from environment. See `config/worker.example.toml`.
+
+`stage2` (`Stage2Config`, all keys defaulted) names the models of the `page` classifier and
+the `doc` role by registry id (`extraction_model`, `verify_model`, `embedding_model`,
+optional `judge_model` and `classifier_model`) plus the Stage 2 thresholds
+(`window_chars`, `type_match_threshold`, `link_threshold`, `judge_band`,
+`embed_batch_size`) and `dag_list_refresh_s`, how long a `page` worker trusts its cached
+tenant → active-DAG-list mapping (default 60).
 
 ## Telemetry (`telemetry`)
 

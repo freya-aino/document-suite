@@ -127,6 +127,7 @@ datasets (+ optional ground truth)
 | `vs-dag` | lib | DAG model, step trait, validation, executor | [SPEC](../crates/vs-dag/SPEC.md) |
 | `vs-router` | lib | DAG list bundle (DAGs + routing table), DAG selection per page | [SPEC](../crates/vs-router/SPEC.md) |
 | `vs-models` | lib | Model registry, OpenAI-compatible client, model-backed steps, output parsers | [SPEC](../crates/vs-models/SPEC.md) |
+| `vs-steps` | lib | Production `StepRegistry` shared by worker, API and vs-adapt | — |
 | `vs-stitch` | lib | Page results → one coherent document | [SPEC](../crates/vs-stitch/SPEC.md) |
 | `vs-extract` | lib | Mentions, assertions, entity resolution | [SPEC](../crates/vs-extract/SPEC.md) |
 | `vs-graph` | lib | Document graph model and builder | [SPEC](../crates/vs-graph/SPEC.md) |

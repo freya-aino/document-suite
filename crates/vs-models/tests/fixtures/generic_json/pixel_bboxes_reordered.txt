@@ -1,0 +1,5 @@
+Sure! Here is the layout:
+[
+  {"kind": "text", "bbox": [100, 500, 900, 600], "text": "second", "reading_order": 1},
+  {"kind": "text", "bbox": [100, 100, 900, 200], "text": "first", "reading_order": 0}
+]

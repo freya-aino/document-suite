@@ -14,6 +14,21 @@ pub enum Trust {
     Judge,
 }
 
+/// Individual metrics behind `PageEval::quality`; `None` = not applicable to the page.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Metrics {
+    pub text: Option<f32>,
+    pub tables: Option<f32>,
+    pub formulas: Option<f32>,
+    pub reading_order: Option<f32>,
+    pub layout: Option<f32>,
+    /// Judge VLM rating (judge-trust evals only).
+    pub judge: Option<f32>,
+    /// Text agreement with the reference DAG (judge-trust evals only).
+    pub agreement: Option<f32>,
+}
+
 /// Score of one DAG on one page.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PageEval {
@@ -24,6 +39,44 @@ pub struct PageEval {
     pub latency_ms: f32,
     pub gpu_seconds: f32,
     pub trust: Trust,
+    // --- added by `score`; absent in older files ---
+    #[serde(default)]
+    pub dag_version: Option<String>,
+    #[serde(default)]
+    pub doc: Option<String>,
+    #[serde(default)]
+    pub page_no: Option<u32>,
+    #[serde(default)]
+    pub class_key: Option<String>,
+    #[serde(default)]
+    pub metrics: Metrics,
+    #[serde(default)]
+    pub tokens: u32,
+    /// The DAG failed on this page (quality is 0).
+    #[serde(default)]
+    pub failed: bool,
+}
+
+impl PageEval {
+    /// Minimal eval with the optional fields empty.
+    pub fn new(page_id: impl Into<String>, profile: PageProfile, dag_id: impl Into<String>, quality: f32, latency_ms: f32, gpu_seconds: f32, trust: Trust) -> Self {
+        Self {
+            page_id: page_id.into(),
+            profile,
+            dag_id: dag_id.into(),
+            quality,
+            latency_ms,
+            gpu_seconds,
+            trust,
+            dag_version: None,
+            doc: None,
+            page_no: None,
+            class_key: None,
+            metrics: Metrics::default(),
+            tokens: 0,
+            failed: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -87,7 +140,7 @@ pub struct Agg {
     pub gpu_seconds: f32,
 }
 
-fn aggregate<'a>(evals: impl Iterator<Item = &'a PageEval>) -> HashMap<String, Agg> {
+pub fn aggregate<'a>(evals: impl Iterator<Item = &'a PageEval>) -> HashMap<String, Agg> {
     let mut sums: HashMap<String, Agg> = HashMap::new();
     for e in evals {
         let a = sums.entry(e.dag_id.clone()).or_default();
@@ -106,7 +159,7 @@ fn aggregate<'a>(evals: impl Iterator<Item = &'a PageEval>) -> HashMap<String, A
 }
 
 /// Best DAG by utility (ties → lower id for determinism). Requires every DAG to have the same page set.
-fn best(aggs: &HashMap<String, Agg>, obj: &Objective, w: Weights) -> Option<(String, f32, usize)> {
+pub fn best(aggs: &HashMap<String, Agg>, obj: &Objective, w: Weights) -> Option<(String, f32, usize)> {
     let mut v: Vec<(&String, f32, usize)> = aggs.iter().filter_map(|(id, a)| obj.utility(w, a).map(|u| (id, u, a.n))).collect();
     v.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal).then(a.0.cmp(b.0)));
     v.first().map(|(id, u, n)| ((*id).clone(), *u, *n))
@@ -130,7 +183,7 @@ pub fn class_key(p: &PageProfile, level: usize) -> Match {
     }
 }
 
-fn describe(m: &Match) -> String {
+pub fn describe(m: &Match) -> String {
     let mut parts = vec![];
     if let Some(l) = &m.languages {
         parts.push(format!("lang={}", l.join("|")));
@@ -153,7 +206,7 @@ fn describe(m: &Match) -> String {
     if parts.is_empty() { "any".into() } else { parts.join("/") }
 }
 
-fn key_string(m: &Match) -> String {
+pub fn key_string(m: &Match) -> String {
     serde_json::to_string(m).unwrap_or_default()
 }
 
@@ -260,7 +313,7 @@ mod tests {
     }
 
     fn eval(i: usize, p: &PageProfile, dag: &str, q: f32, lat: f32, gpu: f32) -> PageEval {
-        PageEval { page_id: format!("p{i}"), profile: p.clone(), dag_id: dag.into(), quality: q, latency_ms: lat, gpu_seconds: gpu, trust: Trust::Labelled }
+        PageEval::new(format!("p{i}"), p.clone(), dag, q, lat, gpu, Trust::Labelled)
     }
 
     #[test]
@@ -295,6 +348,16 @@ mod tests {
         assert_eq!(balanced_digital.dag, "native");
         // scans fall back to the default; no redundant rule emitted for them
         assert!(!list.routing.rules.iter().any(|r| r.when.born_digital == Some(false) && r.dag == "vlm"));
+    }
+
+    #[test]
+    fn old_eval_json_still_parses() {
+        let j = r#"{"page_id":"p","profile":{"language":"en","doc_type":"other","born_digital":true,"text_layer_coverage":1.0,
+            "has_handwriting":false,"has_images":false,"has_tables":false,"has_formulas":false,"has_charts":false,
+            "rotation_deg":0,"confidence":0.9,"tier":"rules"},"dag_id":"d","quality":0.5,"latency_ms":1.0,"gpu_seconds":0.0,"trust":"judge"}"#;
+        let e: PageEval = serde_json::from_str(j).unwrap();
+        assert_eq!(e.trust, Trust::Judge);
+        assert!(e.dag_version.is_none() && e.metrics.text.is_none() && !e.failed);
     }
 
     #[test]

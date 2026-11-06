@@ -1,5 +1,6 @@
 //! Worker process. See `SPEC.md`.
 
+mod dags;
 mod doc;
 mod ingest;
 mod page;
@@ -15,7 +16,8 @@ use tokio::sync::watch;
 
 use vs_infra::queue::{NatsBus, Role, TaskBus};
 use vs_infra::{Config, ObjectBlobStore};
-use vs_vault::{ops::Ops, PgVault};
+use vs_models::{ModelRegistry, OpenAiClient, OpenAiEmbedder};
+use vs_vault::{ops::Ops, PgOntologyStore, PgVault};
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum RoleArg {
@@ -38,6 +40,22 @@ struct Args {
 /// Classifier thumbnail size (vs-classify default).
 const THUMBNAIL_PX: u32 = 768;
 const MAX_PAGES: u32 = 5_000;
+/// Items per HelixDB batch query.
+const HELIX_BATCH: usize = 200;
+
+/// Model registry and client; `page` and `doc` roles only (ingest calls no model).
+struct Models {
+    client: Arc<OpenAiClient>,
+}
+
+impl Models {
+    fn load(cfg: &Config) -> anyhow::Result<Self> {
+        let path = &cfg.models.registry;
+        let registry = ModelRegistry::load(path).map_err(|e| anyhow::anyhow!("model registry {}: {e}", path.display()))?;
+        tracing::info!(registry = %path.display(), models = registry.all().count(), "model registry loaded");
+        Ok(Self { client: Arc::new(OpenAiClient::new(registry)) })
+    }
+}
 
 fn main() -> anyhow::Result<()> {
     // `vs-worker render-child`: render process spawned by the ingest role's pool. It
@@ -81,8 +99,59 @@ async fn run_worker() -> anyhow::Result<()> {
             thumbnail_px: THUMBNAIL_PX,
             max_pages: MAX_PAGES,
         }),
-        // Not started rather than consuming tasks it cannot handle.
-        Role::Page | Role::Doc => anyhow::bail!("role {} is not implemented yet", role.as_str()),
+        Role::Page => {
+            let models = Models::load(&cfg)?;
+            let steps = Arc::new(vs_steps::production_registry(models.client.clone()));
+            let classify: vs_classify::ClassifyConfig = cfg.classify.clone().try_into().map_err(|e| anyhow::anyhow!("[classify] section: {e}"))?;
+            let vision: Option<Arc<dyn vs_classify::VisionClassifier>> = match &cfg.stage2.classifier_model {
+                Some(model) => {
+                    models.client.spec(model)?; // fail at startup, not per page
+                    Some(Arc::new(vs_models::classifier::VlmPageClassifier { client: models.client.clone(), model: model.clone() }))
+                }
+                None => {
+                    tracing::warn!("no stage2.classifier_model configured; pages are classified by rules only");
+                    None
+                }
+            };
+            let refresh = Duration::from_secs(cfg.stage2.dag_list_refresh_s);
+            Arc::new(page::PageHandler {
+                blob,
+                bus: bus.clone(),
+                vault,
+                dags: Arc::new(dags::DagLists::new(ops.clone(), steps.clone(), refresh)),
+                ops,
+                steps,
+                classify,
+                vision,
+                bucket: cfg.blob.bucket.clone(),
+                render_dpi: cfg.worker.render_dpi,
+            })
+        }
+        Role::Doc => {
+            let models = Models::load(&cfg)?;
+            let s2 = &cfg.stage2;
+            for m in [&s2.extraction_model, &s2.verify_model].into_iter().chain(s2.judge_model.as_ref()) {
+                models.client.spec(m)?;
+            }
+            let embedder = Arc::new(OpenAiEmbedder::new(models.client.clone(), &s2.embedding_model, s2.embed_batch_size)?);
+            let helix = Arc::new(vs_helix::HelixStore::new(cfg.helix.url.clone(), HELIX_BATCH)?);
+            let mut resolver = vs_helix::HelixResolver::new(helix.clone(), embedder.clone()).with_thresholds(s2.link_threshold, s2.judge_band);
+            if let Some(judge) = &s2.judge_model {
+                resolver = resolver.with_judge(models.client.clone(), judge.clone());
+            }
+            Arc::new(doc::DocHandler {
+                blob,
+                vault,
+                ontology: Arc::new(PgOntologyStore::new(ops.pool.clone())),
+                ops,
+                graph: helix,
+                client: models.client,
+                embedder,
+                resolver: Arc::new(resolver),
+                stage2: s2.clone(),
+                max_failed_page_fraction: cfg.worker.max_failed_page_fraction,
+            })
+        }
     };
 
     let (stop_tx, stop_rx) = watch::channel(false);

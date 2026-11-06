@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::{BoxStream, StreamExt};
 use object_store::{
-    aws::AmazonS3Builder, path::Path, signer::Signer, Attribute, Attributes, ObjectStore, PutOptions, PutPayload,
+    aws::AmazonS3Builder, path::Path, signer::Signer, Attribute, Attributes, ObjectStore, PutMultipartOpts, PutOptions, PutPayload, WriteMultipart,
 };
 use reqwest::Method;
 use std::sync::Arc;
@@ -26,7 +26,29 @@ pub trait BlobStore: Send + Sync {
     async fn get_stream(&self, key: &str) -> Result<BoxStream<'static, Result<Bytes, BlobError>>, BlobError>;
     async fn exists(&self, key: &str) -> Result<bool, BlobError>;
     async fn presign_get(&self, key: &str, ttl: Duration) -> Result<String, BlobError>;
+    /// Stores an object from a stream without holding it in memory (multipart upload
+    /// on S3). Returns the number of bytes written. The default collects the stream and
+    /// calls `put`; stores that can upload in parts override it.
+    async fn put_stream(&self, key: &str, mut stream: BoxStream<'static, Result<Bytes, BlobError>>, content_type: &str) -> Result<u64, BlobError> {
+        let mut buf = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            buf.extend_from_slice(&chunk?);
+        }
+        let n = buf.len() as u64;
+        self.put(key, Bytes::from(buf), content_type).await?;
+        Ok(n)
+    }
+    /// Object size, or `None` if it does not exist.
+    async fn size(&self, key: &str) -> Result<Option<u64>, BlobError> {
+        // Default for stores without metadata access: existence only.
+        Ok(if self.exists(key).await? { Some(0) } else { None })
+    }
 }
+
+/// Multipart part size. S3 requires >= 5 MiB for all but the last part.
+const MULTIPART_CHUNK: usize = 8 * 1024 * 1024;
+/// Parts in flight per upload.
+const MULTIPART_CONCURRENCY: usize = 4;
 
 /// `object_store`-backed implementation (S3-compatible in production, local FS or
 /// memory in tests).
@@ -97,13 +119,44 @@ impl BlobStore for ObjectBlobStore {
         }
     }
 
+    async fn put_stream(&self, key: &str, mut stream: BoxStream<'static, Result<Bytes, BlobError>>, content_type: &str) -> Result<u64, BlobError> {
+        let attributes =
+            if self.signer.is_some() { Attributes::from_iter([(Attribute::ContentType, content_type.to_string())]) } else { Attributes::new() };
+        let store_err = |e: object_store::Error| BlobError::Store(e.to_string());
+        let upload =
+            self.store.put_multipart_opts(&Path::from(key), PutMultipartOpts { attributes, ..Default::default() }).await.map_err(store_err)?;
+        let mut w = WriteMultipart::new_with_chunk_size(upload, MULTIPART_CHUNK);
+        let mut n: u64 = 0;
+        while let Some(chunk) = stream.next().await {
+            let chunk = match chunk {
+                Ok(c) => c,
+                Err(e) => {
+                    w.abort().await.ok();
+                    return Err(e);
+                }
+            };
+            n += chunk.len() as u64;
+            if let Err(e) = w.wait_for_capacity(MULTIPART_CONCURRENCY).await {
+                w.abort().await.ok();
+                return Err(store_err(e));
+            }
+            w.write(&chunk);
+        }
+        w.finish().await.map_err(store_err)?;
+        Ok(n)
+    }
+
+    async fn size(&self, key: &str) -> Result<Option<u64>, BlobError> {
+        match self.store.head(&Path::from(key)).await {
+            Ok(m) => Ok(Some(m.size as u64)),
+            Err(object_store::Error::NotFound { .. }) => Ok(None),
+            Err(e) => Err(BlobError::Store(e.to_string())),
+        }
+    }
+
     async fn presign_get(&self, key: &str, ttl: Duration) -> Result<String, BlobError> {
         let signer = self.signer.as_ref().ok_or_else(|| BlobError::Store("store cannot presign".into()))?;
-        signer
-            .signed_url(Method::GET, &Path::from(key), ttl)
-            .await
-            .map(|u| u.to_string())
-            .map_err(|e| BlobError::Store(e.to_string()))
+        signer.signed_url(Method::GET, &Path::from(key), ttl).await.map(|u| u.to_string()).map_err(|e| BlobError::Store(e.to_string()))
     }
 }
 

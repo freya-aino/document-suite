@@ -1,0 +1,12 @@
+[
+  {"type": "text", "text": "Deep Residual Learning for Image Recognition", "text_level": 1, "bbox": [102, 71, 897, 118], "page_idx": 0},
+  {"type": "text", "text": "Deeper neural networks are more difficult to train. We present a residual learning framework to ease the training of networks that are substantially deeper than those used previously.", "bbox": [102, 160, 897, 260], "page_idx": 0},
+  {"type": "text", "text": "1. Introduction", "text_level": 2, "bbox": [102, 290, 480, 316], "page_idx": 0},
+  {"type": "image", "img_path": "images/0a1b2c.jpg", "image_caption": ["Figure 1. Training error (left) and test error (right) on CIFAR-10."], "image_footnote": [], "bbox": [102, 340, 897, 620], "page_idx": 0},
+  {"type": "table", "img_path": "images/table_1.jpg", "table_caption": ["Table 1. Architectures for ImageNet."], "table_footnote": ["FLOPs are counted for the 224x224 input."], "table_body": "<table><tr><td>layer name</td><td>output size</td><td>18-layer</td></tr><tr><td>conv1</td><td>112x112</td><td>7x7, 64, stride 2</td></tr></table>", "bbox": [102, 650, 897, 820], "page_idx": 0},
+  {"type": "equation", "text": "$$\\mathcal{F}(\\mathbf{x}) := \\mathcal{H}(\\mathbf{x}) - \\mathbf{x}$$", "text_format": "latex", "bbox": [320, 840, 680, 880], "page_idx": 0},
+  {"type": "list", "sub_type": "text", "list_items": ["Identity shortcuts add no parameter.", "Projection shortcuts are used when dimensions increase."], "bbox": [102, 900, 897, 950], "page_idx": 0},
+  {"type": "ref_text", "text": "[1] Y. Bengio, P. Simard, and P. Frasconi. Learning long-term dependencies with gradient descent is difficult.", "bbox": [102, 960, 897, 980], "page_idx": 0},
+  {"type": "discarded", "text": "arXiv:1512.03385v1 [cs.CV] 10 Dec 2015", "bbox": [20, 300, 60, 800], "page_idx": 0},
+  {"type": "page_number", "text": "1", "bbox": [490, 985, 510, 995], "page_idx": 0}
+]

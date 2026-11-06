@@ -2,19 +2,32 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Window extraction output",
   "type": "object",
+  "additionalProperties": false,
   "required": ["entities", "assertions"],
   "properties": {
     "entities": {
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["id", "surface", "type", "block", "quote"],
+        "additionalProperties": false,
+        "required": ["id", "name", "type", "mentions"],
         "properties": {
           "id": { "type": "string", "description": "window-local id, e.g. e1; reuse for coreferent mentions" },
-          "surface": { "type": "string" },
+          "name": { "type": "string", "description": "canonical name within the document" },
           "type": { "type": "string", "description": "open type, e.g. method, dataset, metric, organisation, person, chemical, component" },
-          "block": { "type": "string", "description": "block label, e.g. B12" },
-          "quote": { "type": "string", "description": "exact text from the block containing the mention" }
+          "mentions": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["block", "quote"],
+              "properties": {
+                "block": { "type": "string", "description": "block label, e.g. B12" },
+                "quote": { "type": "string", "description": "verbatim text from the block containing the mention" }
+              }
+            }
+          }
         }
       }
     },
@@ -22,30 +35,46 @@
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["predicate", "kind", "args", "evidence", "confidence"],
+        "additionalProperties": false,
+        "required": ["predicate", "kind", "args", "qualifiers", "evidence", "confidence"],
         "properties": {
           "predicate": { "type": "string", "description": "frame name (result, uses, compares, ...) or free predicate" },
-          "kind": { "enum": ["binary", "nary", "attribute"] },
+          "kind": { "type": "string", "enum": ["binary", "nary", "attribute"] },
           "args": {
             "type": "array",
             "items": {
               "type": "object",
-              "required": ["role"],
+              "additionalProperties": false,
+              "required": ["role", "entity", "literal"],
               "properties": {
                 "role": { "type": "string" },
-                "entity": { "type": "string", "description": "entity id" },
-                "literal": { "type": "string" },
-                "unit": { "type": "string" }
+                "entity": { "type": ["string", "null"], "description": "entity id, or null for a literal arg" },
+                "literal": {
+                  "anyOf": [
+                    { "type": "null" },
+                    {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": ["value", "unit"],
+                      "properties": {
+                        "value": { "type": "string" },
+                        "unit": { "type": ["string", "null"] }
+                      }
+                    }
+                  ]
+                }
               }
             }
           },
           "qualifiers": {
             "type": "object",
+            "additionalProperties": false,
+            "required": ["negated", "hedged", "condition", "time"],
             "properties": {
               "negated": { "type": "boolean" },
               "hedged": { "type": "boolean" },
-              "condition": { "type": "string" },
-              "time": { "type": "string" }
+              "condition": { "type": ["string", "null"] },
+              "time": { "type": ["string", "null"] }
             }
           },
           "evidence": {
@@ -53,8 +82,12 @@
             "minItems": 1,
             "items": {
               "type": "object",
+              "additionalProperties": false,
               "required": ["block", "quote"],
-              "properties": { "block": { "type": "string" }, "quote": { "type": "string" } }
+              "properties": {
+                "block": { "type": "string" },
+                "quote": { "type": "string", "description": "verbatim text from the block" }
+              }
             }
           },
           "confidence": { "type": "number", "minimum": 0, "maximum": 1 }

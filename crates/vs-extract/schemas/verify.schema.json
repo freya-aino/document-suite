@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Assertion verification verdicts",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["verdicts"],
+  "properties": {
+    "verdicts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "supported"],
+        "properties": {
+          "id": { "type": "string" },
+          "supported": { "type": "boolean" }
+        }
+      }
+    }
+  }
+}

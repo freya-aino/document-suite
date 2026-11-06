@@ -134,6 +134,12 @@ pub trait TaskBus: Send + Sync {
     async fn dead_letter(&self, role: Role, task: &Task, reason: &str) -> Result<(), QueueError>;
     /// Tasks of this role that ran out of deliveries.
     async fn subscribe_exhausted(&self, role: Role) -> Result<BoxStream<'static, Box<dyn Exhausted>>, QueueError>;
+    /// Messages waiting for the consumer of (role, lane), not yet delivered (JetStream
+    /// `num_pending`). Used for API back-pressure and autoscaling. Implementations
+    /// without a notion of backlog report 0.
+    async fn pending(&self, _role: Role, _lane: Lane) -> Result<u64, QueueError> {
+        Ok(0)
+    }
 }
 
 /// NATS JetStream implementation.
@@ -241,12 +247,7 @@ impl TaskBus for NatsBus {
         let conn = |e: &dyn std::fmt::Display| QueueError::Connection(e.to_string());
         let stream = self.js.get_stream(TASKS_STREAM).await.map_err(|e| conn(&e))?;
         let consumer: consumer::PullConsumer = stream.get_consumer(&consumer_name(role, lane)).await.map_err(|e| conn(&e))?;
-        let messages = consumer
-            .stream()
-            .max_messages_per_batch(self.pull_batch)
-            .messages()
-            .await
-            .map_err(|e| conn(&e))?;
+        let messages = consumer.stream().max_messages_per_batch(self.pull_batch).messages().await.map_err(|e| conn(&e))?;
         Ok(messages
             .filter_map(move |item| async move {
                 let msg = match item {
@@ -301,6 +302,13 @@ impl TaskBus for NatsBus {
                 }
             })
             .boxed())
+    }
+
+    async fn pending(&self, role: Role, lane: Lane) -> Result<u64, QueueError> {
+        let conn = |e: &dyn std::fmt::Display| QueueError::Connection(e.to_string());
+        let stream = self.js.get_stream(TASKS_STREAM).await.map_err(|e| conn(&e))?;
+        let info = stream.consumer_info(consumer_name(role, lane)).await.map_err(|e| conn(&e))?;
+        Ok(info.num_pending)
     }
 
     async fn dead_letter(&self, role: Role, task: &Task, reason: &str) -> Result<(), QueueError> {
