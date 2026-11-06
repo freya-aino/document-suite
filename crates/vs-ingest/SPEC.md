@@ -23,12 +23,26 @@ Runs once per document (worker role `ingest`) and provides the CPU-only DAG step
 
 ### Rasterizer
 
-`trait Rasterizer { page_count, render(page, dpi) -> PageImage, text_layer(page) -> TextLayer, signals(page) -> PageSignals }`
+`trait Rasterizer { page_count, render(page, dpi), thumbnail(page, long_side), text_layer(page), signals(page), page(page, dpi, long_side) -> PageAssets }`
 
-- PDF: **pdfium** via `pdfium-render`, with `libpdfium.so` shipped in the worker rootfs.
-  One pdfium instance per OS thread (pdfium is not thread-safe); rendering runs in
-  `spawn_blocking`.
-- Images: `image` crate; EXIF orientation applied; DPI from metadata or assumed 300.
+Pages are 1-based. `page()` returns all of a page's assets in one pass and is what the
+ingest flow calls.
+
+- PDF: **pdfium** via `pdfium-render`, bound from `PDFIUM_DYNAMIC_LIB_PATH` (set by
+  devenv) or the system library path (`libpdfium.so` in the worker rootfs).
+  pdfium is not thread-safe and keeps global state, so there is **one binding per
+  process**, and every document operation holds a process-wide lock (`pdfium()` returns
+  a guard). `pdfium-render`'s per-call locking alone corrupted the heap with documents
+  open on several threads. Only bitmap rendering and text extraction run under the
+  lock; PNG/JPEG encoding runs after it is released. Callers still use `spawn_blocking`.
+  Rendering throughput scales with worker processes, not threads.
+- Boxes (text spans, images) are normalised to the page **as rendered**, i.e. with
+  `/Rotate` applied, so they line up with the page image.
+- Page images are capped at 12 000 px per side; `PageImage.dpi` is the effective DPI.
+- Images: `image` crate (PNG, JPEG with EXIF orientation applied) and the `tiff` crate
+  for TIFF (one page per frame; bilevel/CCITT, 8/16-bit gray, RGB, RGBA; WhiteIsZero
+  inverted). DPI from the TIFF resolution tags, otherwise assumed 300. Images are
+  downscaled to the requested DPI but never upscaled.
 
 ### Text coverage
 

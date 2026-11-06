@@ -1,7 +1,14 @@
+use std::io::Cursor;
+use std::sync::Arc;
+
+use image::{DynamicImage, ImageFormat};
 use vs_classify::PageSignals;
 use vs_dag::{PageImage, TextLayer};
 
 use crate::format::Format;
+
+pub use crate::image_raster::ImageRasterizer;
+pub use crate::pdf::PdfiumRasterizer;
 
 #[derive(Debug, thiserror::Error)]
 pub enum IngestError {
@@ -15,61 +22,81 @@ pub enum IngestError {
     TooManyPages(u32),
     #[error("render failed on page {page}: {reason}")]
     Render { page: u32, reason: String },
+    #[error("pdfium unavailable: {0}")]
+    Pdfium(String),
 }
 
 impl IngestError {
     /// Deterministic errors are not retried.
     pub fn is_permanent(&self) -> bool {
-        !matches!(self, IngestError::Render { .. })
+        !matches!(self, IngestError::Render { .. } | IngestError::Pdfium(_))
     }
 }
 
-/// One opened document. Implementations are not required to be `Sync`;
-/// callers render on blocking threads.
+/// Everything ingest stores for one page.
+#[derive(Debug, Clone)]
+pub struct PageAssets {
+    pub image: PageImage,
+    pub thumbnail: PageImage,
+    pub text_layer: TextLayer,
+    pub signals: PageSignals,
+}
+
+/// One opened document. Page numbers are 1-based. Implementations are not required
+/// to be `Sync`; callers render on blocking threads.
 pub trait Rasterizer: Send {
     fn page_count(&self) -> u32;
     fn render(&mut self, page_no: u32, dpi: u32) -> Result<PageImage, IngestError>;
     fn thumbnail(&mut self, page_no: u32, long_side_px: u32) -> Result<PageImage, IngestError>;
     fn text_layer(&mut self, page_no: u32) -> Result<TextLayer, IngestError>;
     fn signals(&mut self, page_no: u32) -> Result<PageSignals, IngestError>;
-}
 
-/// pdfium-backed rasterizer for PDFs (`libpdfium.so` in the rootfs).
-pub struct PdfiumRasterizer {
-    _bytes: Vec<u8>,
-    page_count: u32,
-}
-
-impl PdfiumRasterizer {
-    pub fn open(bytes: Vec<u8>, max_pages: u32) -> Result<Self, IngestError> {
-        let _ = max_pages;
-        let _ = bytes;
-        todo!("bind pdfium (Pdfium::bind_to_system_library), load document, check page count")
+    /// All of a page's assets. Implementations override this when doing it in one pass
+    /// is cheaper than four calls.
+    fn page(&mut self, page_no: u32, dpi: u32, thumb_long_side_px: u32) -> Result<PageAssets, IngestError> {
+        Ok(PageAssets {
+            image: self.render(page_no, dpi)?,
+            thumbnail: self.thumbnail(page_no, thumb_long_side_px)?,
+            text_layer: self.text_layer(page_no)?,
+            signals: self.signals(page_no)?,
+        })
     }
 }
 
-impl Rasterizer for PdfiumRasterizer {
-    fn page_count(&self) -> u32 {
-        self.page_count
-    }
-    fn render(&mut self, _page_no: u32, _dpi: u32) -> Result<PageImage, IngestError> {
-        todo!("render page to RGB bitmap, encode PNG")
-    }
-    fn thumbnail(&mut self, _page_no: u32, _long_side_px: u32) -> Result<PageImage, IngestError> {
-        todo!("render at target size, encode JPEG q=85")
-    }
-    fn text_layer(&mut self, _page_no: u32) -> Result<TextLayer, IngestError> {
-        todo!("iterate text segments; normalise bboxes to [0,1]")
-    }
-    fn signals(&mut self, _page_no: u32) -> Result<PageSignals, IngestError> {
-        todo!("count chars, image objects/areas, detect invisible text render mode (OCR layer), rotation")
-    }
-}
-
-/// Image formats (PNG/JPEG/TIFF frames) via the `image` crate.
 pub fn open_rasterizer(format: Format, bytes: Vec<u8>, max_pages: u32) -> Result<Box<dyn Rasterizer>, IngestError> {
     match format {
         Format::Pdf => Ok(Box::new(PdfiumRasterizer::open(bytes, max_pages)?)),
-        Format::Png | Format::Jpeg | Format::Tiff => todo!("ImageRasterizer: decode frames, apply EXIF orientation"),
+        Format::Png | Format::Jpeg | Format::Tiff => Ok(Box::new(ImageRasterizer::open(format, &bytes, max_pages)?)),
     }
+}
+
+pub(crate) fn check_page(page_no: u32, page_count: u32) -> Result<(), IngestError> {
+    if page_no == 0 || page_no > page_count {
+        return Err(IngestError::Render { page: page_no, reason: format!("page out of range 1..={page_count}") });
+    }
+    Ok(())
+}
+
+/// Page image as PNG (RGB, lossless; the model input).
+pub(crate) fn encode_png(img: &DynamicImage, dpi: u32, page: u32) -> Result<PageImage, IngestError> {
+    let rgb = DynamicImage::ImageRgb8(img.to_rgb8());
+    let mut out = Vec::new();
+    rgb.write_to(&mut Cursor::new(&mut out), ImageFormat::Png)
+        .map_err(|e| IngestError::Render { page, reason: e.to_string() })?;
+    Ok(page_image(out, &rgb, dpi))
+}
+
+/// Classifier thumbnail as JPEG q=85.
+pub(crate) fn encode_jpeg(img: &DynamicImage, dpi: u32, page: u32) -> Result<PageImage, IngestError> {
+    let rgb = img.to_rgb8();
+    let mut out = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 85)
+        .encode_image(&rgb)
+        .map_err(|e| IngestError::Render { page, reason: e.to_string() })?;
+    Ok(page_image(out, img, dpi))
+}
+
+fn page_image(bytes: Vec<u8>, img: &DynamicImage, dpi: u32) -> PageImage {
+    // `uri` is set by the caller once the image is stored.
+    PageImage { uri: String::new(), bytes: Arc::from(bytes), width_px: img.width(), height_px: img.height(), dpi }
 }
