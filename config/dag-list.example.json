@@ -1,0 +1,63 @@
+{
+  "version": "example-2026-11-06",
+  "created_by": "hand-written example (real lists come from vs-adapt select)",
+  "dags": [
+    {
+      "id": "vlm-e2e-robust",
+      "version": "1",
+      "description": "Any page: one end-to-end document VLM call, figures described.",
+      "output": "merge",
+      "nodes": [
+        { "id": "parse", "step": "page.parse_e2e", "inputs": ["$page_image"], "params": { "model": "paddleocr-vl-1.5" } },
+        { "id": "layout", "step": "layout.detect", "inputs": ["$page_image"], "params": { "model": "mineru-2.5" } },
+        { "id": "crops", "step": "figure.crop", "inputs": ["$page_image", "layout"], "params": { "padding": 0.02 }, "optional": true },
+        { "id": "figures", "step": "figure.describe", "inputs": ["crops"], "params": { "model": "qwen3-vl" }, "optional": true },
+        { "id": "merge", "step": "blocks.merge", "inputs": ["parse", "figures"] }
+      ]
+    },
+    {
+      "id": "born-digital-text",
+      "version": "1",
+      "description": "Born-digital page without images: native text + layout, tables via doc VLM.",
+      "output": "merge",
+      "nodes": [
+        { "id": "layout", "step": "layout.detect", "inputs": ["$page_image"], "params": { "model": "mineru-2.5" } },
+        { "id": "tables", "step": "table.recognize", "inputs": ["$page_image", "layout"], "params": { "model": "paddleocr-vl-1.5" }, "optional": true },
+        { "id": "merge", "step": "blocks.merge_native", "inputs": ["$text_layer", "layout", "tables"] }
+      ]
+    },
+    {
+      "id": "scan-handwriting",
+      "version": "1",
+      "description": "Scanned pages with handwriting: layout, then region OCR per text/handwriting region.",
+      "output": "merge",
+      "nodes": [
+        { "id": "layout", "step": "layout.detect", "inputs": ["$page_image"], "params": { "model": "mineru-2.5" } },
+        { "id": "text", "step": "region.ocr", "inputs": ["$page_image", "layout"], "params": { "model": "paddleocr-vl-1.5" } },
+        { "id": "tables", "step": "table.recognize", "inputs": ["$page_image", "layout"], "params": { "model": "paddleocr-vl-1.5" }, "optional": true },
+        { "id": "merge", "step": "blocks.merge", "inputs": ["text", "tables"] }
+      ]
+    }
+  ],
+  "routing": {
+    "default_dag": "vlm-e2e-robust",
+    "low_confidence_dag": "vlm-e2e-robust",
+    "min_classifier_confidence": 0.6,
+    "rules": [
+      {
+        "id": "balanced/digital=true/images=false",
+        "when": { "born_digital": true, "has_images": false },
+        "profiles": [],
+        "dag": "born-digital-text",
+        "score": 0.92
+      },
+      {
+        "id": "balanced/digital=false/hw=true",
+        "when": { "born_digital": false, "has_handwriting": true },
+        "profiles": [],
+        "dag": "scan-handwriting",
+        "score": 0.81
+      }
+    ]
+  }
+}
