@@ -1,0 +1,17 @@
+# HelixDB project for visual-suite. Pinned to Helix 2.3.5 (see ../SPEC.md).
+# Schema, migrations and queries live in db/*.hx; `helix check` validates them,
+# `helix push dev` builds and starts the local instance (Docker).
+
+[project]
+name = "visual-suite"
+queries = "./db/"
+container_runtime = "docker"
+
+[local.dev]
+port = 6969
+build_mode = "dev"
+
+[local.dev.db_config]
+# The suite and the RAG service use the compiled query endpoints only.
+mcp = false
+bm25 = true
