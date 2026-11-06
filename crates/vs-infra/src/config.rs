@@ -33,6 +33,9 @@ pub struct BlobConfig {
 pub struct PostgresConfig {
     /// Without password; password comes from `VS__POSTGRES__PASSWORD`.
     pub url: String,
+    /// Set from the environment only.
+    #[serde(default)]
+    pub password: Option<String>,
     #[serde(default = "default_pool")]
     pub max_connections: u32,
 }

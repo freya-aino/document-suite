@@ -9,7 +9,9 @@ pub fn init(cfg: &TelemetryConfig) {
     if cfg.json_logs {
         fmt().with_env_filter(filter).json().init();
     } else {
-        fmt().with_env_filter(filter).init();
+        // No colour codes when logging to a file or pipe.
+        let ansi = std::io::IsTerminal::is_terminal(&std::io::stdout());
+        fmt().with_env_filter(filter).with_ansi(ansi).init();
     }
     if cfg.otlp_endpoint.is_some() || cfg.metrics_addr.is_some() {
         tracing::warn!("OTLP / metrics exporters not wired yet");

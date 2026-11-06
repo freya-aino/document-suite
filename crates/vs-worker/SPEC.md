@@ -18,6 +18,16 @@ loop:
   Err(permanent) or attempt == max  → dead_letter + term; mark page/job failed
 ```
 
+Implementation (`src/runtime.rs`): one pull loop per lane; a loop pulls only after it
+holds a slot. `ceil(max_in_flight × interactive_share)` slots are reserved for the
+interactive lane (batch always keeps at least one); interactive tasks also use the
+shared slots. Handler errors are transient unless marked permanent (bad input,
+unsupported format); transient errors are `nak`ed with the bus backoff
+(10 s / 60 s / 300 s) until the last attempt, then dead-lettered like permanent ones,
+and the handler's `give_up` marks the job or page failed. A role that is not
+implemented refuses to start instead of consuming its tasks (currently `page` and
+`doc`).
+
 `max_in_flight` concurrent tasks per process (default 32 for `page`; most of the time
 is spent waiting on model calls, so this is much larger than the vCPU count).
 
@@ -28,6 +38,13 @@ Graceful shutdown on SIGTERM: stop pulling, finish in-flight tasks within
 
 `Task::Ingest` → `vs-ingest` flow (see its SPEC): render pages, write text layers and
 signals, `VaultWriter::write_document`, fan out `Task::Page`.
+
+Implemented in `src/ingest.rs`. Pages whose `signals.json` already exists are not
+re-rendered (signals are written last, so their presence means the page is complete).
+Rendering runs on a blocking thread and streams pages to the uploader through a
+bounded channel (4 pages ahead), so memory does not grow with page count. The DAG-list
+version recorded for the run is the pinned one, else the tenant's or global active
+list, else `none`.
 
 ## Role `page` (Stage 1)
 

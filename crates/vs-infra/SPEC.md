@@ -48,6 +48,7 @@ Key layout (content-addressed where possible):
 originals/<tenant>/<sha256>                         original upload
 pages/<document_hk>/<page_no>/<dpi>.png             rendered page
 pages/<document_hk>/<page_no>/thumb.jpg             classifier thumbnail
+pages/<document_hk>/<page_no>/signals.json          classifier tier-0 signals (written last)
 textlayer/<document_hk>/<page_no>.json              native text spans
 crops/<page_hk>/<run_id>/<block_index>.png          figure/chart crops
 results/<document_hk>/<run_id>/page-<page_no>.json  PageResult
