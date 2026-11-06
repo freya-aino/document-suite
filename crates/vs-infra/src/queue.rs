@@ -68,9 +68,15 @@ impl Lane {
 
 pub const TASKS_STREAM: &str = "VS_TASKS";
 pub const DLQ_STREAM: &str = "VS_DLQ";
+/// Durable copy of JetStream's max-deliveries advisories for `VS_TASKS`.
+pub const ADVISORY_STREAM: &str = "VS_ADVISORIES";
+const MAX_DELIVERIES_ADVISORY: &str = "$JS.EVENT.ADVISORY.CONSUMER.MAX_DELIVERIES.VS_TASKS";
 /// 1 + 3 retries.
 pub const MAX_DELIVER: u32 = 4;
-/// Redelivery delays after the 1st, 2nd and 3rd attempt.
+/// Redelivery delays after the 1st, 2nd and 3rd attempt, applied by the worker's nak.
+/// Deliberately **not** set as the consumer's `backoff`: with a backoff list JetStream
+/// uses it instead of `ack_wait` (a 10 s ack window on the first delivery, so long tasks
+/// were redelivered while still running) and ignores nak delays.
 pub const BACKOFF: [Duration; 3] = [Duration::from_secs(10), Duration::from_secs(60), Duration::from_secs(300)];
 
 pub fn subject(role: Role, lane: Lane) -> String {
@@ -79,6 +85,10 @@ pub fn subject(role: Role, lane: Lane) -> String {
 
 pub fn consumer_name(role: Role, lane: Lane) -> String {
     format!("w-{}-{}", role.as_str(), lane.as_str())
+}
+
+fn advisory_consumer_name(role: Role) -> String {
+    format!("adv-{}", role.as_str())
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -104,12 +114,26 @@ pub trait Delivery: Send {
     async fn in_progress(&self) -> Result<(), QueueError>;
 }
 
+/// A task JetStream stopped redelivering after `MAX_DELIVER` attempts without an ack,
+/// nak or term: the worker crashed or hung on every attempt, so no handler ever ran its
+/// give-up path. Exactly one of `resolve`, `retry_later` must be called.
+#[async_trait]
+pub trait Exhausted: Send {
+    /// `None` if the task message is already gone (e.g. handled before).
+    fn task(&self) -> Option<&Task>;
+    /// Removes the task message from `VS_TASKS` and acknowledges the advisory.
+    async fn resolve(self: Box<Self>) -> Result<(), QueueError>;
+    async fn retry_later(self: Box<Self>, delay: Duration) -> Result<(), QueueError>;
+}
+
 #[async_trait]
 pub trait TaskBus: Send + Sync {
     /// `dedup_id` becomes the message-id header (JetStream de-duplication).
     async fn publish(&self, role: Role, lane: Lane, task: &Task, dedup_id: &str) -> Result<(), QueueError>;
     async fn subscribe(&self, role: Role, lane: Lane) -> Result<BoxStream<'static, Box<dyn Delivery>>, QueueError>;
     async fn dead_letter(&self, role: Role, task: &Task, reason: &str) -> Result<(), QueueError>;
+    /// Tasks of this role that ran out of deliveries.
+    async fn subscribe_exhausted(&self, role: Role) -> Result<BoxStream<'static, Box<dyn Exhausted>>, QueueError>;
 }
 
 /// NATS JetStream implementation.
@@ -147,7 +171,17 @@ impl NatsBus {
             max_age: Duration::from_secs(14 * 24 * 3600),
             ..Default::default()
         };
-        for cfg in [tasks, dlq] {
+        // JetStream publishes max-deliveries advisories on core NATS only; capturing
+        // them in a stream means none is lost while no worker of the role is running.
+        let advisories = stream::Config {
+            name: ADVISORY_STREAM.into(),
+            subjects: vec![format!("{MAX_DELIVERIES_ADVISORY}.*")],
+            retention: stream::RetentionPolicy::WorkQueue,
+            storage: stream::StorageType::File,
+            max_age: Duration::from_secs(14 * 24 * 3600),
+            ..Default::default()
+        };
+        for cfg in [tasks, dlq, advisories] {
             // get_or_create does not apply changed settings to an existing stream.
             self.js.get_or_create_stream(cfg.clone()).await.map_err(|e| conn(&e))?;
             self.js.update_stream(cfg).await.map_err(|e| conn(&e))?;
@@ -165,12 +199,24 @@ impl NatsBus {
                         ack_policy: consumer::AckPolicy::Explicit,
                         ack_wait: role.ack_wait(),
                         max_deliver: MAX_DELIVER as i64,
-                        backoff: BACKOFF.to_vec(),
                         ..Default::default()
                     })
                     .await
                     .map_err(|e| conn(&e))?;
             }
+        }
+
+        let adv = self.js.get_stream(ADVISORY_STREAM).await.map_err(|e| conn(&e))?;
+        for role in Role::ALL {
+            adv.create_consumer(pull::Config {
+                durable_name: Some(advisory_consumer_name(role)),
+                filter_subjects: Lane::ALL.iter().map(|l| format!("{MAX_DELIVERIES_ADVISORY}.{}", consumer_name(role, *l))).collect(),
+                ack_policy: consumer::AckPolicy::Explicit,
+                ack_wait: Duration::from_secs(60),
+                ..Default::default()
+            })
+            .await
+            .map_err(|e| conn(&e))?;
         }
         Ok(())
     }
@@ -226,6 +272,37 @@ impl TaskBus for NatsBus {
             .boxed())
     }
 
+    async fn subscribe_exhausted(&self, role: Role) -> Result<BoxStream<'static, Box<dyn Exhausted>>, QueueError> {
+        let conn = |e: &dyn std::fmt::Display| QueueError::Connection(e.to_string());
+        let tasks = self.js.get_stream(TASKS_STREAM).await.map_err(|e| conn(&e))?;
+        let adv = self.js.get_stream(ADVISORY_STREAM).await.map_err(|e| conn(&e))?;
+        let consumer: consumer::PullConsumer = adv.get_consumer(&advisory_consumer_name(role)).await.map_err(|e| conn(&e))?;
+        let messages = consumer.stream().max_messages_per_batch(1).messages().await.map_err(|e| conn(&e))?;
+        Ok(messages
+            .filter_map(move |item| {
+                let tasks = tasks.clone();
+                async move {
+                    let advisory = item.map_err(|e| tracing::warn!(error = %e, "advisory pull error")).ok()?;
+                    let Ok(a) = serde_json::from_slice::<MaxDeliveriesAdvisory>(&advisory.payload) else {
+                        tracing::error!("undecodable max-deliveries advisory, dropping");
+                        let _ = advisory.ack_with(AckKind::Term).await;
+                        return None;
+                    };
+                    let task = match tasks.get_raw_message(a.stream_seq).await {
+                        Ok(m) => serde_json::from_slice::<Task>(&m.payload).ok(),
+                        Err(e) if matches!(e.kind(), stream::RawMessageErrorKind::NoMessageFound) => None,
+                        Err(e) => {
+                            tracing::warn!(seq = a.stream_seq, error = %e, "could not load exhausted task; retrying");
+                            let _ = advisory.ack_with(AckKind::Nak(Some(Duration::from_secs(30)))).await;
+                            return None;
+                        }
+                    };
+                    Some(Box::new(NatsExhausted { advisory, tasks, seq: a.stream_seq, task }) as Box<dyn Exhausted>)
+                }
+            })
+            .boxed())
+    }
+
     async fn dead_letter(&self, role: Role, task: &Task, reason: &str) -> Result<(), QueueError> {
         let payload = serde_json::json!({ "reason": reason, "task": task });
         self.js
@@ -235,6 +312,37 @@ impl TaskBus for NatsBus {
             .await
             .map_err(|e| QueueError::Publish(e.to_string()))?;
         Ok(())
+    }
+}
+
+/// Fields of `io.nats.jetstream.advisory.v1.max_deliver` that we use.
+#[derive(Deserialize)]
+struct MaxDeliveriesAdvisory {
+    stream_seq: u64,
+}
+
+struct NatsExhausted {
+    advisory: jetstream::Message,
+    tasks: stream::Stream,
+    seq: u64,
+    task: Option<Task>,
+}
+
+#[async_trait]
+impl Exhausted for NatsExhausted {
+    fn task(&self) -> Option<&Task> {
+        self.task.as_ref()
+    }
+
+    async fn resolve(self: Box<Self>) -> Result<(), QueueError> {
+        if self.task.is_some() {
+            self.tasks.delete_message(self.seq).await.map_err(|e| QueueError::Publish(e.to_string()))?;
+        }
+        self.advisory.double_ack().await.map_err(|e| QueueError::Publish(e.to_string()))
+    }
+
+    async fn retry_later(self: Box<Self>, delay: Duration) -> Result<(), QueueError> {
+        self.advisory.ack_with(AckKind::Nak(Some(delay))).await.map_err(|e| QueueError::Publish(e.to_string()))
     }
 }
 

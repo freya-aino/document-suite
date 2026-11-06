@@ -14,12 +14,24 @@ Default implementation: **NATS JetStream** (assumption A6).
 |--------|----------|-----------|--------------------------|
 | `VS_TASKS` | `vs.<role>.<lane>` — role ∈ `ingest, page, doc`; lane ∈ `interactive, batch` | work-queue | `w-<role>-<lane>` |
 | `VS_DLQ` | `vs.dlq.<role>` | limits (14 days) | inspected by ops |
+| `VS_ADVISORIES` | `$JS.EVENT.ADVISORY.CONSUMER.MAX_DELIVERIES.VS_TASKS.*` | work-queue (14 days) | `adv-<role>` (filters its role's two consumers) |
 
 - Messages are JSON `vs_core::Task` (references only; ≤ 16 KiB).
 - `ack_wait` per role: ingest 10 min, page 5 min, doc 30 min. Long tasks send
   `in_progress` heartbeats every `ack_wait / 3`.
-- `max_deliver = 4` (1 + 3 retries), backoff `[10s, 60s, 300s]`; after that the worker
-  publishes to `VS_DLQ` and terminates the message.
+- `max_deliver = 4` (1 + 3 retries). Retry delays `[10s, 60s, 300s]` are applied by the
+  worker's `nak`; the consumers have **no `backoff`**: with a backoff list JetStream
+  uses it instead of `ack_wait` (a 10 s ack window on the first delivery, so long tasks
+  were redelivered while still running) and ignores nak delays. A crashed worker's
+  task is redelivered after `ack_wait`.
+- On a handler error at the last attempt (or a permanent error) the worker publishes
+  to `VS_DLQ` and terminates the message.
+- If every attempt ends without a result (worker crash or hang each time), no handler
+  runs its give-up path. JetStream then emits a max-deliveries advisory, which
+  `VS_ADVISORIES` stores durably; `subscribe_exhausted(role)` yields the stuck task,
+  the role runs its give-up path, dead-letters it and deletes it from `VS_TASKS`. The
+  advisory is emitted on the next delivery attempt on that consumer, i.e. while some
+  worker of the role is pulling.
 - Message id header = `<job_id>:<role>:<page_no?>` → JetStream de-duplication window
   (2 min) prevents duplicate fan-out on API/ingest retries.
 - Pulls fetch `pull_batch` messages per request (default 1): fetched messages count

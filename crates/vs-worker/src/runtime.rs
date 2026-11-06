@@ -10,7 +10,7 @@ use tokio::sync::{watch, OwnedSemaphorePermit, Semaphore};
 use tracing::Instrument;
 
 use vs_core::Task;
-use vs_infra::queue::{Delivery, Lane, Role, TaskBus, BACKOFF, MAX_DELIVER};
+use vs_infra::queue::{Delivery, Exhausted, Lane, Role, TaskBus, BACKOFF, MAX_DELIVER};
 
 /// Handler failure. Transient errors are retried with backoff; permanent ones (bad
 /// input, unsupported format) go straight to the dead-letter queue.
@@ -88,6 +88,23 @@ pub async fn run_loop(
             }
         }));
     }
+    // Tasks that ran out of deliveries without any handler result (crash or hang on
+    // every attempt) still get the role's give-up path.
+    {
+        let mut exhausted = bus.subscribe_exhausted(role).await?;
+        let (bus, handler, mut shutdown) = (bus.clone(), handler.clone(), shutdown.clone());
+        pullers.push(tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    e = exhausted.next() => match e {
+                        Some(e) => handle_exhausted(role, bus.as_ref(), handler.as_ref(), e).await,
+                        None => break,
+                    },
+                    _ = shutdown.changed() => break,
+                }
+            }
+        }));
+    }
     for p in pullers {
         p.await?;
     }
@@ -102,6 +119,22 @@ pub async fn run_loop(
         tracing::warn!(role = role.as_str(), "shutdown grace exceeded; remaining tasks will be redelivered");
     }
     Ok(())
+}
+
+async fn handle_exhausted(role: Role, bus: &dyn TaskBus, handler: &dyn Handler, e: Box<dyn Exhausted>) {
+    if let Some(task) = e.task().cloned() {
+        let reason = format!("no result after {MAX_DELIVER} deliveries (worker crashed or hung on every attempt)");
+        tracing::error!(role = role.as_str(), job_id = %job_id(&task), "{reason}");
+        handler.give_up(&task, &reason).await;
+        if let Err(dl) = bus.dead_letter(role, &task, &reason).await {
+            tracing::error!(error = %dl, "dead-letter publish failed; retrying later");
+            let _ = e.retry_later(Duration::from_secs(30)).await;
+            return;
+        }
+    }
+    if let Err(err) = e.resolve().await {
+        tracing::error!(error = %err, "could not resolve exhausted task");
+    }
 }
 
 async fn acquire(lane: Lane, shared: &Arc<Semaphore>, interactive_only: &Arc<Semaphore>) -> OwnedSemaphorePermit {
@@ -224,6 +257,26 @@ mod tests {
             self.0.push(format!("dlq {reason}"));
             Ok(())
         }
+        async fn subscribe_exhausted(&self, _: Role) -> Result<BoxStream<'static, Box<dyn Exhausted>>, QueueError> {
+            Ok(futures::stream::empty().boxed())
+        }
+    }
+
+    struct FakeExhausted(Option<Task>, Arc<Log>);
+
+    #[async_trait]
+    impl Exhausted for FakeExhausted {
+        fn task(&self) -> Option<&Task> {
+            self.0.as_ref()
+        }
+        async fn resolve(self: Box<Self>) -> Result<(), QueueError> {
+            self.1.push("resolve");
+            Ok(())
+        }
+        async fn retry_later(self: Box<Self>, _: Duration) -> Result<(), QueueError> {
+            self.1.push("retry_later");
+            Ok(())
+        }
     }
 
     /// Returns `f(attempt)`.
@@ -270,6 +323,23 @@ mod tests {
         assert_eq!(run_attempt(fail, 1).await, vec!["nak 1 10s"]);
         assert_eq!(run_attempt(fail, 3).await, vec!["nak 3 300s"]);
         assert_eq!(run_attempt(fail, MAX_DELIVER).await, vec!["give_up flaky", "dlq flaky", "term 4"]);
+    }
+
+    #[tokio::test]
+    async fn exhausted_tasks_get_give_up_and_dead_letter() {
+        let log = Arc::new(Log::default());
+        let h = Attempt(log.clone(), |_| Ok(()), 4);
+        let e = Box::new(FakeExhausted(Some(task()), log.clone()));
+        handle_exhausted(Role::Doc, &FakeBus(log.clone()), &h, e).await;
+        let all = log.all();
+        assert!(all[0].starts_with("give_up no result after 4 deliveries"), "{all:?}");
+        assert!(all[1].starts_with("dlq no result"));
+        assert_eq!(all[2], "resolve");
+
+        // Already gone: just acknowledge.
+        let log = Arc::new(Log::default());
+        handle_exhausted(Role::Doc, &FakeBus(log.clone()), &h, Box::new(FakeExhausted(None, log.clone()))).await;
+        assert_eq!(log.all(), vec!["resolve"]);
     }
 
     #[tokio::test]
