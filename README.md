@@ -34,10 +34,13 @@ config/                   example model registry, worker config, DAG list
 
 ## Status
 
-Scaffold. Types, traits and the pure-logic parts (DAG validation, routing, scoring
-objective, page rules) are implemented with unit tests. I/O-bound parts (model calls,
-rasterization, stores, queue) have signatures and `todo!`/`NotImplemented` bodies,
-described in each crate's spec.
+In progress. Implemented: shared types, DAG validation, routing, scoring objective, page
+rules, stitching, rasterization (pdfium, images), task bus (NATS JetStream), blob store
+(S3/Garage), vault writes for documents and pages, job state, the worker loop with the
+ingest role, and document submission / job status in the API. Still stubbed (`todo!` /
+`NotImplemented`, described in each crate's spec): model output parsers and most
+model-backed steps, the page and doc worker roles, Stage 2 extraction and its vault
+writes, the HelixDB writer, and most API endpoints.
 
 ## Development environment
 
@@ -59,6 +62,35 @@ devenv up -d          # postgres, nats, garage (layout, bucket and key set up on
 devenv shell          # or direnv
 vs-migrate            # apply vs-vault migrations
 devenv down
+```
+
+### Running the pipeline locally
+
+Implemented so far: upload → ingest (render, text layer, signals) → vault + page tasks.
+The `page` and `doc` workers do not start yet.
+
+```sh
+devenv up -d && devenv shell
+cargo build -p vs-api -p vs-worker
+cargo run -p vs-ingest --example sample_pdf -- sample.pdf
+VS_API_ADDR=127.0.0.1:8080 ./target/debug/vs-api &
+VS_ROLE=ingest ./target/debug/vs-worker &
+curl -X PUT --upload-file sample.pdf --aws-sigv4 "aws:amz:$AWS_REGION:s3" \
+  --user "$AWS_ACCESS_KEY_ID:$AWS_SECRET_ACCESS_KEY" "$AWS_ENDPOINT/visual-suite/inbox/t1/sample.pdf"
+curl -X POST 127.0.0.1:8080/v1/documents -H 'x-vs-tenant: t1' -H 'content-type: application/json' \
+  -d '{"language":"en","source_uri":"inbox/t1/sample.pdf"}'
+curl 127.0.0.1:8080/v1/jobs/<job_id> -H 'x-vs-tenant: t1'
+```
+
+`X-VS-Tenant` is a development stand-in for auth (see `crates/vs-api/SPEC.md`).
+
+### Tests
+
+`cargo test` runs unit tests (PDF tests need `PDFIUM_DYNAMIC_LIB_PATH`, set by devenv).
+Tests against Postgres, NATS and Garage are `#[ignore]`d; with `devenv up` running:
+
+```sh
+cargo test --workspace -- --include-ignored
 ```
 
 ## Build
