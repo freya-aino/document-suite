@@ -21,10 +21,10 @@ revisiting this decision.
 ### Helix project (`crates/vs-helix/helix/`)
 
 ```
-helix.toml          project + local instance (port 6969)
-db/schema.hx        versioned schema: schema::1 = initial data model, later schema::N
-db/migrations.hx    MIGRATION schema::N => schema::N+1 blocks
-db/queries.hx       every query the suite and the RAG service call
+helix.toml                project + local instance (port 6969, MCP off, BM25 on)
+db/0001_init_schema.hx    migration 0001: schema::1, the initial data model
+db/000N_<change>.hx       later: schema::N + MIGRATION schema::N-1 => schema::N
+db/queries.hx             every query the suite and the RAG service call
 ```
 
 - **Migrations initialise the data model.** `schema::1` declares the model below; every
@@ -34,9 +34,35 @@ db/queries.hx       every query the suite and the RAG service call
   path creates or alters schema at runtime.
 - Queries are part of the deployed project, so a query change is a deploy, versioned
   with the code that calls it. `helix check` runs in CI.
-- `HelixStore` (the `GraphStore` implementation) is a thin typed client: one Rust
-  function per query, serialising parameters and parsing the declared `RETURN` shape.
-  The query names are the contract with the RAG service.
+- `HelixStore` (the `GraphStore` implementation) builds the parameters of each write
+  query from the `DocGraph` (pure, unit-tested `Plan`) and calls the queries in
+  batches of `batch_size`. The query names are the contract with the RAG service.
+- Locally: `vs-helix-up` / `vs-helix-down` (devenv scripts) run `helix push dev` /
+  `helix stop dev` (Docker). `helix check` also cargo-checks the generated Rust, which
+  needs `pkg-config` and OpenSSL (in the devenv module).
+
+### Helix 2.3.5 quirks (found while writing the queries)
+
+- `DROP` takes an inline traversal, not a variable.
+- `SearchBM25<T>(…)` cannot be followed by steps; assign it, then filter.
+- The code generator singularises returned variable names into Rust closure
+  parameters: a variable named `continues` becomes the keyword `continue` and the
+  generated code does not compile. Avoid names whose singular is a Rust keyword.
+- A lookup by key (`N<T>({field: v})`) is compiled as exactly-one: when nothing
+  matches, the query fails with `No value found` (HTTP 500, `GRAPH_ERROR`) instead
+  of returning empty. `WHERE`/`RANGE` do not change that; `ORDER` makes the value a
+  list but not its type, and the generated code does not compile. So `UpsertN` after a
+  lookup cannot create, and "not found" is an error the client interprets
+  (`HelixError::is_not_found`).
+- Secondary indexes are global per field name (shared by all node types), and lookups
+  through a `UNIQUE INDEX` do not find stored nodes; plain `INDEX` lookups do. Key
+  fields are therefore plain `INDEX`; uniqueness of the shared nodes comes from a
+  separate write-only `UNIQUE INDEX uk` (`"document:<hk>"`, `"entity:<hk>"`), whose
+  violation is `Duplicate key on unique index` (`HelixError::is_duplicate`).
+- No conditionals and no string functions: "create if missing" is `Create*` (a
+  duplicate means it exists) followed by `Update*`; `uk` is passed by the client.
+- `helix push` while the port is still taken maps the next free host port but leaves
+  the server on the configured one; `vs-helix-up` stops the instance first.
 
 ## Data model in Helix
 
@@ -45,10 +71,10 @@ db/queries.hx       every query the suite and the RAG service call
 | Label | Key property | Other properties |
 |-------|--------------|------------------|
 | `Document` | `document_hk` | tenant, title, language, page_count, current_run_id, doc_types |
-| `Page` | `page_hk` | page_no, doc_type, dag_ref |
+| `Page` | `page_key` (= page_hk + run id) | page_hk, document_hk, run_id, page_no, doc_type, dag_ref |
 | `Section` | `section_key` | title, level |
 | `Block` | `block_hk` | kind, text, page_no, bbox, global_order, confidence, content (table html / latex / figure description), run_id |
-| `Entity` | `entity_hk` | tenant, name, type_id, aliases, mention_count |
+| `Entity` | `entity_hk` | tenant, name, type_id, aliases |
 | `Assertion` | `assertion_key` | predicate_id, predicate, kind, qualifiers, literals, confidence, verified, run_id |
 
 `tenant` is on every node; every query filters by it.
@@ -74,21 +100,29 @@ BM25 full-text on `Block.text` and `Entity.name` for hybrid retrieval.
 
 ## Write algorithm (per document run, Stage 2)
 
-1. Upsert `Entity` nodes by `entity_hk` (canonical; shared across documents) — update
-   name/aliases/mention_count.
-2. Insert the new run's `Document` (upsert) / `Page` / `Section` / `Block` / `Assertion`
-   nodes and all edges, with vectors.
-3. Set `Document.current_run_id` to the new run.
-4. Delete the previous run's `Section` / `Block` / `Assertion` nodes of that document
-   and their edges (entities stay).
+`Document` and `Entity` are shared and upserted. Everything else of a document run —
+pages, sections, blocks, assertions, their vectors and edges, and the `Related` edges
+the run's assertions produced — is **run-scoped** (`run_id` on the node or edge; page
+and assertion keys get the run id appended). HelixQL cannot upsert property-less
+edges and has no conditionals, so idempotency comes from replacing a run as a whole:
 
-Each step is a HelixQL query in `db/queries.hx` (batch inputs as array parameters where
-the query language allows, otherwise one call per item with bounded concurrency).
-Steps 2–4 in one transaction where Helix supports it. If not: RAG queries filter blocks
-and assertions by `run_id = Document.current_run_id`, and step 4 runs asynchronously.
+1. `GetDocument` → previous `current_run_id` (`No value found` = new document).
+2. `DropRun(run)` removes a partial earlier attempt of the same run (retry safety).
+3. `CreateDocument` (duplicate = exists) + `UpdateDocument`. `CreateEntity` (entity +
+   name vector + edge in one transaction) for entities corpus resolution created in
+   this run (`RunInfo::new_entities`), then `UpdateEntities` in batches; a batch that
+   hits an entity Helix does not have is redone per entity with create + update.
+4. `AddPages`, `AddSections`, `LinkDocumentSections`, `LinkSubsections`, `AddBlocks`,
+   `LinkContains`, `LinkNext` / `LinkContinuesOn` / `LinkTableContinues` /
+   `LinkCaptionOf` / `LinkRefersTo`, `AddAssertions`, `LinkArgs`, `LinkEvidence`,
+   `LinkMentions`, `LinkRelated`, `AddBlockVectors`, `AddSectionVectors`.
+5. `SetCurrentRun(run)`.
+6. `DropRun(previous)`.
 
-Writes are batched (`batch_size` nodes/edges per request, default 1 000) and idempotent:
-keys are deterministic, so a retried write upserts the same objects.
+Between 4 and 6 both runs exist; RAG queries that must not mix runs filter by
+`Document.current_run_id`. Visual evidence (page + bbox, no text span) stays in the
+vault only. `Entity.mention_count` from the earlier draft is not stored: a writer that
+sees one document at a time cannot keep it correct; count `In<Mentions>` when needed.
 
 ## Corpus entity resolution (`HelixResolver`)
 

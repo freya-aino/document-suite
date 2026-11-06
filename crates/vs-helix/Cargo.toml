@@ -16,5 +16,10 @@ reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+tracing.workspace = true
 # No helix-db SDK: HelixDB is called only through compiled HelixQL query endpoints
 # over HTTP (see SPEC.md "Access: HelixQL only").
+
+[dev-dependencies]
+uuid.workspace = true
+tokio.workspace = true
