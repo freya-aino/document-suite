@@ -1,0 +1,115 @@
+# Pool "layout": vLLM serving opendatalab/MinerU2.5-2509-1.2B as "mineru-2.5" (registry id in config/models.toml).
+# Workers reach it at http://layout.vs-gpu.svc:8000/v1.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: layout
+  namespace: vs-gpu
+  labels: { app.kubernetes.io/name: vllm, vs.pool: layout }
+spec:
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: { maxSurge: 1, maxUnavailable: 0 }   # keep capacity while rolling
+  selector:
+    matchLabels: { app.kubernetes.io/name: vllm, vs.pool: layout }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: vllm, vs.pool: layout }
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
+        prometheus.io/path: /metrics
+    spec:
+      terminationGracePeriodSeconds: 120   # drain in-flight requests
+      containers:
+        - name: vllm
+          image: vllm/vllm-openai:v0.11.0
+          args:
+            - "opendatalab/MinerU2.5-2509-1.2B"
+            - "--served-model-name=mineru-2.5"
+            - "--revision=$(MODEL_REVISION)"
+            - "--port=8000"
+            - "--max-num-seqs=256"
+            - "--enable-prefix-caching"
+            - "--limit-mm-per-prompt={"image":1}"
+            - "--gpu-memory-utilization=0.92"
+            - "--max-model-len=16384"
+            - "--trust-remote-code"
+          env:
+            - name: MODEL_REVISION
+              value: "main"                # pin: must match the registry's `revision`
+            - name: HF_TOKEN
+              valueFrom: { secretKeyRef: { name: hf-token, key: HF_TOKEN } }
+            - name: HF_HOME
+              value: /cache/huggingface
+          ports:
+            - { name: http, containerPort: 8000 }
+          resources:
+            limits:
+              nvidia.com/gpu: 1
+            requests:
+              cpu: "4"
+              memory: 32Gi
+          volumeMounts:
+            - { name: hf-cache, mountPath: /cache }
+            - { name: shm, mountPath: /dev/shm }
+          startupProbe:
+            httpGet: { path: /health, port: http }
+            periodSeconds: 10
+            failureThreshold: 90           # weights download + graph compile
+          readinessProbe:
+            httpGet: { path: /health, port: http }
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /health, port: http }
+            periodSeconds: 30
+            failureThreshold: 3
+      volumes:
+        - name: hf-cache
+          persistentVolumeClaim: { claimName: hf-cache }
+        - name: shm
+          emptyDir: { medium: Memory, sizeLimit: 16Gi }
+      nodeSelector:
+        nvidia.com/gpu.present: "true"
+      tolerations:
+        - { key: nvidia.com/gpu, operator: Exists, effect: NoSchedule }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: layout
+  namespace: vs-gpu
+  labels: { app.kubernetes.io/name: vllm, vs.pool: layout }
+spec:
+  selector: { app.kubernetes.io/name: vllm, vs.pool: layout }
+  ports:
+    - { name: http, port: 8000, targetPort: http }
+---
+# Scales on vLLM's queue depth. The metric comes from the custom metrics API: the
+# annotation below is read by kube-metrics-adapter (or adapt it to prometheus-adapter's
+# rules / KEDA's prometheus scaler) and evaluates the PromQL per pod.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: layout
+  namespace: vs-gpu
+  annotations:
+    metric-config.pods.vllm-num-requests-waiting.prometheus/query: |
+      sum(vllm:num_requests_waiting{namespace="vs-gpu", pod="{{.Pod}}"})
+spec:
+  scaleTargetRef: { apiVersion: apps/v1, kind: Deployment, name: layout }
+  minReplicas: 1
+  maxReplicas: 4
+  metrics:
+    - type: Pods
+      pods:
+        metric: { name: vllm-num-requests-waiting }
+        target: { type: AverageValue, averageValue: "8" }   # queued requests per replica
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 60
+      policies: [{ type: Pods, value: 1, periodSeconds: 120 }]   # cold starts are slow
+    scaleDown:
+      stabilizationWindowSeconds: 600
+      policies: [{ type: Pods, value: 1, periodSeconds: 300 }]

@@ -38,6 +38,18 @@ vllm serve <model> \
 - Expose Prometheus metrics; the autoscaler uses `num_requests_waiting` and
   GPU utilisation per pool.
 
+## What exists here
+
+- `docker-compose.yml`: one vLLM service per pool (`doc-parse`, `layout`, `vlm-general`,
+  `classifier`, `llm-extract`, `embed`) with the flags above, `--served-model-name` equal
+  to the registry id, `HF_TOKEN` from the environment, per-service GPU reservations, a
+  shared weight cache and an optional Prometheus (`--profile monitoring`, `prometheus.yml`).
+- `models.compose.toml`: the registry for that compose deployment (ports 8001–8006).
+- `k8s/`: a Deployment + Service per pool and an `autoscaling/v2` HPA on the Pods metric
+  `vllm-num-requests-waiting` (PromQL in a `metric-config.…prometheus/query` annotation
+  for kube-metrics-adapter; adaptable to prometheus-adapter or KEDA), `kustomization.yaml`.
+- `README.md`: how `config/models.toml` endpoints map to these services.
+
 ## Scaling
 
 - Scale each pool on queue depth (`num_requests_waiting`) and p95 latency.

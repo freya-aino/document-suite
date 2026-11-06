@@ -1,0 +1,182 @@
+# GPU tier: one vLLM service per pool (deploy/gpu/SPEC.md "Pools"). Each service is an
+# OpenAI-compatible endpoint; `--served-model-name` is the `id` the registry
+# (config/models.example.toml) uses, so the worker's `model` field needs no mapping.
+#
+#   HF_TOKEN=hf_... docker compose up -d                 # all pools
+#   docker compose up -d doc-parse embed                 # a subset
+#   docker compose --profile monitoring up -d            # + Prometheus
+#
+# GPU assignment: `device_ids` per service below; change to match the host. Weights are
+# pinned by revision (`--revision`): the registry's `revision` must match what is served.
+# Structured output (JSON schema) is on by default in vLLM >= 0.8 (xgrammar backend).
+
+x-vllm: &vllm
+  image: vllm/vllm-openai:v0.11.0
+  restart: unless-stopped
+  ipc: host                     # vLLM shares CUDA memory between worker processes
+  environment:
+    HF_TOKEN: ${HF_TOKEN:?set HF_TOKEN to download gated weights}
+    HF_HOME: /root/.cache/huggingface
+    VLLM_LOGGING_LEVEL: INFO
+  volumes:
+    - hf-cache:/root/.cache/huggingface
+  healthcheck:
+    test: ["CMD-SHELL", "curl -sf http://localhost:8000/health || exit 1"]
+    interval: 15s
+    timeout: 5s
+    retries: 40
+    start_period: 600s          # first start downloads weights and compiles graphs
+  ulimits:
+    memlock: -1
+    stack: 67108864
+
+services:
+  # ── doc-parse: compact document VLM (page.parse_e2e, region.ocr, table/formula) ──
+  doc-parse:
+    <<: *vllm
+    command:
+      - PaddlePaddle/PaddleOCR-VL-1.5
+      - --served-model-name=paddleocr-vl-1.5
+      - --revision=${DOC_PARSE_REVISION:-main}
+      - --max-num-seqs=256
+      - --enable-prefix-caching
+      - --limit-mm-per-prompt={"image":1}
+      - --gpu-memory-utilization=0.92
+      - --max-model-len=16384
+      - --trust-remote-code
+      - --port=8000
+    ports: ["8001:8000"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["0"]
+              capabilities: [gpu]
+
+  # ── layout: a doc VLM in layout mode (layout.detect); also doc-parse candidate C ──
+  layout:
+    <<: *vllm
+    command:
+      - opendatalab/MinerU2.5-2509-1.2B
+      - --served-model-name=mineru-2.5
+      - --revision=${LAYOUT_REVISION:-main}
+      - --max-num-seqs=256
+      - --enable-prefix-caching
+      - --limit-mm-per-prompt={"image":1}
+      - --gpu-memory-utilization=0.92
+      - --max-model-len=16384
+      - --trust-remote-code
+      - --port=8000
+    ports: ["8002:8000"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["1"]
+              capabilities: [gpu]
+
+  # ── vlm-general: figure.describe, chart.to_table, vs-adapt judge ──
+  vlm-general:
+    <<: *vllm
+    command:
+      - Qwen/Qwen3-VL-8B-Instruct
+      - --served-model-name=qwen3-vl
+      - --revision=${VLM_GENERAL_REVISION:-main}
+      - --max-num-seqs=128
+      - --enable-prefix-caching
+      - --limit-mm-per-prompt={"image":1}
+      - --gpu-memory-utilization=0.92
+      - --max-model-len=32768
+      - --port=8000
+    ports: ["8003:8000"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["2"]
+              capabilities: [gpu]
+
+  # ── classifier: small VLM for tier-1 page classification (768 px thumbnails) ──
+  classifier:
+    <<: *vllm
+    command:
+      - Qwen/Qwen3-VL-2B-Instruct
+      - --served-model-name=page-classifier
+      - --revision=${CLASSIFIER_REVISION:-main}
+      - --max-num-seqs=512
+      - --enable-prefix-caching
+      - --limit-mm-per-prompt={"image":1}
+      - --gpu-memory-utilization=0.45     # shares a GPU with `embed`
+      - --max-model-len=4096
+      - --port=8000
+    ports: ["8004:8000"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["3"]
+              capabilities: [gpu]
+
+  # ── llm-extract: text LLM with strong structured output (Stage 2 extract/verify,
+  #    type normalisation, entity judge) ──
+  llm-extract:
+    <<: *vllm
+    command:
+      - Qwen/Qwen3-32B
+      - --served-model-name=extract-llm
+      - --revision=${LLM_EXTRACT_REVISION:-main}
+      - --max-num-seqs=128
+      - --enable-prefix-caching
+      - --gpu-memory-utilization=0.92
+      - --max-model-len=32768
+      - --tensor-parallel-size=2
+      - --port=8000
+    ports: ["8005:8000"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["4", "5"]
+              capabilities: [gpu]
+
+  # ── embed: text embeddings (/v1/embeddings) for Stage 2, type normalisation, entity
+  #    resolution. Changing the model means a new Helix vector index (vs-helix/SPEC.md). ──
+  embed:
+    <<: *vllm
+    command:
+      - Qwen/Qwen3-Embedding-0.6B
+      - --served-model-name=embed-text
+      - --revision=${EMBED_REVISION:-main}
+      - --task=embed
+      - --max-num-seqs=256
+      - --gpu-memory-utilization=0.40     # shares a GPU with `classifier`
+      - --max-model-len=8192
+      - --port=8000
+    ports: ["8006:8000"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["3"]
+              capabilities: [gpu]
+
+  # ── monitoring (optional): scrapes every pool's /metrics ──
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    profiles: ["monitoring"]
+    restart: unless-stopped
+    command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.retention.time=15d"]
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prom-data:/prometheus
+    ports: ["9090:9090"]
+
+volumes:
+  hf-cache:
+  prom-data:

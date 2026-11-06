@@ -6,7 +6,11 @@ use std::collections::{HashMap, HashSet};
 use serde_json::{json, Value};
 use vs_core::{RunId, TenantId};
 use vs_graph::{DocGraph, EdgeKind, GEdge, GNode, NodeKind};
-use vs_helix::{GraphStore, HelixStore, RunInfo, Vectors};
+use vs_core::HashKey;
+use vs_extract::resolve::{CorpusResolver, Resolution};
+use vs_extract::DocEntity;
+use vs_helix::{GraphStore, HelixResolver, HelixStore, RunInfo, Vectors};
+use vs_models::{Embedder, ModelError};
 
 fn url() -> String {
     std::env::var("VS__HELIX__URL").unwrap_or_else(|_| "http://127.0.0.1:6969".into())
@@ -133,9 +137,92 @@ async fn write_switch_and_retry_runs() {
     let names = store.query("SearchEntityNames", &json!({ "tenant": tenant, "vector": [0.0, 0.0, 0.9, 0.1], "k": 10 })).await.unwrap();
     let bert: Vec<_> = arr(&names["entities"]).into_iter().filter(|e| e["entity_hk"] == format!("{doc}-e-bert")).collect();
     assert_eq!(bert.len(), 1, "{names}");
+    // The matched vectors come back with their entity_hk, so the client can join them.
+    assert!(arr(&names["vectors"]).iter().any(|v| v["entity_hk"] == format!("{doc}-e-bert")), "{names}");
 
     // Tenant isolation: another tenant's lookup finds nothing (Helix 2.3.5 reports a
     // single-valued lookup that finds nothing as "No value found").
     let other = store.query("DocumentOutline", &json!({ "tenant": "someone-else", "document_hk": doc })).await.unwrap_err();
     assert!(other.is_not_found(), "{other}");
+}
+
+/// Embedder with the test vectors above: "bert" → the BERT direction, "glue" → GLUE's,
+/// anything else → a direction no stored entity has.
+struct TestEmbedder;
+#[async_trait::async_trait]
+impl Embedder for TestEmbedder {
+    fn model_ref(&self) -> String {
+        "test-embedder@1".into()
+    }
+    fn dimensions(&self) -> usize {
+        4
+    }
+    async fn embed_texts(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, ModelError> {
+        Ok(texts
+            .iter()
+            .map(|t| {
+                let t = t.to_lowercase();
+                if t.contains("bert") {
+                    vec![0.0, 0.0, 0.9, 0.1]
+                } else if t.contains("glue") {
+                    vec![0.1, 0.0, 0.0, 0.9]
+                } else {
+                    vec![0.0, 1.0, 0.0, 0.0]
+                }
+            })
+            .collect())
+    }
+}
+
+fn doc_entity(name: &str, type_id: &str) -> DocEntity {
+    DocEntity { local_id: "x".into(), name: name.into(), raw_type: type_id.into(), type_id: Some(type_id.into()), aliases: vec![], mentions: vec![], entity_hk: None }
+}
+
+#[tokio::test]
+#[ignore = "needs a local Helix instance (`helix push dev`)"]
+async fn resolver_links_known_entities_and_creates_new_ones() {
+    let store = std::sync::Arc::new(HelixStore::new(url(), 100).unwrap());
+    let tenant = format!("t-{}", uuid::Uuid::now_v7().simple());
+    let doc = format!("doc-{}", uuid::Uuid::now_v7().simple());
+    let run = RunId::new();
+    // Real hash keys: the resolver hands stored keys back as `HashKey`.
+    let tid = TenantId(tenant.clone());
+    let (bert_hk, glue_hk) = (HashKey::entity(&tid, "method|bert"), HashKey::entity(&tid, "dataset|glue"));
+    let mut g = graph(&doc, "r1", "bert on glue");
+    let mut v = vectors(&doc, "r1");
+    for (old, new) in [(format!("{doc}-e-bert"), bert_hk.as_str().to_string()), (format!("{doc}-e-glue"), glue_hk.as_str().to_string())] {
+        for n in &mut g.nodes {
+            if n.key == old {
+                n.key = new.clone();
+            }
+        }
+        for e in &mut g.edges {
+            if e.from == old {
+                e.from = new.clone();
+            }
+            if e.to == old {
+                e.to = new.clone();
+            }
+        }
+        let vec = v.by_key.remove(&old).unwrap();
+        v.by_key.insert(new, vec);
+    }
+    let mut info = run_info(&tenant, run, &doc);
+    info.new_entities = HashSet::from([bert_hk.as_str().to_string(), glue_hk.as_str().to_string()]);
+    store.write_run(&info, &g, &v).await.unwrap();
+
+    let resolver = HelixResolver::new(store.clone(), std::sync::Arc::new(TestEmbedder));
+    // Same name and type, same direction → link to the stored key.
+    let res = resolver.resolve(&tid, &doc_entity("BERT", "method"), "a pretrained encoder").await.unwrap();
+    assert!(matches!(&res, Resolution::Link { entity_hk, .. } if *entity_hk == bert_hk), "{res:?}");
+    // Compatible vector but a different type → filtered → new (deterministic key).
+    let res = resolver.resolve(&tid, &doc_entity("BERT", "dataset"), "").await.unwrap();
+    assert_eq!(res, Resolution::New { entity_hk: HashKey::entity(&tid, "dataset|bert") });
+    // Nothing similar → new.
+    let res = resolver.resolve(&tid, &doc_entity("ImageNet", "dataset"), "").await.unwrap();
+    assert_eq!(res, Resolution::New { entity_hk: HashKey::entity(&tid, "dataset|imagenet") });
+    // Another tenant sees nothing.
+    let other = TenantId(format!("{tenant}-other"));
+    let res = resolver.resolve(&other, &doc_entity("BERT", "method"), "").await.unwrap();
+    assert!(matches!(res, Resolution::New { .. }), "{res:?}");
 }
