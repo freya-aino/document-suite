@@ -60,7 +60,7 @@ async fn run_worker() -> anyhow::Result<()> {
     tracing::info!(role = role.as_str(), "vs-worker starting");
 
     let pool = connect_pg(&cfg).await?;
-    vs_vault::MIGRATOR.run(&pool).await?; // advisory-locked; safe with many workers
+    vs_vault::check_migrations(&pool).await?; // migrations are a deploy step (`vs-api migrate`)
     let nats = NatsBus::connect(&cfg.bus.nats_url).await?;
     nats.ensure_topology().await?;
     let bus: Arc<dyn TaskBus> = Arc::new(nats);

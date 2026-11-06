@@ -16,12 +16,33 @@ use vs_stitch::StitchedDocument;
 
 pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
+/// Runtime processes do not migrate (their role cannot change the schema); they check
+/// that every embedded migration is applied with a matching checksum.
+pub async fn check_migrations(pool: &PgPool) -> Result<(), VaultError> {
+    let applied: Vec<(i64, Vec<u8>)> = sqlx::query_as("SELECT version, checksum FROM _sqlx_migrations WHERE success")
+        .fetch_all(pool)
+        .await
+        .map_err(|e| VaultError::Schema(format!("cannot read migration history ({e}); run `vs-api migrate`")))?;
+    for m in MIGRATOR.iter() {
+        match applied.iter().find(|(v, _)| *v == m.version) {
+            None => return Err(VaultError::Schema(format!("migration {} ({}) not applied; run `vs-api migrate`", m.version, m.description))),
+            Some((_, sum)) if sum.as_slice() != m.checksum.as_ref() => {
+                return Err(VaultError::Schema(format!("migration {} changed after it was applied", m.version)))
+            }
+            Some(_) => {}
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum VaultError {
     #[error("database: {0}")]
     Db(#[from] sqlx::Error),
     #[error("not implemented: {0}")]
     NotImplemented(&'static str),
+    #[error("schema: {0}")]
+    Schema(String),
 }
 
 /// Metadata known after ingest.

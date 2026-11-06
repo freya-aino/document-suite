@@ -25,6 +25,18 @@ struct Args {
     config: std::path::PathBuf,
     #[arg(long, env = "VS_API_ADDR", default_value = "0.0.0.0:8080")]
     addr: String,
+    #[command(subcommand)]
+    cmd: Option<Cmd>,
+}
+
+#[derive(clap::Subcommand)]
+enum Cmd {
+    /// Apply database migrations (deploy step; needs the schema owner's credentials,
+    /// not the runtime role's).
+    Migrate {
+        #[arg(long, env = "DATABASE_URL")]
+        database_url: String,
+    },
 }
 
 #[derive(Clone)]
@@ -88,6 +100,12 @@ impl<S: Send + Sync> FromRequestParts<S> for Tenant {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+    if let Some(Cmd::Migrate { database_url }) = &args.cmd {
+        let pool = PgPoolOptions::new().max_connections(1).connect(database_url).await?;
+        vs_vault::check_migrations(&pool).await?;
+        println!("migrations applied");
+        return Ok(());
+    }
     let cfg = vs_infra::Config::load(&args.config)?;
     vs_infra::telemetry::init(&cfg.telemetry);
 
@@ -96,7 +114,7 @@ async fn main() -> anyhow::Result<()> {
         pg = pg.password(pw);
     }
     let pool = PgPoolOptions::new().max_connections(cfg.postgres.max_connections).connect_with(pg).await?;
-    vs_vault::MIGRATOR.run(&pool).await?;
+    vs_vault::check_migrations(&pool).await?;
     let nats = NatsBus::connect(&cfg.bus.nats_url).await?;
     nats.ensure_topology().await?;
     let state = AppState {
