@@ -8,8 +8,25 @@ Writes everything the pipeline produces into PostgreSQL (assumption A5), in thre
 | `registry` | DAG lists, ontology (entity / relation types) | mutable, versioned rows |
 | `vault` | **Data Vault 2.0 raw vault**: the system of record and audit trail | insert-only |
 
-Migrations: `migrations/0001_ops_registry.sql`, `migrations/0002_vault.sql`
-(run with `sqlx migrate run`; embedded via `sqlx::migrate!` in the worker and API).
+Migrations: `migrations/0001_ops_registry.sql`, `migrations/0002_vault.sql`,
+`migrations/0003_app_role_privileges.sql`, embedded via `sqlx::migrate!`.
+
+## Roles and migrations
+
+| Role | Used by | Privileges |
+|------|---------|-----------|
+| schema owner (`vs` locally) | the migration deploy step, tests | owns `ops`, `registry`, `vault` |
+| `vs_app` | API and workers at runtime | `vault`: SELECT, INSERT only (no UPDATE/DELETE/TRUNCATE); `ops`, `registry`: SELECT, INSERT, UPDATE; no DDL |
+
+- Migrations are a **deploy step**: `vs-api migrate` (owner credentials in
+  `DATABASE_URL`) or `sqlx migrate run`. The API and workers never migrate; at startup
+  they call `check_migrations`, which refuses to start unless every embedded migration
+  is applied with a matching checksum.
+- `vs_app` must exist before migrating (the platform creates it; devenv's
+  `vs-vault:roles` task does locally). Migration 0003 fails loudly if it is missing, and
+  sets default privileges so later tables get the same grants.
+- The insert-only rule of the raw vault (D5) is therefore enforced by the database,
+  not only by the writer; a test asserts that UPDATE/DELETE/TRUNCATE/DDL are denied.
 
 ## Raw vault model
 
@@ -97,7 +114,8 @@ counts, so redeliveries cannot double count and exactly one caller sees
 ## Tests
 
 `tests/vault.rs` uses `#[sqlx::test]` (fresh migrated database per test) against the
-devenv Postgres; the `vs` role gets `CREATEDB` from a devenv task. Run with
+devenv Postgres; the `vs` role gets `CREATEDB` from a devenv task. Privilege tests
+connect to the test database as `vs_app`. Run with
 `cargo test -p vs-vault -- --ignored`.
 
 ## Performance notes

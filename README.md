@@ -58,9 +58,9 @@ own in a `devenv.nix` next to its code; `devenv.yaml` imports them all:
 | `deploy/firecracker/devenv.nix` | firecracker, e2fsprogs; opt-in: `devenv --profile firecracker shell` |
 
 ```sh
-devenv up -d          # postgres, nats, garage (layout, bucket and key set up on start)
+devenv up -d          # postgres, nats, garage (layout, bucket, key and DB roles set up on start)
 devenv shell          # or direnv
-vs-migrate            # apply vs-vault migrations
+vs-migrate            # apply vs-vault migrations as the schema owner (API/workers only check)
 devenv down
 ```
 

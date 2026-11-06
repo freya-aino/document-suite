@@ -10,7 +10,7 @@ endpoint = "https://s3.internal"
 region = "eu-west-1"
 
 [postgres]
-url = "postgres://vs@pgbouncer.internal:6432/visual_suite"   # password: VS__POSTGRES__PASSWORD
+url = "postgres://vs_app@pgbouncer.internal:6432/visual_suite"   # password: VS__POSTGRES__PASSWORD
 max_connections = 4
 
 [helix]

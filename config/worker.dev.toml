@@ -10,7 +10,7 @@ endpoint = "http://127.0.0.1:3900"
 region = "garage"
 
 [postgres]
-url = "postgres://vs@127.0.0.1:5432/visual_suite"   # password: VS__POSTGRES__PASSWORD
+url = "postgres://vs_app@127.0.0.1:5432/visual_suite"   # password: VS__POSTGRES__PASSWORD
 max_connections = 4
 
 [helix]

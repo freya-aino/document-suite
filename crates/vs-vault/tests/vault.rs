@@ -193,3 +193,50 @@ async fn page_counters_complete_job_exactly_once(pool: PgPool) {
     let row = ops.get_job(&s.tenant, job).await.unwrap().unwrap();
     assert_eq!((row.state.as_str(), row.pages_total, row.document_hk.as_deref()), ("pages_processing", Some(3), Some(doc.as_str())));
 }
+
+/// Connects to the same (test) database as the runtime role.
+async fn as_app(pool: &PgPool) -> PgPool {
+    let db = pool.connect_options().get_database().unwrap().to_string();
+    let opts = sqlx::postgres::PgConnectOptions::new()
+        .host("127.0.0.1")
+        .port(5432)
+        .username("vs_app")
+        .password(&std::env::var("VS__POSTGRES__PASSWORD").unwrap_or_else(|_| "vs_app".into()))
+        .database(&db);
+    sqlx::postgres::PgPoolOptions::new().max_connections(1).connect_with(opts).await.unwrap()
+}
+
+#[sqlx::test(migrator = "vs_vault::MIGRATOR")]
+#[ignore = "needs Postgres from `devenv up`"]
+async fn runtime_role_is_insert_only_on_the_vault(pool: PgPool) {
+    let app = as_app(&pool).await;
+    vs_vault::check_migrations(&app).await.unwrap();
+
+    // The runtime role can do the pipeline's writes...
+    let v = PgVault { pool: app.clone() };
+    v.write_document(&run(), &spec(), &meta(2)).await.unwrap();
+    let ops = Ops { pool: app.clone() };
+    let job = Uuid::now_v7();
+    ops.create_job(job, None, RunId::new(), &spec()).await.unwrap();
+    ops.set_state(job, JobState::Failed, Some("x")).await.unwrap();
+
+    // ...but cannot rewrite or remove vault history, or change the schema.
+    for stmt in [
+        "UPDATE vault.hub_document SET tenant_id = 'x'",
+        "DELETE FROM vault.sat_document_meta",
+        "TRUNCATE vault.hub_page",
+        "DROP TABLE vault.hub_run",
+        "CREATE TABLE vault.evil (x int)",
+    ] {
+        let err = sqlx::query(stmt).execute(&app).await.expect_err(stmt);
+        let code = err.as_database_error().and_then(|e| e.code()).map(|c| c.to_string());
+        assert!(matches!(code.as_deref(), Some("42501")), "{stmt}: {err}"); // insufficient_privilege
+    }
+}
+
+#[sqlx::test(migrations = false)]
+#[ignore = "needs Postgres from `devenv up`"]
+async fn check_migrations_rejects_unmigrated_database(pool: PgPool) {
+    let err = vs_vault::check_migrations(&pool).await.unwrap_err();
+    assert!(err.to_string().contains("vs-api migrate"), "{err}");
+}
