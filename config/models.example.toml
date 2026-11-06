@@ -1,0 +1,55 @@
+# Model registry (vs-models). Endpoints are OpenAI-compatible base URLs (vLLM).
+# `id@revision` is recorded in provenance; bump `revision` whenever served weights change.
+
+[[model]]
+id = "paddleocr-vl-1.5"
+revision = "2026-01"
+family = "paddleocr_vl"
+task = ["page_parse", "region_ocr", "table", "formula"]
+endpoints = ["http://doc-parse-a.gpu.internal:8000/v1", "http://doc-parse-b.gpu.internal:8000/v1"]
+max_concurrency = 256
+timeout_ms = 60000
+languages = ["*"]
+
+[[model]]
+id = "mineru-2.5"
+revision = "2025-09"
+family = "mineru"
+task = ["page_parse", "layout", "table", "formula"]
+endpoints = ["http://doc-parse-c.gpu.internal:8000/v1"]
+max_concurrency = 256
+
+[[model]]
+id = "qwen3-vl"
+revision = "pin-me"
+family = "generic_json"
+task = ["figure_describe", "chart_to_table", "judge"]
+endpoints = ["http://vlm-general.gpu.internal:8000/v1"]
+max_concurrency = 128
+timeout_ms = 90000
+
+[[model]]
+id = "page-classifier"
+revision = "pin-me"
+family = "generic_json"
+task = ["page_classify"]
+endpoints = ["http://classifier.gpu.internal:8000/v1"]
+max_concurrency = 512
+timeout_ms = 10000
+
+[[model]]
+id = "extract-llm"
+revision = "pin-me"
+family = "generic_json"
+task = ["extract", "verify", "type_normalise", "entity_judge"]
+endpoints = ["http://llm-extract.gpu.internal:8000/v1"]
+max_concurrency = 128
+timeout_ms = 120000
+
+[[model]]
+id = "embed-text"
+revision = "pin-me"
+family = "embedding"
+task = ["embed"]
+endpoints = ["http://embed.gpu.internal:8000/v1"]
+max_concurrency = 64

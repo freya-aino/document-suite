@@ -1,0 +1,36 @@
+# vs-worker / vs-api configuration. Secrets come from the environment (VS__SECTION__KEY)
+# or MMDS, never from this file.
+
+[bus]
+nats_url = "nats://nats.internal:4222"
+
+[blob]
+bucket = "visual-suite"
+endpoint = "https://s3.internal"
+region = "eu-west-1"
+
+[postgres]
+url = "postgres://vs@pgbouncer.internal:6432/visual_suite"   # password: VS__POSTGRES__PASSWORD
+max_connections = 4
+
+[helix]
+url = "http://helix.internal:6969"
+
+[models]
+registry = "/etc/vs/models.toml"
+
+[worker]
+max_in_flight = 32
+interactive_share = 0.3
+render_dpi = 200
+max_failed_page_fraction = 0.05
+
+[classify]
+born_digital_min_chars = 50
+born_digital_min_coverage = 0.8
+trust_ocr_layer = false
+skip_vision_for_text_only_digital = true
+
+[telemetry]
+otlp_endpoint = "http://otel-collector.internal:4317"
+json_logs = true

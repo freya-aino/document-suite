@@ -1,0 +1,31 @@
+{
+  "boot-source": {
+    "kernel_image_path": "/var/lib/vs/vmlinux",
+    "boot_args": "console=ttyS0 reboot=k panic=1 pci=off ro VS_ROLE=page"
+  },
+  "drives": [
+    {
+      "drive_id": "rootfs",
+      "path_on_host": "/var/lib/vs/rootfs.ext4",
+      "is_root_device": true,
+      "is_read_only": true
+    }
+  ],
+  "machine-config": {
+    "vcpu_count": 1,
+    "mem_size_mib": 1024
+  },
+  "network-interfaces": [
+    {
+      "iface_id": "eth0",
+      "guest_mac": "AA:FC:00:00:00:01",
+      "host_dev_name": "tap-vs-0001",
+      "rx_rate_limiter": { "bandwidth": { "size": 125000000, "refill_time": 1000 } },
+      "tx_rate_limiter": { "bandwidth": { "size": 125000000, "refill_time": 1000 } }
+    }
+  ],
+  "mmds-config": {
+    "version": "V2",
+    "network_interfaces": ["eth0"]
+  }
+}
