@@ -103,6 +103,18 @@ impl Ops {
         .transpose()
     }
 
+    /// Version of the active DAG list for the tenant, else the global one.
+    pub async fn active_dag_list_version(&self, tenant: &TenantId) -> Result<Option<String>, VaultError> {
+        Ok(sqlx::query_scalar(
+            "SELECT version FROM registry.dag_lists
+             WHERE status = 'active' AND (tenant_id = $1 OR tenant_id IS NULL)
+             ORDER BY tenant_id NULLS LAST LIMIT 1",
+        )
+        .bind(tenant.as_str())
+        .fetch_optional(&self.pool)
+        .await?)
+    }
+
     pub async fn set_state(&self, job_id: Uuid, state: JobState, error: Option<&str>) -> Result<(), VaultError> {
         sqlx::query("UPDATE ops.jobs SET state = $2, error = COALESCE($3, error), updated_at = now() WHERE job_id = $1")
             .bind(job_id)

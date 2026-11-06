@@ -96,6 +96,11 @@ impl BlobStore for ObjectBlobStore {
     }
 }
 
+/// Object key from a `source_uri`: `s3://<bucket>/<key>` or a bare key.
+pub fn key_from_uri<'a>(uri: &'a str, bucket: &str) -> &'a str {
+    uri.strip_prefix("s3://").and_then(|rest| rest.strip_prefix(bucket)).and_then(|k| k.strip_prefix('/')).unwrap_or(uri)
+}
+
 /// Key helpers matching the layout in SPEC.md.
 pub mod keys {
     pub fn original(tenant: &str, sha256: &str) -> String {
@@ -106,6 +111,11 @@ pub mod keys {
     }
     pub fn thumbnail(document_hk: &str, page_no: u32) -> String {
         format!("pages/{document_hk}/{page_no}/thumb.jpg")
+    }
+    /// Classifier tier-0 signals; written last, so its presence means the page's
+    /// assets are complete.
+    pub fn signals(document_hk: &str, page_no: u32) -> String {
+        format!("pages/{document_hk}/{page_no}/signals.json")
     }
     pub fn text_layer(document_hk: &str, page_no: u32) -> String {
         format!("textlayer/{document_hk}/{page_no}.json")
