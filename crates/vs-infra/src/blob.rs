@@ -1,8 +1,13 @@
 use async_trait::async_trait;
 use bytes::Bytes;
-use object_store::{path::Path, ObjectStore, PutPayload};
+use object_store::{
+    aws::AmazonS3Builder, path::Path, signer::Signer, Attribute, Attributes, ObjectStore, PutOptions, PutPayload,
+};
+use reqwest::Method;
 use std::sync::Arc;
 use std::time::Duration;
+
+use crate::config::BlobConfig;
 
 #[derive(Debug, thiserror::Error)]
 pub enum BlobError {
@@ -20,16 +25,46 @@ pub trait BlobStore: Send + Sync {
     async fn presign_get(&self, key: &str, ttl: Duration) -> Result<String, BlobError>;
 }
 
-/// `object_store`-backed implementation (S3-compatible in production, local FS in tests).
+/// `object_store`-backed implementation (S3-compatible in production, local FS or
+/// memory in tests).
 pub struct ObjectBlobStore {
-    pub store: Arc<dyn ObjectStore>,
+    store: Arc<dyn ObjectStore>,
+    /// Present for stores that can presign (S3).
+    signer: Option<Arc<dyn Signer>>,
+}
+
+impl ObjectBlobStore {
+    /// S3-compatible store. Credentials come from the environment (`AWS_ACCESS_KEY_ID`,
+    /// `AWS_SECRET_ACCESS_KEY`, ...); bucket, endpoint and region from config.
+    /// Path-style requests, which Garage and most self-hosted servers need.
+    pub fn s3(cfg: &BlobConfig) -> Result<Self, BlobError> {
+        let mut b = AmazonS3Builder::from_env().with_bucket_name(&cfg.bucket).with_virtual_hosted_style_request(false);
+        if let Some(endpoint) = &cfg.endpoint {
+            b = b.with_endpoint(endpoint).with_allow_http(endpoint.starts_with("http://"));
+        }
+        if let Some(region) = &cfg.region {
+            b = b.with_region(region);
+        }
+        let s3 = Arc::new(b.build().map_err(|e| BlobError::Store(e.to_string()))?);
+        Ok(Self { store: s3.clone(), signer: Some(s3) })
+    }
+
+    /// Any store without presigning (tests: `object_store::memory::InMemory`).
+    pub fn new(store: Arc<dyn ObjectStore>) -> Self {
+        Self { store, signer: None }
+    }
 }
 
 #[async_trait]
 impl BlobStore for ObjectBlobStore {
-    async fn put(&self, key: &str, bytes: Bytes, _content_type: &str) -> Result<(), BlobError> {
+    async fn put(&self, key: &str, bytes: Bytes, content_type: &str) -> Result<(), BlobError> {
+        let attributes = if self.signer.is_some() {
+            Attributes::from_iter([(Attribute::ContentType, content_type.to_string())])
+        } else {
+            Attributes::new() // the local-filesystem store rejects attributes
+        };
         self.store
-            .put(&Path::from(key), PutPayload::from_bytes(bytes))
+            .put_opts(&Path::from(key), PutPayload::from_bytes(bytes), PutOptions { attributes, ..Default::default() })
             .await
             .map(|_| ())
             .map_err(|e| BlobError::Store(e.to_string()))
@@ -51,8 +86,13 @@ impl BlobStore for ObjectBlobStore {
         }
     }
 
-    async fn presign_get(&self, _key: &str, _ttl: Duration) -> Result<String, BlobError> {
-        todo!("use object_store::signer::Signer on the AmazonS3 store")
+    async fn presign_get(&self, key: &str, ttl: Duration) -> Result<String, BlobError> {
+        let signer = self.signer.as_ref().ok_or_else(|| BlobError::Store("store cannot presign".into()))?;
+        signer
+            .signed_url(Method::GET, &Path::from(key), ttl)
+            .await
+            .map(|u| u.to_string())
+            .map_err(|e| BlobError::Store(e.to_string()))
     }
 }
 
