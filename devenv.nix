@@ -5,7 +5,7 @@
 {
   languages.rust = {
     enable = true;
-    channel = "stable"; # workspace needs >= 1.80; musl target needs rust-overlay
+    channel = "stable"; # workspace needs >= 1.80
   };
 
   packages = [ pkgs.cargo-nextest ];

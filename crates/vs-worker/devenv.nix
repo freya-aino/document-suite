@@ -1,11 +1,10 @@
-# vs-worker: static musl binary for the Firecracker rootfs.
+# vs-worker: glibc build for the Firecracker rootfs (ships with its shared-library
+# closure, incl. libpdfium.so; see deploy/firecracker/SPEC.md).
 { ... }:
 
 {
-  languages.rust.targets = [ "x86_64-unknown-linux-musl" ];
-
-  scripts.vs-worker-static = {
-    description = "Build the static worker binary for the microVM image";
-    exec = ''cargo build --release --target x86_64-unknown-linux-musl -p vs-worker "$@"'';
+  scripts.vs-worker-release = {
+    description = "Build the worker binary for the microVM image";
+    exec = ''cargo build --release -p vs-worker "$@"'';
   };
 }
