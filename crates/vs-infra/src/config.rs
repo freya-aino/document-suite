@@ -13,7 +13,7 @@ pub struct Config {
     #[serde(default)]
     pub telemetry: TelemetryConfig,
     /// Passed through to `vs-classify` (`ClassifyConfig`).
-    #[serde(default)]
+    #[serde(default = "empty_table")]
     pub classify: toml::Value,
 }
 
@@ -35,6 +35,10 @@ pub struct PostgresConfig {
     pub url: String,
     #[serde(default = "default_pool")]
     pub max_connections: u32,
+}
+
+fn empty_table() -> toml::Value {
+    toml::Value::Table(Default::default())
 }
 
 fn default_pool() -> u32 {
@@ -90,23 +94,30 @@ impl Config {
 }
 
 fn apply_env_overrides(value: &mut toml::Value, vars: impl Iterator<Item = (String, String)>) {
-    for (k, v) in vars {
+    'vars: for (k, v) in vars {
         let Some(rest) = k.strip_prefix("VS__") else { continue };
         let path: Vec<String> = rest.split("__").map(|s| s.to_ascii_lowercase()).collect();
+        let Some((leaf, parents)) = path.split_last() else { continue };
         let mut cur = &mut *value;
-        for (i, seg) in path.iter().enumerate() {
-            let Some(table) = cur.as_table_mut() else { break };
-            if i + 1 == path.len() {
-                let parsed = v.parse::<i64>().map(toml::Value::Integer)
-                    .or_else(|_| v.parse::<f64>().map(toml::Value::Float))
-                    .or_else(|_| v.parse::<bool>().map(toml::Value::Boolean))
-                    .unwrap_or_else(|_| toml::Value::String(v.clone()));
-                table.insert(seg.clone(), parsed);
-            } else {
-                cur = table.entry(seg.clone()).or_insert_with(|| toml::Value::Table(Default::default()));
-            }
+        for seg in parents {
+            // Match on the reference by value so the borrow moves into `cur`.
+            cur = match cur {
+                toml::Value::Table(t) => t.entry(seg.clone()).or_insert_with(|| toml::Value::Table(Default::default())),
+                _ => continue 'vars, // a scalar is in the way; ignore the override
+            };
+        }
+        if let toml::Value::Table(t) = cur {
+            t.insert(leaf.clone(), parse_scalar(&v));
         }
     }
+}
+
+fn parse_scalar(v: &str) -> toml::Value {
+    v.parse::<i64>()
+        .map(toml::Value::Integer)
+        .or_else(|_| v.parse::<f64>().map(toml::Value::Float))
+        .or_else(|_| v.parse::<bool>().map(toml::Value::Boolean))
+        .unwrap_or_else(|_| toml::Value::String(v.to_string()))
 }
 
 #[cfg(test)]
@@ -118,5 +129,22 @@ mod tests {
         let mut v: toml::Value = toml::from_str("[worker]\nmax_in_flight = 4\n").unwrap();
         apply_env_overrides(&mut v, vec![("VS__WORKER__MAX_IN_FLIGHT".into(), "64".into())].into_iter());
         assert_eq!(v["worker"]["max_in_flight"].as_integer(), Some(64));
+    }
+
+    #[test]
+    fn example_configs_parse() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config");
+        for name in ["worker.example.toml", "worker.dev.toml"] {
+            let cfg = Config::load(&root.join(name)).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert_eq!(cfg.blob.bucket, "visual-suite");
+            assert!(cfg.classify.is_table());
+        }
+    }
+
+    #[test]
+    fn override_through_scalar_is_ignored() {
+        let mut v: toml::Value = toml::from_str("worker = 1\n").unwrap();
+        apply_env_overrides(&mut v, vec![("VS__WORKER__X".into(), "2".into())].into_iter());
+        assert_eq!(v["worker"].as_integer(), Some(1));
     }
 }
