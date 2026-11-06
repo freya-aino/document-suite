@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use bytes::Bytes;
+use futures::stream::{BoxStream, StreamExt};
 use object_store::{
     aws::AmazonS3Builder, path::Path, signer::Signer, Attribute, Attributes, ObjectStore, PutOptions, PutPayload,
 };
@@ -21,6 +22,8 @@ pub enum BlobError {
 pub trait BlobStore: Send + Sync {
     async fn put(&self, key: &str, bytes: Bytes, content_type: &str) -> Result<(), BlobError>;
     async fn get(&self, key: &str) -> Result<Bytes, BlobError>;
+    /// Streams an object without holding it in memory.
+    async fn get_stream(&self, key: &str) -> Result<BoxStream<'static, Result<Bytes, BlobError>>, BlobError>;
     async fn exists(&self, key: &str) -> Result<bool, BlobError>;
     async fn presign_get(&self, key: &str, ttl: Duration) -> Result<String, BlobError>;
 }
@@ -73,6 +76,14 @@ impl BlobStore for ObjectBlobStore {
     async fn get(&self, key: &str) -> Result<Bytes, BlobError> {
         match self.store.get(&Path::from(key)).await {
             Ok(r) => r.bytes().await.map_err(|e| BlobError::Store(e.to_string())),
+            Err(object_store::Error::NotFound { .. }) => Err(BlobError::NotFound(key.to_string())),
+            Err(e) => Err(BlobError::Store(e.to_string())),
+        }
+    }
+
+    async fn get_stream(&self, key: &str) -> Result<BoxStream<'static, Result<Bytes, BlobError>>, BlobError> {
+        match self.store.get(&Path::from(key)).await {
+            Ok(r) => Ok(r.into_stream().map(|c| c.map_err(|e| BlobError::Store(e.to_string()))).boxed()),
             Err(object_store::Error::NotFound { .. }) => Err(BlobError::NotFound(key.to_string())),
             Err(e) => Err(BlobError::Store(e.to_string())),
         }

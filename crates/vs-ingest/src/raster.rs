@@ -24,12 +24,19 @@ pub enum IngestError {
     Render { page: u32, reason: String },
     #[error("pdfium unavailable: {0}")]
     Pdfium(String),
+    #[error("i/o: {0}")]
+    Io(String),
+    #[error("render timed out on page {page}")]
+    Timeout { page: u32 },
+    #[error("renderer crashed on page {page}: {reason}")]
+    Crashed { page: u32, reason: String },
 }
 
 impl IngestError {
-    /// Deterministic errors are not retried.
+    /// Deterministic errors are not retried. A hang or repeated crash is a property of
+    /// the input, so it is permanent too.
     pub fn is_permanent(&self) -> bool {
-        !matches!(self, IngestError::Render { .. } | IngestError::Pdfium(_))
+        !matches!(self, IngestError::Render { .. } | IngestError::Pdfium(_) | IngestError::Io(_))
     }
 }
 
@@ -67,6 +74,18 @@ pub fn open_rasterizer(format: Format, bytes: Vec<u8>, max_pages: u32) -> Result
     match format {
         Format::Pdf => Ok(Box::new(PdfiumRasterizer::open(bytes, max_pages)?)),
         Format::Png | Format::Jpeg | Format::Tiff => Ok(Box::new(ImageRasterizer::open(format, &bytes, max_pages)?)),
+    }
+}
+
+/// Opens a document from a local file. PDFs are read lazily by pdfium; images are read
+/// into memory (one page at a time is decoded).
+pub fn open_rasterizer_file(format: Format, path: &std::path::Path, max_pages: u32) -> Result<Box<dyn Rasterizer>, IngestError> {
+    match format {
+        Format::Pdf => Ok(Box::new(PdfiumRasterizer::open_file(path, max_pages)?)),
+        Format::Png | Format::Jpeg | Format::Tiff => {
+            let bytes = std::fs::read(path).map_err(|e| IngestError::Io(e.to_string()))?;
+            Ok(Box::new(ImageRasterizer::open(format, &bytes, max_pages)?))
+        }
     }
 }
 

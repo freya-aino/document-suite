@@ -39,8 +39,16 @@ struct Args {
 const THUMBNAIL_PX: u32 = 768;
 const MAX_PAGES: u32 = 5_000;
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
+    // `vs-worker render-child`: render process spawned by the ingest role's pool. It
+    // speaks a binary protocol on stdout, so it must not start the runtime or logging.
+    if std::env::args().nth(1).as_deref() == Some("render-child") {
+        return Ok(vs_ingest::child::serve(std::io::stdin().lock(), std::io::stdout().lock())?);
+    }
+    tokio::runtime::Builder::new_multi_thread().enable_all().build()?.block_on(run_worker())
+}
+
+async fn run_worker() -> anyhow::Result<()> {
     let args = Args::parse();
     let cfg = Config::load(&args.config)?;
     vs_infra::telemetry::init(&cfg.telemetry);
@@ -66,6 +74,8 @@ async fn main() -> anyhow::Result<()> {
             bus: bus.clone(),
             vault,
             ops,
+            pool: Arc::new(render_pool(&cfg)?),
+            scratch_dir: cfg.worker.scratch_dir.clone().unwrap_or_else(std::env::temp_dir),
             bucket: cfg.blob.bucket.clone(),
             render_dpi: cfg.worker.render_dpi,
             thumbnail_px: THUMBNAIL_PX,
@@ -87,6 +97,20 @@ async fn main() -> anyhow::Result<()> {
         shutdown_grace: Duration::from_secs(args.shutdown_grace),
     };
     runtime::run_loop(role, bus, handler, loop_cfg, stop_rx).await
+}
+
+/// Render children are this binary with `render-child`.
+fn render_pool(cfg: &Config) -> anyhow::Result<vs_ingest::RenderPool> {
+    let w = &cfg.worker;
+    let size = w.render_processes.unwrap_or_else(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2));
+    let env = w
+        .render_mem_limit_mb
+        .map(|mb| vec![(vs_ingest::child::MEM_LIMIT_ENV.to_string(), mb.to_string())])
+        .unwrap_or_default();
+    let cmd = vs_ingest::ChildCommand { program: std::env::current_exe()?, args: vec!["render-child".into()], env };
+    let timeout = Duration::from_secs(w.page_render_timeout_s);
+    tracing::info!(size, ?timeout, "render pool");
+    Ok(vs_ingest::RenderPool::new(cmd, vs_ingest::PoolConfig { size, page_timeout: timeout, open_timeout: timeout }))
 }
 
 async fn connect_pg(cfg: &Config) -> anyhow::Result<sqlx::PgPool> {

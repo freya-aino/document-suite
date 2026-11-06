@@ -70,11 +70,28 @@ pub struct WorkerConfig {
     pub render_dpi: u32,
     /// Fraction of failed pages tolerated before a document fails.
     pub max_failed_page_fraction: f32,
+    /// Where ingest spools originals (the microVM's scratch disk). Default: system temp dir.
+    pub scratch_dir: Option<PathBuf>,
+    /// Render child processes per ingest worker. Default: available CPUs.
+    pub render_processes: Option<usize>,
+    /// A page that takes longer fails its document permanently.
+    pub page_render_timeout_s: u64,
+    /// Address-space limit per render child.
+    pub render_mem_limit_mb: Option<u64>,
 }
 
 impl Default for WorkerConfig {
     fn default() -> Self {
-        Self { max_in_flight: 32, interactive_share: 0.3, render_dpi: 200, max_failed_page_fraction: 0.05 }
+        Self {
+            max_in_flight: 32,
+            interactive_share: 0.3,
+            render_dpi: 200,
+            max_failed_page_fraction: 0.05,
+            scratch_dir: None,
+            render_processes: None,
+            page_render_timeout_s: 60,
+            render_mem_limit_mb: None,
+        }
     }
 }
 

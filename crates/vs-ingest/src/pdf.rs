@@ -1,6 +1,7 @@
 //! PDF rasterizer on pdfium (`pdfium-render`, dynamic binding).
 
 use std::ops::Deref;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use image::DynamicImage;
@@ -55,31 +56,54 @@ pub fn pdfium() -> Result<PdfiumGuard, IngestError> {
     Ok(PdfiumGuard { pdfium, _lock: lock })
 }
 
-/// One PDF. Holds the bytes and reopens the document per call: `PdfDocument` borrows
-/// both the bytes and the binding, and `page()` does a page's work in a single open.
+enum Source {
+    Bytes(Vec<u8>),
+    /// pdfium reads the file lazily, so large PDFs are not held in memory.
+    File(PathBuf),
+}
+
+impl Source {
+    fn load<'a>(&'a self, pdfium: &'a Pdfium) -> Result<PdfDocument<'a>, PdfiumError> {
+        match self {
+            Source::Bytes(b) => pdfium.load_pdf_from_byte_slice(b, None),
+            Source::File(p) => pdfium.load_pdf_from_file(p, None),
+        }
+    }
+}
+
+/// One PDF. Reopens the document per call: `PdfDocument` borrows both the source and
+/// the binding, and `page()` does a page's work in a single open.
 pub struct PdfiumRasterizer {
-    bytes: Vec<u8>,
+    source: Source,
     page_count: u32,
 }
 
 impl PdfiumRasterizer {
     pub fn open(bytes: Vec<u8>, max_pages: u32) -> Result<Self, IngestError> {
+        Self::open_source(Source::Bytes(bytes), max_pages)
+    }
+
+    pub fn open_file(path: &Path, max_pages: u32) -> Result<Self, IngestError> {
+        Self::open_source(Source::File(path.to_path_buf()), max_pages)
+    }
+
+    fn open_source(source: Source, max_pages: u32) -> Result<Self, IngestError> {
         let page_count = {
             let pdfium = pdfium()?;
-            let doc = pdfium.load_pdf_from_byte_slice(&bytes, None).map_err(load_error)?;
+            let doc = source.load(&pdfium).map_err(load_error)?;
             doc.pages().len() as u32
         };
         if page_count > max_pages {
             return Err(IngestError::TooManyPages(page_count));
         }
-        Ok(Self { bytes, page_count })
+        Ok(Self { source, page_count })
     }
 
     fn with_page<T>(&self, page_no: u32, f: impl FnOnce(&PdfPage, &PageGeom) -> Result<T, IngestError>) -> Result<T, IngestError> {
         check_page(page_no, self.page_count)?;
         let render = |e: PdfiumError| IngestError::Render { page: page_no, reason: e.to_string() };
         let pdfium = pdfium()?;
-        let doc = pdfium.load_pdf_from_byte_slice(&self.bytes, None).map_err(render)?;
+        let doc = self.source.load(&pdfium).map_err(render)?;
         let page = doc.pages().get((page_no - 1) as PdfPageIndex).map_err(render)?;
         let geom = PageGeom::of(&page);
         f(&page, &geom)
@@ -132,6 +156,7 @@ impl Rasterizer for PdfiumRasterizer {
 fn load_error(e: PdfiumError) -> IngestError {
     match e {
         PdfiumError::PdfiumLibraryInternalError(PdfiumInternalError::PasswordError) => IngestError::Encrypted,
+        PdfiumError::IoError(e) => IngestError::Io(e.to_string()),
         other => IngestError::Corrupt(other.to_string()),
     }
 }
