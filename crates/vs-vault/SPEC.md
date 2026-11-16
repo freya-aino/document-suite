@@ -25,15 +25,24 @@ Implemented: the full raw vault (now 9 hubs, 12 links, 12 satellites), the `ops`
 lists, entity and relation types), role separation between the migration owner and the
 runtime role, `write_document`, `write_page`, `write_stage2`, the `v_current_run` view,
 the graph layer (`PgGraphStore`) and corpus entity resolution (`PgCorpusResolver`).
-15 unit tests, plus 10 `#[ignore]`d Postgres integration tests.
+15 unit tests, plus 17 Postgres integration tests (`#[ignore]`d; they need a database).
+All seven migrations apply, and every write path has been executed: `tests/graph.rs`
+covers `PgGraphStore` across all of 0005 to 0007 and `PgCorpusResolver` against real
+label rows.
 
-**Read that test count carefully.** The 10 integration tests predate the storage rewrite
-and cover only `write_document`, `write_page`, the `ops` schema and the runtime role's
-privileges. Everything added since — migrations 0005 to 0007, `PgGraphStore`,
-`PgCorpusResolver`'s SQL, the document-type satellite, cells, in-image text and its
-matches — has **unit tests of its column projection only**. No statement in those three
-migrations has ever been parsed by a Postgres, and no row has ever been inserted by the
-new write paths.
+Running them for the first time found three defects that no unit test could have caught:
+
+1. `write_stage2` never pushed `assertion_hk` into its column array. `UNNEST` over arrays
+   of unequal length pads the short ones with NULL, so **every** assertion insert violated
+   `hub_assertion`'s NOT NULL — the assertion write path had never worked. The dedup guard
+   above it was dead for the same reason.
+2. `insert_sat_run` had `finished_at` (`Utc::now()`) inside its `hash_diff`, so a
+   redelivered doc task versioned the satellite again: the wall clock moving was recorded
+   as the run having changed.
+3. `sat_image_text`'s insert aliased its key column `hk`, while `latest_differs` generates
+   `s.<parent> = v.<parent>` — so the predicate referenced a column that did not exist.
+
+The first two predate the storage rewrite and had been latent since Stage 2 was written.
 
 This is now the suite's only graph store (D6), and it was already richer than the one it
 replaced: it keeps **both** span and region evidence, full `load_dts` history, block
@@ -50,21 +59,15 @@ Remaining:
       `context` column, so `PgCorpusResolver`'s judge sees only the stored name, type and
       aliases — the same blind spot the previous store had, and the one Postgres could
       actually fix. It needs the column plus the context threaded into `write_stage2`.
-- [ ] **No integration coverage of anything added since the storage rewrite.** Migrations
-      `0005_graph.sql`, `0006_document_type.sql` and `0007_page_components.sql` have never
-      been applied, so their DDL is unparsed; and no test writes a section tree, a
-      `related` edge, a document type, a table cell or an in-image-text match. The things
-      that can only fail on execution: the `UNNEST` binds for nullable text arrays
-      (`cell_column_header`, `tree_parent`), the `::smallint[]` and `::bool[]` casts, how
-      `latest_differs` composes inside the four new satellite inserts, and whether
-      `lnk_image_text_match`'s CHECK accepts rows inserted through `UNNEST` with NULLs.
-- [ ] **`PgCorpusResolver`'s SQL is likewise unexecuted.** `decide()` is unit-tested over
-      typed candidates, but `load_labels`' `JOIN LATERAL` against `sat_entity_label` has
-      never run, so the one query standing between a document and a wrong entity link is
-      unverified.
+- [ ] No test writes a document through the *whole* pipeline into this schema. Each write
+      path is now executed directly, but nothing covers ingest → Stage 1 → Stage 2 →
+      vault, so the handover between them is still only covered by fakes.
 - [ ] Applying the new migrations is a deploy-ordering constraint: `check_migrations`
       refuses to start a worker whose database is missing any embedded migration, so
-      `vs-migrate` has to run before any binary that was built with 0005 to 0007.
+      `vs-migrate` has to run before any binary built with 0005 to 0007.
+- [ ] Nothing checks that a satellite's `hash_diff` excludes write-time values. Defect 2
+      above was exactly that mistake, and the same trap exists in every satellite whose
+      descriptive set might later gain a timestamp.
 - [ ] Document the read contract for the external RAG service — it now queries this schema
       and Qdrant directly, so tenant scoping and current-run filtering become the caller's
       responsibility. `v_current_run` is how it finds the current run.

@@ -13,20 +13,26 @@ crate holds only vectors and the payload needed to join a vector hit back to a g
 Implemented: the `VectorStore` trait (`ensure_ready`, `write_run`, `drop_run`,
 `search_entities`), `QdrantStore` over `qdrant-client` 1.20 (gRPC), collection bootstrap
 with the tenant payload index and per-tenant HNSW layout, the pure-Rust sparse encoder,
-the `[qdrant]` config section and a devenv service. 9 unit tests pass; 3 integration tests
-need Qdrant from `devenv up`.
+the `[qdrant]` config section and a devenv service. 9 unit tests and 3 integration tests
+pass, the latter against a live Qdrant.
+
+Verified against the server, not just asserted here: the collection carries a `dense`
+named vector (size from the embedder, cosine) **and** a `sparse` one with
+`modifier: idf`; `hnsw_config` is `m = 0` with `payload_m = 16`; and `tenant` is a keyword
+payload index with `is_tenant: true`. Qdrant accepts the UUID-shaped point ids derived
+from graph keys, and a tenant-filtered search returns the stored vector that
+`search_entities` hands back for client-side scoring.
 
 This crate replaced the vector half of the HelixDB writer (decisions D6/D9).
 
 Remaining:
-- [ ] **Nothing has run against a live Qdrant.** The 3 integration tests exist and have
-      only ever been compiled — there is not even a Qdrant state directory under
-      `.devenv`. Specifically unverified: creating a collection with a dense named vector
-      *and* a sparse config in one call; the `is_tenant` keyword index through
-      `CreateFieldIndexCollectionBuilder`; the `m = 0` / `payload_m = 16` HNSW layout;
-      whether `Query::new_nearest` with `.using("dense")` and `with_vectors(true)`
-      returns the named vector `dense_of` expects; and whether Qdrant accepts the
-      UUID-shaped point ids derived from graph keys.
+- [ ] **`pkgs.qdrant` does not build**, so the devenv process runs the official Docker
+      image and needs `docker` on the host. nixpkgs builds Qdrant from source and 1.18.2
+      fails on an LLVM intrinsic signature mismatch in its AVX-512 quantization code;
+      naming it in `packages` made the entire dev shell unbuildable, taking Postgres and
+      NATS down with it.
+- [ ] Sparse vectors are written but nothing queries them, so the lexical half is stored
+      and unproven: no test fuses dense and sparse, because fusion belongs to the reader.
 - [ ] No hybrid-search helper. Dense and sparse points are both written, but fusing them
       is left entirely to the reader (per decision 5), so nothing in-repo proves the two
       halves are jointly queryable.

@@ -41,22 +41,19 @@ config/             example models, worker, DAG list, search space, LiteLLM
 
 ## Status
 
-All 17 crates compile together and the workspace is green: **290 unit tests pass, 17
-integration tests are `#[ignore]`d** because they need Postgres, NATS, Garage or Qdrant
-from `devenv up`. No `todo!()` or `unimplemented!()` remains anywhere in the tree.
+All 17 crates compile together and the workspace is green: **314 tests pass, none
+ignored** — the 24 integration tests run against a live Postgres, Qdrant, NATS and Garage.
+No `todo!()` or `unimplemented!()` remains anywhere in the tree.
 
 Five components are done and carry a README; the rest carry a `SPEC.md` whose `## Status`
-section lists what is left — 76 items in total. The cross-cutting gaps:
+section lists what is left — 77 items in total. The cross-cutting gaps:
 
 - **No CI.** Nothing enforces the green build, so every claim here and in those
   checklists is verified by hand.
-- **Nothing has run end to end, and the storage layer has never run at all.** Each stage
-  is tested in isolation against fakes; no run goes upload → ingest → Stage 1 → Stage 2 →
-  Postgres + Qdrant. Worse than it sounds: the 10 Postgres integration tests *predate*
-  the storage rewrite, so running them would not verify it either. Migrations 0005 to
-  0007 have never been applied, and `PgGraphStore`, `PgCorpusResolver`'s SQL and the
-  whole of `vs-vectors` have unit tests of their column and point projections only. This
-  is the largest unverified surface in the repo and the first thing worth closing.
+- **Nothing has run end to end.** Every store is now exercised directly — all seven
+  migrations apply, and `PgGraphStore`, `PgCorpusResolver` and `QdrantStore` are tested
+  against real services — but no run goes upload → ingest → Stage 1 → Stage 2 → Postgres
+  + Qdrant, so the handover between stages is still only covered by fakes.
 - **No auth.** `vs-api` takes the tenant from `X-VS-Tenant` and admin rights from
   `X-VS-Admin`, both of which any caller can set. Keep it on a trusted network.
 - **Telemetry is a stub** (`crates/vs-infra/src/telemetry.rs`): structured logs only, no
@@ -127,20 +124,36 @@ curl 127.0.0.1:8080/v1/jobs/<job_id> -H 'x-vs-tenant: t1'
 
 ### Tests
 
-`cargo test --workspace` runs the 290 unit tests (PDF tests need
-`PDFIUM_DYNAMIC_LIB_PATH`, set by devenv). The 17 tests that need Postgres, NATS, Garage
-or Qdrant are `#[ignore]`d; with `devenv up` running:
+`cargo test --workspace` runs the 290 tests that need nothing (PDF tests need
+`PDFIUM_DYNAMIC_LIB_PATH`, set by devenv). The other 24 touch a real store and are
+`#[ignore]`d; with `devenv up` running:
 
 ```sh
 cargo test --workspace -- --include-ignored
 ```
 
-Those 17 are the only tests that touch a real store, and they have never been run. Even
-passing them would leave gaps: 10 of them predate the storage rewrite and cover
-`write_document`, `write_page` and the `ops` schema, while the newer write paths — the
-graph layer, document type, cells, in-image text, corpus resolution — have no integration
-test at all yet. Treat anything in `vs-vault` or `vs-vectors` added after the HelixDB
-removal as unproven until that changes.
+**If devenv's ports are taken**, every service is also addressable by environment
+variable, so the suite can be pointed at containers of your own on any ports. This is
+worth knowing on a machine running more than one project — devenv wants 5432, 4222, 3900
+and 6333, and will not start if something else holds them:
+
+```sh
+export DATABASE_URL=postgres://vs:vs@127.0.0.1:55432/visual_suite
+export VS__POSTGRES__PASSWORD=vs_app          # the vs_app role must exist (see devenv.nix)
+export VS__QDRANT__URL=http://127.0.0.1:56334 # gRPC, not the 6333 REST port
+export VS__BUS__NATS_URL=nats://127.0.0.1:54222
+export AWS_ENDPOINT=http://127.0.0.1:53900 AWS_REGION=garage AWS_ALLOW_HTTP=true
+export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=...
+cargo test --workspace -- --include-ignored
+```
+
+Running these for the first time found three defects that no unit test could have caught,
+two of them latent since Stage 2 was written: `write_stage2` never populated
+`assertion_hk`, so every assertion insert violated a NOT NULL constraint and the
+assertion write path had never worked; `sat_run`'s `hash_diff` included the write
+timestamp, so a redelivered task versioned the satellite again; and `sat_image_text`'s
+insert aliased its key column in a way `latest_differs` could not see. They are the
+argument for running this set in CI.
 
 ## Build
 
