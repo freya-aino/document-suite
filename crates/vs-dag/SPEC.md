@@ -13,8 +13,12 @@ and `NodeTrace` provenance. 6 unit tests pass.
 
 Remaining:
 - [ ] `blocks.verify` is listed in the step catalogue below but **is not implemented and
-      not registered anywhere** — the only gap in the catalogue (10 of 11 kinds exist).
-      Implement it or drop the row.
+      not registered anywhere** — the only gap in the catalogue (15 of 16 kinds exist).
+      It is kept in the catalogue rather than dropped because the shape is settled (two
+      block sets in, confidence from agreement out) and `vs-stitch` names it as the
+      intended home for VLM-assisted link judgement; what is missing is a definition of
+      agreement between two block sets with different segmentations, which is the same
+      problem `vs-adapt`'s layout F1 solves and should share code with.
 - [ ] No artefact kind carries region relationships; `LayoutRegion` has no id and no
       parent, so a step cannot express that one region contains another.
 

@@ -16,7 +16,8 @@ candidates it accepts.
 
 Remaining:
 - [ ] `blocks.verify` is in the `vs-dag` catalogue but has no implementation to register,
-      so the registry covers 15 of 16 documented kinds.
+      so the registry covers 15 of 16 documented kinds. See `vs-dag`'s status for what is
+      actually missing.
 - [ ] `page.orient` and `page.dewarp` are not implemented; see `vs-ingest`'s status for
       why neither is a pixel-statistics problem.
 

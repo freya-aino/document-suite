@@ -14,24 +14,25 @@ Implemented: the node and edge model, `build()` over a `StitchedDocument` plus a
 This crate is load-bearing — it is the single structure both stores are written from — and
 it is the least tested crate in the workspace. Fix that before extending it.
 
+Also implemented: **table cells and in-image text as nodes** (`page`), the `Cites` edge,
+and the intra-page relations `vs-stitch` derives (`EnclosesRegion`, `ValueOf`). 21 tests,
+12 of them against a whole built document — the builder had none before.
+
 Remaining:
-- [ ] **No tests at all** (237 lines, zero `#[test]`). Highest priority in this crate.
-- [ ] `EdgeKind::Cites` is declared and documented but never emitted, although
-      `vs-extract/src/bib.rs` already produces a `cites` predicate. Wire it up.
-- [ ] `EdgeKind::SameAs` is unreachable: entity resolution is always eager, so the
-      "resolution deferred" case never happens. Emit it or delete the variant.
-- [ ] `validate()` does not enforce the invariants below that this spec claims: the
-      "≥ 1 `arg` edge or literal" rule is unchecked, edge endpoint *kinds* are unchecked,
-      and the dangling-edge check uses a kind-agnostic key set while uniqueness is
-      per-kind — so a same-key node of another kind satisfies an edge.
-- [ ] Figure and chart blocks get no embed target, contrary to "Embedding targets" below:
-      emission requires non-empty `block.text`, and a figure's text is usually empty while
-      its description sits in `BlockContent::Figure`.
-- [ ] Intra-page relationships are absent — regions carry only a linear `reading_order`.
-      Containment, column flow, form key/value, table cell structure and in-image text all
-      need new node and edge kinds.
-- [ ] `header_repeated` on a `TableContinues` stitch link is dropped when the link becomes
-      an edge; only `confidence` survives.
+- [ ] Column flow is repaired by reordering `global_order` in `vs-stitch`, so the graph
+      records the *corrected* reading order but not that a page had columns, nor which
+      block sat in which column. A reader cannot tell a repaired two-column page from a
+      single-column one.
+- [ ] In-image text is matched to body text by case-insensitive containment on fragments
+      of three characters or more. Deliberately conservative — a looser match would link a
+      chart's "AUC" label to every "auction" — but it therefore misses inflections and
+      any term the model transcribed differently from the body text.
+- [ ] `validate()` leaves `Evidence`, `MatchesText` and `HasSection` endpoint-kind
+      unconstrained, because each legitimately has two shapes. Those three could take a
+      pair-of-alternatives rule instead of being exempt.
+- [ ] Cell nodes come from re-parsing the table HTML, so a table the recognition model got
+      structurally wrong yields confidently wrong cells. Nothing cross-checks the parse
+      against the block's plain-text projection.
 
 ## Node kinds
 
@@ -43,6 +44,8 @@ Remaining:
 | `block` | `block_hk` | kind, text, bbox, page no, global order, confidence, (table html / latex / figure description) |
 | `entity` | `entity_hk` (canonical) or doc-local id before resolution | name, type id, raw type, aliases |
 | `assertion` | `assertion_hk` | predicate id, raw predicate, kind, qualifiers, confidence, verified |
+| `cell` | `cell:<block_hk>:<row>:<col>` | row, col, header, text, **column_header** — what makes a cell self-describing: "row 3, column 2" means nothing alone, the same cell carrying `column_header: "F1"` is citable evidence |
+| `image_text` | `imgtext:<block_hk>:<n>` | text, index in the model's reading order |
 
 Assertions are **nodes** (reified), so n-ary frames, qualifiers and multiple evidence
 spans need no special cases. For fast traversal, binary assertions also get a direct
@@ -62,10 +65,14 @@ spans need no special cases. For fast traversal, binary assertions also get a di
 | `refers_to` | block → block | structure (stitch) |
 | `mentions` | block → entity (props: char span, surface, confidence) | link |
 | `arg` | assertion → entity (props: role) | semantic |
-| `evidence` | assertion → block (props: char span) | link |
+| `evidence` | assertion → block (props: char span) or assertion → page (props: bbox) | link |
+| `encloses_region` | block → block, same page (props: coverage as confidence) | structure |
+| `value_of` | value block → label block, form-like pages (props: confidence) | structure |
+| `has_cell` | table block → cell | structure |
+| `text_in_image` | figure/chart block → in-image text fragment | structure |
+| `matches_text` | in-image text → block or entity (props: `via`) | link |
 | `related` | entity → entity (props: predicate id, assertion_hk, confidence) | semantic shortcut |
 | `cites` | block → entity (reference entry) | semantic |
-| `same_as` | doc-local entity → canonical entity (only if resolution deferred) | semantic |
 
 Literal arguments (numbers, dates) are stored as properties on the `arg` list of the
 assertion node (`literals: [{role, value, unit}]`), not as nodes.

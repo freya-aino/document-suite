@@ -11,10 +11,24 @@ Implemented: global reading order, furniture detection, paragraph and table cont
 links, caption pairing, the section tree, and multilingual cross-references (9 language
 label tables). 12 unit tests pass.
 
+Also implemented: **intra-page structure** (`page_layout`) — multi-column reading-order
+repair, geometric enclosure, and form key/value pairing. Before this a page carried a
+single linear `reading_order` and nothing else, so a two-column paper, a form and a flat
+memo were structurally indistinguishable.
+
 Remaining:
-- [ ] **Multi-column flow repair** is not implemented, so a two-column page whose model
-      returned interleaved reading order stays interleaved. The most common structural
-      failure on scientific papers — the format this suite sets its quality bar by.
+- [ ] Column detection is geometric and unvalidated against ground truth. The band
+      algorithm handles the common shape (spanning title, columns, spanning figure,
+      columns) but a page whose columns are separated by less than
+      `MIN_COLUMN_GAP` (2 % of the page) reads as one column, and a sidebar reads as a
+      column of its own.
+- [ ] Key/value pairing is gated on the **page's** type being form-like, so a form page
+      the classifier called `other` gets no pairs at all. It also pairs only the nearest
+      candidate right or below, so a label with two values (a range, a split amount)
+      keeps one.
+- [ ] Enclosure finds nothing on a typical page, because most layout models emit
+      non-overlapping sibling regions. That is the correct answer for those pages, but it
+      means the relation is only exercised by models that nest.
 - [ ] Caption pairing ignores the above/below preference this spec describes below and the
       horizontal-overlap test: the code only minimises absolute vertical-centre distance,
       so a caption between two figures can attach to the wrong one.
@@ -99,6 +113,38 @@ paragraph split over two pages) is produced on demand:
 
 Missing pages break continuation links across the gap; they are never guessed.
 `StitchedDocument.missing_pages` lists them for Stage 2 and the job status.
+
+## Intra-page structure (`page_layout`)
+
+Derived from geometry alone, like the rest of this crate, and all thresholds are
+fractions of the page so none of them depend on DPI.
+
+**Column flow.** A page is cut into horizontal bands at every block at least 60 % of the
+page wide, and only the blocks *between* those are grouped into columns and read
+column-major. The bands matter: a two-column paper is not two columns, it is a spanning
+title, then columns, then often a spanning figure, then more columns. Clustering the whole
+page at once puts the title in the left column and drags everything after it out of order.
+The repair runs **before** sections, continuations and cross-references, all of which read
+`global_order`, and only when a page really has two or more columns *and* the result
+differs from the model's own order — the model is usually right, and overriding it on a
+single-column page could only make things worse.
+
+**Enclosure.** A block whose box lies 85 % or more inside another, on the same page, is
+linked to its **smallest** enclosing block, so a caption inside a figure inside a column
+attaches to the figure. Not 1.0 coverage, because a caption printed over a figure's bottom
+edge is enclosed in intent even when a few per cent of its box pokes out.
+
+**Key/value.** On form-like pages only (`Form`, `Invoice`, `Receipt`), a label is paired
+with the nearest value to its right on the same line, or failing that directly below.
+Side-by-side first because it is far more common, and stacked pairs only read as pairs
+when nothing sits to the right. A label is a short run of text ending in a colon, or a
+short title-cased run; a sentence ending in a full stop is not a form field, which is the
+cheapest way to tell a paragraph from a label. A "value" that is itself a label is a
+column header, not a pair, and is discarded.
+
+Gating on the **page's** type rather than the document's is deliberate: a contract with an
+invoice stapled to the back pairs fields only on the invoice pages. Run everywhere, this
+would pair every heading with the paragraph under it.
 
 ## Post-v1
 

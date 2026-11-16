@@ -1,5 +1,6 @@
 //! Document graph model and builder. See `SPEC.md`.
 
+pub mod page;
 mod store;
 pub use store::{GraphStore, RunInfo, StoreError, Vectors};
 
@@ -20,6 +21,10 @@ pub enum NodeKind {
     Block,
     Entity,
     Assertion,
+    /// One cell of a table, so a single number can be cited rather than "that table".
+    Cell,
+    /// A fragment of text found inside a figure or chart.
+    ImageText,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -39,7 +44,16 @@ pub enum EdgeKind {
     Evidence,
     Related,
     Cites,
-    SameAs,
+    /// Block → block, same page: the first geometrically encloses the second.
+    EnclosesRegion,
+    /// Block → block, same page: the first is the value of the second, a form label.
+    ValueOf,
+    /// Table → cell.
+    HasCell,
+    /// Figure/chart block → text found inside the image.
+    TextInImage,
+    /// In-image text → the block or entity elsewhere in the document that it matches.
+    MatchesText,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -76,9 +90,45 @@ pub enum GraphError {
     DuplicateNode(String),
     DanglingEdge { kind: EdgeKind, from: String, to: String },
     AssertionWithoutEvidence(String),
+    /// An assertion with no arguments and no literals asserts nothing about anything.
+    AssertionWithoutArguments(String),
+    /// An edge between the wrong kinds of node, e.g. `on_page` pointing at an entity.
+    WrongEndpointKind { kind: EdgeKind, from: NodeKind, to: NodeKind },
+}
+
+/// The node kinds each edge may join, as `(from, to)`. `None` means unconstrained.
+///
+/// Without this, nothing stopped `Contains` running page → page or `OnPage` pointing at
+/// an entity: the dangling check only asked whether the keys existed, and keys are
+/// unique per *kind*, so an edge could even be satisfied by a same-key node of another
+/// kind entirely.
+fn endpoints(kind: EdgeKind) -> Option<(NodeKind, NodeKind)> {
+    use EdgeKind::*;
+    use NodeKind::*;
+    Some(match kind {
+        HasPage => (Document, Page),
+        OnPage => (Block, Page),
+        Contains => (Section, Block),
+        Next | ContinuesOn | TableContinues | CaptionOf | RefersTo | EnclosesRegion | ValueOf => (Block, Block),
+        Mentions => (Block, Entity),
+        Arg => (Assertion, Entity),
+        // Entity → entity, but both sides may be a doc-local or a canonical key, so the
+        // kind is the same on both ends and the constraint adds nothing.
+        Related => (Entity, Entity),
+        Cites => (Block, Entity),
+        HasCell => (Block, Cell),
+        TextInImage => (Block, ImageText),
+        // `evidence` points at a block for a span and a page for a region, and
+        // `matches_text` at either a block or an entity, so neither has one shape.
+        Evidence | MatchesText => return None,
+        // `has_section` is document → section at the top level and section → section
+        // when nested.
+        HasSection => return None,
+    })
 }
 
 impl DocGraph {
+
     fn node(&mut self, kind: NodeKind, key: impl Into<String>, props: Value) {
         self.nodes.push(GNode { kind, key: key.into(), props });
     }
@@ -87,22 +137,48 @@ impl DocGraph {
         self.edges.push(GEdge { kind, from: from.into(), to: to.into(), props });
     }
 
+    /// For the `page` module, which adds the nodes and edges inside a block.
+    pub(crate) fn push_node(&mut self, kind: NodeKind, key: &str, props: Value) {
+        self.node(kind, key, props);
+    }
+
+    pub(crate) fn push_edge(&mut self, kind: EdgeKind, from: &str, to: &str, props: Value) {
+        self.edge(kind, from, to, props);
+    }
+
     pub fn validate(&self) -> Result<(), GraphError> {
-        let mut keys = HashSet::new();
+        let mut by_key: HashMap<&str, NodeKind> = HashMap::new();
+        let mut seen = HashSet::new();
         for n in &self.nodes {
-            if !keys.insert((n.kind, n.key.as_str())) {
+            if !seen.insert((n.kind, n.key.as_str())) {
                 return Err(GraphError::DuplicateNode(n.key.clone()));
             }
+            by_key.insert(n.key.as_str(), n.kind);
         }
-        let all: HashSet<&str> = self.nodes.iter().map(|n| n.key.as_str()).collect();
         for e in &self.edges {
-            if !all.contains(e.from.as_str()) || !all.contains(e.to.as_str()) {
+            // Resolve both ends to a *kind*, not just to "some node exists with this
+            // key". Keys are unique per kind, so the old existence check could be
+            // satisfied by a node of a completely different kind.
+            let (Some(from), Some(to)) = (by_key.get(e.from.as_str()), by_key.get(e.to.as_str())) else {
                 return Err(GraphError::DanglingEdge { kind: e.kind, from: e.from.clone(), to: e.to.clone() });
+            };
+            if let Some((want_from, want_to)) = endpoints(e.kind) {
+                if *from != want_from || *to != want_to {
+                    return Err(GraphError::WrongEndpointKind { kind: e.kind, from: *from, to: *to });
+                }
             }
         }
         for a in self.nodes.iter().filter(|n| n.kind == NodeKind::Assertion) {
             if !self.edges.iter().any(|e| e.kind == EdgeKind::Evidence && e.from == a.key) {
                 return Err(GraphError::AssertionWithoutEvidence(a.key.clone()));
+            }
+            // An assertion needs something to be about: at least one entity argument or
+            // one literal. SPEC.md has claimed this since the start; nothing checked it,
+            // so an extraction that produced a bare predicate passed validation.
+            let has_arg = self.edges.iter().any(|e| e.kind == EdgeKind::Arg && e.from == a.key);
+            let has_literal = a.props.get("literals").and_then(|l| l.as_array()).is_some_and(|l| !l.is_empty());
+            if !has_arg && !has_literal {
+                return Err(GraphError::AssertionWithoutArguments(a.key.clone()));
             }
         }
         Ok(())
@@ -126,6 +202,8 @@ pub fn build(doc: &StitchedDocument, ext: &ExtractionOutput, title: Option<&str>
 
     // Blocks
     let mut prev_body: Option<&str> = None;
+    let mut body_text: Vec<(String, String)> = Vec::new();
+    let mut image_blocks: Vec<(String, vs_core::BlockContent)> = Vec::new();
     for (i, b) in doc.blocks.iter().enumerate() {
         let bk = b.block.block_hk.as_str();
         g.node(NodeKind::Block, bk, json!({
@@ -134,15 +212,35 @@ pub fn build(doc: &StitchedDocument, ext: &ExtractionOutput, title: Option<&str>
             "furniture": !doc.is_body(i),
         }));
         g.edge(EdgeKind::OnPage, bk, b.page_hk.as_str(), Value::Null);
+        // A table becomes addressable cell by cell, so one number can be cited rather
+        // than the whole table.
+        page::add_table_cells(&mut g, bk, &b.block.content);
+        if doc.is_body(i) {
+            body_text.push((bk.to_string(), b.block.text.to_lowercase()));
+            if page::is_image_kind(b.block.kind) {
+                image_blocks.push((bk.to_string(), b.block.content.clone()));
+            }
+        }
         if doc.is_body(i) {
             if let Some(p) = prev_body {
                 g.edge(EdgeKind::Next, p, bk, Value::Null);
             }
             prev_body = Some(bk);
-            let embeddable = !b.block.text.trim().is_empty()
+            // A figure's searchable text is normally its description plus in-image text,
+            // but a `figure.describe` that returned only a description leaves `text`
+            // empty — and the spec promises figures are embeddable. Fall back to it.
+            let text = match b.block.text.trim().is_empty() {
+                false => b.block.text.clone(),
+                true => match &b.block.content {
+                    vs_core::BlockContent::Figure { description: Some(d), .. }
+                    | vs_core::BlockContent::Chart { description: Some(d), .. } => d.clone(),
+                    _ => String::new(),
+                },
+            };
+            let embeddable = !text.trim().is_empty()
                 && !matches!(b.block.kind, BlockKind::PageNumber | BlockKind::Header | BlockKind::Footer);
             if embeddable {
-                g.embed_targets.push(EmbedTarget { node_key: bk.to_string(), kind: NodeKind::Block, text: b.block.text.clone() });
+                g.embed_targets.push(EmbedTarget { node_key: bk.to_string(), kind: NodeKind::Block, text });
             }
         }
     }
@@ -169,8 +267,16 @@ pub fn build(doc: &StitchedDocument, ext: &ExtractionOutput, title: Option<&str>
             LinkKind::TableContinues => EdgeKind::TableContinues,
             LinkKind::CaptionOf => EdgeKind::CaptionOf,
             LinkKind::RefersTo => EdgeKind::RefersTo,
+            LinkKind::Encloses => EdgeKind::EnclosesRegion,
+            LinkKind::ValueOf => EdgeKind::ValueOf,
         };
-        g.edge(kind, l.from.as_str(), l.to.as_str(), json!({ "confidence": l.confidence }));
+        // `header_repeated` used to be dropped here, which lost the one fact a reader
+        // merging two halves of a split table actually needs.
+        let mut props = json!({ "confidence": l.confidence });
+        if l.header_repeated {
+            props["header_repeated"] = json!(true);
+        }
+        g.edge(kind, l.from.as_str(), l.to.as_str(), props);
     }
 
     // Entities (canonical key if resolved, else doc-local)
@@ -232,9 +338,40 @@ pub fn build(doc: &StitchedDocument, ext: &ExtractionOutput, title: Option<&str>
             let subj = entity_args.iter().find(|(r, _)| *r == "subject");
             let obj = entity_args.iter().find(|(r, _)| *r == "object");
             if let (Some((_, s)), Some((_, o))) = (subj, obj) {
-                g.edge(EdgeKind::Related, s.as_str(), o.as_str(), json!({ "predicate": a.predicate_id.as_ref().unwrap_or(&a.predicate), "assertion": ak, "confidence": a.confidence }));
+                g.edge(EdgeKind::Related, s.as_str(), o.as_str(), json!({ "predicate": a.predicate_id.as_ref().unwrap_or(&a.predicate), "assertion": &ak, "confidence": a.confidence }));
             }
         }
+
+        // Citations get a direct block → entity edge as well as the assertion.
+        //
+        // `vs-extract`'s bibliography pass emits these as n-ary assertions with the
+        // citing block as a *literal* `claim_block` and the reference as an entity, so
+        // the reified form alone makes "what does this paper cite" a scan of every
+        // assertion's arguments. The edge was declared and documented from the start and
+        // never emitted; this is it.
+        if a.predicate == "cites" {
+            let claim_block = a.args.iter().find(|arg| arg.role == "claim_block").and_then(|arg| match &arg.value {
+                ArgValue::Literal { value, .. } => Some(value.as_str()),
+                ArgValue::Entity { .. } => None,
+            });
+            let reference = a.args.iter().find(|arg| arg.role == "reference").and_then(|arg| match &arg.value {
+                ArgValue::Entity { local_id } => entity_key.get(local_id.as_str()).map(|k| k.as_str()),
+                ArgValue::Literal { .. } => None,
+            });
+            if let (Some(from), Some(to)) = (claim_block, reference) {
+                g.edge(EdgeKind::Cites, from, to, json!({ "assertion": &ak, "confidence": a.confidence }));
+            }
+        }
+    }
+
+    // In-image text last: matching needs every body block and entity already in hand.
+    let entity_names: Vec<(String, String)> = ext
+        .entities
+        .iter()
+        .map(|e| (entity_key[e.local_id.as_str()].clone(), e.name.to_lowercase()))
+        .collect();
+    for (bk, content) in &image_blocks {
+        page::add_image_text(&mut g, bk, content, &body_text, &entity_names);
     }
     g
 }

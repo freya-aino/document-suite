@@ -5,8 +5,10 @@ use std::collections::{HashMap, HashSet};
 
 use vs_core::{Block, BlockKind, HashKey, PageResult, RunId};
 
+pub mod page_layout;
 pub mod xref;
 
+pub use page_layout::{column_order, columns_of, enclosures, key_values, repair_reading_order};
 pub use xref::{find_mentions, labels_for, link_cross_refs, Mention, RefLabel, RefTarget};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -24,6 +26,10 @@ pub enum LinkKind {
     TableContinues,
     CaptionOf,
     RefersTo,
+    /// `from` geometrically encloses `to`, on the same page.
+    Encloses,
+    /// `from` is the value of the label `to`, on a form-like page.
+    ValueOf,
 }
 
 /// A stitching decision between two blocks (`from` → `to`).
@@ -165,8 +171,18 @@ pub fn stitch(mut pages: Vec<PageResult>, pages_total: u32) -> Result<StitchedDo
     let languages: HashMap<u32, String> = pages.iter().map(|p| (p.page_no, p.profile.language.primary())).collect();
     let mut doc = StitchedDocument { document_hk, run_id, blocks, furniture: HashSet::new(), sections: vec![], links: vec![], missing_pages };
     detect_furniture(&mut doc, pages.len());
+    // Reading order first: sections, continuations and cross-references all read
+    // `global_order`, so repairing it afterwards would leave them describing an order
+    // that no longer exists.
+    let repaired = page_layout::repair_reading_order(&mut doc);
+    if !repaired.is_empty() {
+        tracing::debug!(pages = ?repaired, "multi-column reading order repaired");
+    }
     link_continuations(&mut doc);
     pair_captions(&mut doc);
+    let page_types: HashMap<u32, vs_core::DocType> = pages.iter().map(|p| (p.page_no, p.profile.doc_type)).collect();
+    doc.links.extend(page_layout::enclosures(&doc));
+    doc.links.extend(page_layout::key_values(&doc, &page_types));
     build_sections(&mut doc);
     xref::link_cross_refs(&mut doc, &languages);
     Ok(doc)
