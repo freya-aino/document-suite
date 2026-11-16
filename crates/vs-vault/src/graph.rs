@@ -411,9 +411,12 @@ impl PgGraphStore {
             .map_err(unavailable)?;
 
             let sat = format!(
+                // The alias column must be named `image_text_hk`: `latest_differs`
+                // generates `s.<parent> = v.<parent>`, so a shorter alias makes the
+                // generated predicate reference a column that does not exist.
                 "INSERT INTO vault.sat_image_text (image_text_hk, load_dts, hash_diff, record_source, text)
-                 SELECT v.hk, $1, v.hash_diff, $4, v.text
-                 FROM UNNEST($2::text[], $3::text[], $5::text[]) AS v(hk, hash_diff, text)
+                 SELECT v.image_text_hk, $1, v.hash_diff, $4, v.text
+                 FROM UNNEST($2::text[], $3::text[], $5::text[]) AS v(image_text_hk, hash_diff, text)
                  WHERE {}",
                 latest_differs("vault.sat_image_text", "image_text_hk")
             );
