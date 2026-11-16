@@ -24,7 +24,7 @@ fn spec() -> JobSpec {
         dag_list_version: None,
         source_uri: "originals/t1/abc".into(),
         external_ref: Some("ext-1".into()),
-            doc_type: None,
+        doc_type: None,
     }
 }
 
@@ -250,11 +250,17 @@ async fn page_counters_complete_job_exactly_once(pool: PgPool) {
 }
 
 /// Connects to the same (test) database as the runtime role.
+/// A second pool on the same database as `pool`, connected as the runtime role.
+///
+/// Host and port come from `pool`, not from constants: hardcoding 5432 meant this
+/// reached whatever happened to be listening there, which on a machine running more than
+/// one project is somebody else's database.
 async fn as_app(pool: &PgPool) -> PgPool {
-    let db = pool.connect_options().get_database().unwrap().to_string();
+    let opts = pool.connect_options();
+    let db = opts.get_database().unwrap().to_string();
     let opts = sqlx::postgres::PgConnectOptions::new()
-        .host("127.0.0.1")
-        .port(5432)
+        .host(opts.get_host())
+        .port(opts.get_port())
         .username("vs_app")
         .password(&std::env::var("VS__POSTGRES__PASSWORD").unwrap_or_else(|_| "vs_app".into()))
         .database(&db);

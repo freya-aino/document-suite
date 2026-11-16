@@ -761,9 +761,15 @@ impl Stage2Columns {
             }
             let refs: Vec<&HashKey> = arg_hks.iter().collect();
             let hk = HashKey::assertion(&doc.run_id, &a.predicate, &refs);
+            // Two extractors can reach the same assertion (a window and a table, say);
+            // the key is deterministic, so the second one is a duplicate.
             if c.assertion_hk.iter().any(|k| k == hk.as_str()) {
                 continue;
             }
+            // Must be pushed in step with every other assertion column: `UNNEST` over
+            // arrays of unequal length pads the short ones with NULL, so a missing key
+            // here is a NOT NULL violation on `hub_assertion`, not a silent gap.
+            c.assertion_hk.push(hk.to_string());
             let mut sorted: Vec<&str> = refs.iter().map(|k| k.as_str()).collect();
             sorted.sort_unstable();
             let prov = ext.provenance.get(a.provenance_idx);
@@ -855,7 +861,13 @@ async fn insert_sat_run(
     finished_at: Option<DateTime<Utc>>,
 ) -> Result<(), VaultError> {
     let (profile, priority) = (enum_str(&spec.profile), enum_str(&spec.priority));
-    let desc = json!([dag_list_version, profile, priority, state, started_at, finished_at]);
+    // `finished_at` is deliberately out of the hash_diff, though it is still stored.
+    // It is `Utc::now()` at the moment of writing, so including it versioned the
+    // satellite on every retry of a redelivered task: the wall clock moving was being
+    // recorded as the run having changed. A state transition (processing → done →
+    // partial) still versions, because `state` is in the diff, and `load_dts` already
+    // says when each row was written.
+    let desc = json!([dag_list_version, profile, priority, state, started_at]);
     sqlx::query(&format!(
         "INSERT INTO vault.sat_run (run_hk, load_dts, hash_diff, record_source, dag_list_version, profile, priority, state, started_at, finished_at)
          SELECT v.run_hk, $2, v.hash_diff, $4, $5, $6, $7, $8, $9, $10
