@@ -49,3 +49,29 @@ pub struct PageProfile {
     pub confidence: f32,
     pub tier: ClassifierTier,
 }
+
+/// Where a document's type came from. Recorded because the sources are not equally
+/// trustworthy, and a reviewer looking at a stored type needs to know which it was.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DocTypeSource {
+    /// Supplied by the caller. Trusted over anything inferred.
+    Caller,
+    /// A model that looked at several pages at once.
+    Model,
+    /// Aggregated from per-page classification.
+    PageVote,
+}
+
+/// A document's type with the confidence behind it.
+///
+/// The document-level analogue of [`PageProfile`]. Lives here, not in `vs-classify`, so
+/// the stores can carry it without depending on the classifier.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct DocumentType {
+    pub doc_type: DocType,
+    /// Share of the evidence behind the winner, `0..=1`. Not a probability: it says how
+    /// much of what was looked at agreed.
+    pub confidence: f32,
+    pub source: DocTypeSource,
+}

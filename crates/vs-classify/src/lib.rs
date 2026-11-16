@@ -1,10 +1,13 @@
 //! Page classification. See `SPEC.md`.
 
+pub mod document;
+pub use document::{document_type, resolve as resolve_doc_type, PageVote};
+
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-use vs_core::{ClassifierTier, DocType, LanguageTag, PageProfile};
+use vs_core::{ClassifierTier, DocType, DocumentType, LanguageTag, PageProfile};
 use vs_dag::PageImage;
 
 /// Cheap signals computed by ingest from the PDF structure / image.
@@ -145,6 +148,16 @@ pub fn combine(
 pub enum ClassifyError {
     #[error("vision classifier failed: {0}")]
     Vision(String),
+}
+
+/// Document-level classifier; implemented in `vs-models` on top of a small VLM.
+///
+/// Separate from [`VisionClassifier`] because it answers a different question: not "what
+/// is this page" but "what is this document", which needs several pages in one call.
+#[async_trait]
+pub trait DocumentClassifier: Send + Sync {
+    /// Classifies a document from its opening page thumbnails, in page order.
+    async fn classify(&self, thumbnails: &[PageImage], language: &LanguageTag) -> Result<DocumentType, ClassifyError>;
 }
 
 /// Tier 1 classifier; implemented in `vs-models` on top of a small VLM.
