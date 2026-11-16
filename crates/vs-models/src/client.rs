@@ -6,6 +6,8 @@
 
 use async_trait::async_trait;
 use base64::Engine;
+use std::borrow::Cow;
+
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -91,12 +93,26 @@ struct ModelState {
 }
 
 /// OpenAI-compatible client (vLLM, SGLang, hosted APIs).
+/// Somewhere a model server can fetch an image from.
+///
+/// Exists so `image_transport = "url"` works without this crate taking a dependency on
+/// the blob store: the worker already has one and implements this over
+/// `BlobStore::presign_get`. A very large page sent as base64 inflates by a third and has
+/// to be held in memory on both sides; a link does not.
+#[async_trait::async_trait]
+pub trait ImageHost: Send + Sync {
+    /// Stores the bytes and returns a URL the model server can GET.
+    async fn host(&self, bytes: &[u8], mime: &str) -> Result<String, ModelError>;
+}
+
 pub struct OpenAiClient {
     http: reqwest::Client,
     registry: ModelRegistry,
     models: HashMap<String, ModelState>,
     /// xorshift state for backoff jitter (no `rand` dependency needed).
     jitter: AtomicU64,
+    /// Set to enable `image_transport = "url"`; without it that transport inlines base64.
+    image_host: Option<Arc<dyn ImageHost>>,
 }
 
 impl OpenAiClient {
@@ -121,7 +137,13 @@ impl OpenAiClient {
             .map(|d| d.as_nanos() as u64)
             .unwrap_or(0x9E37_79B9_7F4A_7C15)
             | 1;
-        Self { http, registry, models, jitter: AtomicU64::new(seed) }
+        Self { http, registry, models, jitter: AtomicU64::new(seed), image_host: None }
+    }
+
+    /// Enables `image_transport = "url"` for models that ask for it.
+    pub fn with_image_host(mut self, host: Arc<dyn ImageHost>) -> Self {
+        self.image_host = Some(host);
+        self
     }
 
     pub fn registry(&self) -> &ModelRegistry {
@@ -140,16 +162,22 @@ impl OpenAiClient {
         }
     }
 
-    pub fn build_body(spec: &ModelSpec, req: &ChatRequest) -> Value {
-        // TODO(image_transport = "url"): upload very large pages to the blob store and send a
-        // presigned URL instead of a data URL. Until then every transport inlines base64.
+    /// Inlines every image as a `data:` URL.
+    pub fn data_urls(images: &[(Arc<[u8]>, &'static str)]) -> Vec<String> {
         let b64 = base64::engine::general_purpose::STANDARD;
+        images.iter().map(|(bytes, mime)| format!("data:{mime};base64,{}", b64.encode(bytes))).collect()
+    }
+
+    pub fn build_body(spec: &ModelSpec, req: &ChatRequest) -> Value {
+        Self::build_body_with_images(spec, req, &Self::data_urls(&req.images))
+    }
+
+    /// `image_urls` are sent as-is, so they may be `data:` URLs or links an `ImageHost`
+    /// produced. Both are the same `image_url` content part to the server.
+    pub fn build_body_with_images(spec: &ModelSpec, req: &ChatRequest, image_urls: &[String]) -> Value {
         let mut content = vec![];
-        for (bytes, mime) in &req.images {
-            content.push(json!({
-                "type": "image_url",
-                "image_url": { "url": format!("data:{mime};base64,{}", b64.encode(bytes)) }
-            }));
+        for url in image_urls {
+            content.push(json!({ "type": "image_url", "image_url": { "url": url } }));
         }
         content.push(json!({ "type": "text", "text": req.prompt }));
         let mut messages = vec![];
@@ -158,7 +186,7 @@ impl OpenAiClient {
         }
         messages.push(json!({ "role": "user", "content": content }));
         let mut body = json!({
-            "model": spec.served_name.clone().unwrap_or_else(|| spec.id.clone()),
+            "model": spec.served_model(),
             "messages": messages,
             "temperature": 0,
             "max_tokens": req.max_tokens,
@@ -174,7 +202,25 @@ impl OpenAiClient {
 
     pub async fn chat(&self, model: &str, req: &ChatRequest) -> Result<ChatResponse, ModelError> {
         let spec = self.spec(model)?;
-        let body = Self::build_body(spec, req);
+        let images = fit_images(spec, &req.images);
+        let urls = match (spec.images_by_url(), &self.image_host) {
+            (true, Some(host)) => {
+                let mut urls = Vec::with_capacity(images.len());
+                for (bytes, mime) in images.iter() {
+                    urls.push(host.host(bytes, mime).await?);
+                }
+                urls
+            }
+            // Asked for URLs with nowhere to put them. Inlining still works, so this is a
+            // warning rather than a failure — but it is worth saying, because the whole
+            // point of the setting was to stop inlining.
+            (true, None) => {
+                tracing::warn!(model = %spec.id, "image_transport = \"url\" but no ImageHost is configured; inlining base64");
+                Self::data_urls(&images)
+            }
+            (false, _) => Self::data_urls(&images),
+        };
+        let body = Self::build_body_with_images(spec, req, &urls);
         let v = self.post_json(spec, "chat/completions", &body).await?;
         parse_chat_response(&v)
     }
@@ -436,6 +482,52 @@ impl Embedder for OpenAiEmbedder {
     }
 }
 
+/// Downscales images whose long side exceeds the model's declared `max_image_px`.
+///
+/// Returns borrowed bytes when nothing needs doing, which is the common case: declaring a
+/// limit should not cost a decode-and-re-encode on every page that is already within it.
+/// A decode or encode failure sends the original rather than failing the step — the model
+/// server will either cope or say so, and that is a better outcome than refusing a page
+/// because we could not shrink it.
+fn fit_images<'a>(spec: &ModelSpec, images: &'a [(Arc<[u8]>, &'static str)]) -> Cow<'a, [(Arc<[u8]>, &'static str)]> {
+    let Some(max_px) = spec.max_image_px.filter(|m| *m > 0) else { return Cow::Borrowed(images) };
+    if images.is_empty() {
+        return Cow::Borrowed(images);
+    }
+    let mut out: Option<Vec<(Arc<[u8]>, &'static str)>> = None;
+    for (i, (bytes, _mime)) in images.iter().enumerate() {
+        match shrink_to(bytes, max_px) {
+            Some(small) => {
+                let v = out.get_or_insert_with(|| images.to_vec());
+                // Always re-encoded as PNG: lossless, and the step's own MIME may have
+                // been JPEG, which we would otherwise be claiming falsely.
+                v[i] = (small, "image/png");
+                tracing::debug!(model = %spec.id, max_px, "image downscaled for model limit");
+            }
+            None => continue,
+        }
+    }
+    match out {
+        Some(v) => Cow::Owned(v),
+        None => Cow::Borrowed(images),
+    }
+}
+
+/// `None` when the image already fits, cannot be decoded, or will not re-encode.
+fn shrink_to(bytes: &[u8], max_px: u32) -> Option<Arc<[u8]>> {
+    let img = image::load_from_memory(bytes).ok()?;
+    let (w, h) = (img.width(), img.height());
+    if w.max(h) <= max_px {
+        return None;
+    }
+    let scale = max_px as f32 / w.max(h) as f32;
+    let (nw, nh) = ((w as f32 * scale).round().max(1.0) as u32, (h as f32 * scale).round().max(1.0) as u32);
+    let small = img.resize_exact(nw, nh, image::imageops::FilterType::Triangle);
+    let mut png = Vec::new();
+    small.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).ok()?;
+    Some(Arc::from(png))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -445,17 +537,91 @@ mod tests {
             id: "m".into(),
             revision: "1".into(),
             family: "generic".into(),
-            task: vec![],
             endpoints: vec!["http://x/v1".into()],
             max_concurrency: 1,
             timeout_ms: 1000,
-            languages: vec![],
-            api_key_env: None,
-            served_name: None,
-            dimensions: None,
-            batch_size: None,
-            image_transport: None,
+            ..Default::default()
         }
+    }
+
+    fn png(w: u32, h: u32) -> Arc<[u8]> {
+        let img = image::RgbImage::from_pixel(w, h, image::Rgb([7, 7, 7]));
+        let mut out = Vec::new();
+        image::DynamicImage::ImageRgb8(img)
+            .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
+            .unwrap();
+        Arc::from(out)
+    }
+
+    #[test]
+    fn served_model_carries_a_provider_prefix() {
+        let mut s = spec();
+        assert_eq!(OpenAiClient::build_body(&s, &ChatRequest {
+            system: None, prompt: "p".into(), images: vec![], max_tokens: 8, json_schema: None,
+        })["model"], "m");
+        s.served_name = Some("GLM-OCR".into());
+        s.provider = Some("hosted_vllm".into());
+        let body = OpenAiClient::build_body(&s, &ChatRequest {
+            system: None, prompt: "p".into(), images: vec![], max_tokens: 8, json_schema: None,
+        });
+        assert_eq!(body["model"], "hosted_vllm/GLM-OCR");
+    }
+
+    #[test]
+    fn images_within_the_limit_are_not_re_encoded() {
+        let mut s = spec();
+        s.max_image_px = Some(64);
+        let original = png(40, 20);
+        let images = vec![(original.clone(), "image/png")];
+        let fitted = fit_images(&s, &images);
+        assert!(matches!(fitted, Cow::Borrowed(_)), "a fitting image must not be decoded and re-encoded");
+        assert_eq!(&*fitted[0].0, &*original);
+    }
+
+    #[test]
+    fn oversized_images_are_downscaled_preserving_aspect() {
+        let mut s = spec();
+        s.max_image_px = Some(50);
+        let images = vec![(png(200, 100), "image/jpeg")];
+        let fitted = fit_images(&s, &images);
+        assert!(matches!(fitted, Cow::Owned(_)));
+        let decoded = image::load_from_memory(&fitted[0].0).unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (50, 25));
+        // Re-encoded losslessly, so the declared MIME must follow.
+        assert_eq!(fitted[0].1, "image/png");
+    }
+
+    #[test]
+    fn undecodable_bytes_are_sent_as_they_are() {
+        let mut s = spec();
+        s.max_image_px = Some(10);
+        let images = vec![(Arc::from(vec![0u8, 1, 2, 3]) as Arc<[u8]>, "image/png")];
+        assert!(matches!(fit_images(&s, &images), Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn no_limit_means_no_work() {
+        let images = vec![(png(4000, 4000), "image/png")];
+        assert!(matches!(fit_images(&spec(), &images), Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn hosted_images_are_sent_as_links() {
+        let s = spec();
+        let req = ChatRequest {
+            system: None,
+            prompt: "p".into(),
+            images: vec![(png(4, 4), "image/png")],
+            max_tokens: 8,
+            json_schema: None,
+        };
+        // The base64 path inlines a data URL ...
+        let inlined = OpenAiClient::build_body(&s, &req);
+        let url = inlined["messages"][0]["content"][0]["image_url"]["url"].as_str().unwrap();
+        assert!(url.starts_with("data:image/png;base64,"), "{url}");
+        // ... and the hosted path sends whatever the host returned, unchanged.
+        let hosted = OpenAiClient::build_body_with_images(&s, &req, &["https://blob/x.png".to_string()]);
+        assert_eq!(hosted["messages"][0]["content"][0]["image_url"]["url"], "https://blob/x.png");
     }
 
     #[test]

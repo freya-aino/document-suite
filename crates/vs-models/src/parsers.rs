@@ -30,13 +30,28 @@ pub fn parser_for(family: &str) -> Result<Box<dyn OutputParser>, ParseError> {
         "mineru" => Ok(Box::new(MinerU)),
         "dots_ocr" => Ok(Box::new(DotsOcr)),
         "logics_parsing" => Ok(Box::new(LogicsParsing)),
-        "generic_json" => Ok(Box::new(GenericJson)),
+        "generic_json" => Ok(Box::new(GenericJson::default())),
+        "auto" => Ok(Box::new(Auto::default())),
         other => Err(ParseError::UnknownFamily(other.to_string())),
     }
 }
 
 /// Families with a structured page parser (as opposed to e.g. `embedding`).
-pub const FAMILIES: &[&str] = &["paddleocr_vl", "mineru", "dots_ocr", "logics_parsing", "generic_json"];
+pub const FAMILIES: &[&str] = &["paddleocr_vl", "mineru", "dots_ocr", "logics_parsing", "generic_json", "auto"];
+
+/// Parses `ModelSpec::coord_scale`. An unrecognised value is ignored rather than fatal:
+/// a typo in a registry file should not stop a worker from starting.
+pub fn coord_scale_from_name(name: &str) -> Option<CoordScale> {
+    match name.trim().to_ascii_lowercase().as_str() {
+        // "fractions" needs no scale: `normalise_bbox` already passes values <= 1 through.
+        "fractions" | "fraction" | "normalised" | "normalized" | "pixels" | "pixel" | "px" => Some(CoordScale::Pixels),
+        "thousandths" | "thousandth" | "permille" | "per_mille" => Some(CoordScale::Thousandths),
+        other => {
+            tracing::warn!(coord_scale = other, "unknown coord_scale; falling back to detection");
+            None
+        }
+    }
+}
 
 /// Shared label mapping; families map their labels to these names first.
 pub fn block_kind_from_label(label: &str) -> BlockKind {
@@ -986,7 +1001,22 @@ fn parse_attrs(tag_src: &str) -> Vec<(String, &str)> {
 /// Our own schema: `{"blocks":[{"kind","bbox":[x0,y0,x1,y1],"text","html"?,"latex"?,
 /// "level"?,"confidence"?,"reading_order"?}]}` (a bare array or a `regions` list are also
 /// accepted; bbox as fractions or model-input pixels).
-pub struct GenericJson;
+/// Our own block schema, used with guided decoding on general VLMs.
+///
+/// Carries a coordinate scale because, unlike the document-VLM families, "our schema" says
+/// nothing about the convention a given model emits: a model that reports thousandths on a
+/// 768 px page would have every box past 768 clamped to the page edge if read as pixels.
+/// `ModelSpec::coord_scale` is how a deployment declares it.
+#[derive(Debug, Clone, Copy)]
+pub struct GenericJson {
+    pub scale: CoordScale,
+}
+
+impl Default for GenericJson {
+    fn default() -> Self {
+        Self { scale: CoordScale::Pixels }
+    }
+}
 
 impl OutputParser for GenericJson {
     fn family(&self) -> &'static str {
@@ -1004,7 +1034,7 @@ impl OutputParser for GenericJson {
                         let kind = block_kind_from_label(label);
                         let bbox = value_field(item, &["bbox", "box"])
                             .and_then(coords)
-                            .map(|c| normalise_bbox(c, size, CoordScale::Pixels))
+                            .map(|c| normalise_bbox(c, size, self.scale))
                             .unwrap_or_else(full_page_bbox);
                         let content = match kind {
                             BlockKind::Table => value_field(item, &["html", "table_html", "text", "content"]),
@@ -1024,6 +1054,154 @@ impl OutputParser for GenericJson {
             None => markdown_fallback(raw),
         };
         Ok(finish(parsed, node_id))
+    }
+}
+
+// ---------------------------------------------------------------------------------------
+// `auto`: the family for a model we have no parser for
+// ---------------------------------------------------------------------------------------
+
+/// Which path produced the blocks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutoPath {
+    /// A known family's parser matched.
+    Family(&'static str),
+    /// Nothing structured matched; the Markdown splitter was used.
+    Markdown,
+}
+
+impl AutoPath {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            AutoPath::Family(f) => f,
+            AutoPath::Markdown => "markdown",
+        }
+    }
+}
+
+/// Parses output from a model that has no parser of its own.
+///
+/// The point of this family is that adding a newly released document VLM is a registry
+/// entry, not a code change. It tries the known families in an order chosen by what the
+/// output actually looks like, and falls back to the Markdown splitter, which never fails.
+///
+/// The ordering matters and is not simply "try them all". `GenericJson` silently falls
+/// back to Markdown when there is no JSON at all, so putting it first would swallow
+/// MinerU's tagged output and Logics-Parsing' HTML before their own parsers ever saw it.
+/// So the shape of the output selects the candidates, and `GenericJson` is only ever tried
+/// when there is JSON for it to fail on.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Auto {
+    /// Coordinate convention, when the deployment declares one.
+    pub scale: Option<CoordScale>,
+}
+
+impl Auto {
+    pub fn with_scale(scale: Option<CoordScale>) -> Self {
+        Self { scale }
+    }
+
+    /// Candidate families for this output, most likely first.
+    pub fn candidates(raw: &str) -> Vec<&'static str> {
+        let body = strip_code_fences(raw);
+        let mut out = Vec::new();
+        // MinerU's VLM mode emits `<|box_start|>…<|md_end|>` tags — unmistakable, and not
+        // JSON, so nothing else would read it.
+        if body.contains("<|box_start|>") || body.contains("<|md_start|>") || body.contains("<|ref_start|>") {
+            out.push("mineru");
+        }
+        // Logics-Parsing emits HTML divs carrying their own bbox attribute.
+        if body.contains("data-bbox") {
+            out.push("logics_parsing");
+        }
+        if let Some(v) = extract_json(body) {
+            // Order by what the JSON actually looks like, because `generic_json` is the
+            // most permissive reader here: it accepts any item with a `type` or `label`
+            // field, so left early it would claim MinerU's `content_list` and read its
+            // per-mille boxes as pixels. Specific signatures therefore go first and our
+            // own schema goes last — except when the payload is unmistakably ours.
+            let keyed = |keys: &[&str]| keys.iter().any(|k| Self::mentions_key(&v, k));
+            if keyed(&["blocks", "regions"]) {
+                out.push("generic_json");
+            }
+            if keyed(&["text_level", "page_idx", "table_body", "interline_equation"]) {
+                out.push("mineru");
+            }
+            if keyed(&["layout_parsing_result", "parsing_res_list", "block_label", "block_bbox"]) {
+                out.push("paddleocr_vl");
+            }
+            if keyed(&["category"]) {
+                out.push("dots_ocr");
+            }
+            for f in ["paddleocr_vl", "mineru", "dots_ocr", "generic_json"] {
+                if !out.contains(&f) {
+                    out.push(f);
+                }
+            }
+        }
+        out
+    }
+
+    /// Whether `key` appears as a field of the value or of its first item — enough to
+    /// identify a format without walking a whole page of output.
+    fn mentions_key(v: &Value, key: &str) -> bool {
+        let has = |x: &Value| x.as_object().is_some_and(|o| o.contains_key(key));
+        if has(v) {
+            return true;
+        }
+        match v {
+            Value::Array(a) => a.first().is_some_and(has),
+            Value::Object(o) => o.values().any(|inner| {
+                has(inner) || matches!(inner, Value::Array(a) if a.first().is_some_and(has))
+            }),
+            _ => false,
+        }
+    }
+
+    /// Parses and reports which path won, so a caller can record it.
+    pub fn parse_reporting(
+        &self,
+        raw: &str,
+        page: &PageImage,
+        size: (u32, u32),
+        node_id: &str,
+    ) -> (Vec<BlockDraft>, AutoPath) {
+        for family in Self::candidates(raw) {
+            // `generic_json` is the one family whose coordinate convention we may override.
+            let parser: Box<dyn OutputParser> = if family == "generic_json" {
+                Box::new(GenericJson { scale: self.scale.unwrap_or(CoordScale::Pixels) })
+            } else {
+                match parser_for(family) {
+                    Ok(p) => p,
+                    Err(_) => continue,
+                }
+            };
+            match parser.parse(raw, page, size, node_id) {
+                // An empty result is not a win: it means the parser read the output and
+                // found nothing, so a later candidate (or Markdown) may still do better.
+                Ok(blocks) if !blocks.is_empty() => return (blocks, AutoPath::Family(family)),
+                Ok(_) => continue,
+                Err(e) => {
+                    tracing::debug!(target: "vs_models::metrics", family, error = %e, "auto_candidate_rejected");
+                    continue;
+                }
+            }
+        }
+        (finish(markdown_fallback(raw), node_id), AutoPath::Markdown)
+    }
+}
+
+impl OutputParser for Auto {
+    fn family(&self) -> &'static str {
+        "auto"
+    }
+
+    fn parse(&self, raw: &str, page: &PageImage, size: (u32, u32), node_id: &str) -> Result<Vec<BlockDraft>, ParseError> {
+        let (blocks, path) = self.parse_reporting(raw, page, size, node_id);
+        // Logged rather than returned: the `Step` trait has no channel for per-node
+        // metadata, so this is how `vs-adapt` and operators see which path a model took.
+        tracing::info!(target: "vs_models::metrics", path = path.as_str(), blocks = blocks.len(), "auto_parse");
+        Ok(blocks)
     }
 }
 

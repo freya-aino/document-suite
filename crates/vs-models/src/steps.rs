@@ -12,7 +12,11 @@ use vs_core::{BBox, BlockContent, BlockKind};
 use vs_dag::{Artifact, ArtifactKind, BlockDraft, LayoutRegion, PageImage, Signature, Step, StepContext, StepError, StepOutput};
 
 use crate::client::{ChatRequest, OpenAiClient};
-use crate::parsers::{block_kind_from_label, content_for, extract_json, parser_for, OutputParser};
+use crate::registry::ModelSpec;
+use crate::parsers::{
+    block_kind_from_label, content_for, coord_scale_from_name, extract_json, parser_for, Auto, GenericJson,
+    OutputParser,
+};
 use crate::prompts::{self, Prompt};
 
 // ---------------------------------------------------------------------------------------
@@ -72,8 +76,35 @@ fn resolve_prompt(params: &Value, family: &str, task: &str, generic: &Prompt, la
     render(generic)
 }
 
-fn parser_or_none(family: &str) -> Option<Box<dyn OutputParser>> {
-    parser_for(family).ok()
+fn parser_or_none(spec: &ModelSpec) -> Option<Box<dyn OutputParser>> {
+    parser_for_spec(spec).ok()
+}
+
+/// The parser for a model, honouring a declared coordinate convention.
+///
+/// `coord_scale` only reaches the two parsers that cannot infer it from the format:
+/// `auto` and `generic_json`. The document-VLM families know their own convention, and
+/// overriding it there would break a parser that is already correct.
+fn parser_for_spec(spec: &ModelSpec) -> Result<Box<dyn OutputParser>, StepError> {
+    let scale = spec.coord_scale.as_deref().and_then(coord_scale_from_name);
+    match (spec.family.as_str(), scale) {
+        ("auto", _) => Ok(Box::new(Auto::with_scale(scale))),
+        ("generic_json", Some(scale)) => Ok(Box::new(GenericJson { scale })),
+        (family, _) => parser_for(family).map_err(|e| StepError::InvalidParams(e.to_string())),
+    }
+}
+
+/// Refuses a model that has declared it cannot take images, before any request is made.
+/// Without this the failure surfaces as whatever the server says about an unexpected
+/// content part, which is a much longer way round to the same conclusion.
+fn require_vision(spec: &ModelSpec, step: &str) -> Result<(), StepError> {
+    if spec.supports_vision() {
+        return Ok(());
+    }
+    Err(StepError::InvalidParams(format!(
+        "{step}: model {:?} declares supports_vision = false but this step sends an image",
+        spec.id
+    )))
 }
 
 fn model_err(e: impl std::fmt::Display) -> StepError {
@@ -213,14 +244,17 @@ impl Step for PageParseE2e {
         let Artifact::PageImage(page) = inputs[0] else { return Err(StepError::InvalidParams("expected page_image".into())) };
         let model = model_param(params)?;
         let spec = self.client.spec(model).map_err(model_err)?;
-        let parser = parser_for(&spec.family).map_err(|e| StepError::InvalidParams(e.to_string()))?;
+        require_vision(spec, self.kind())?;
+        let parser = parser_for_spec(spec)?;
         let language = ctx.profile.language.as_str();
         // `task_prompt` is the historical name of the override; `prompt` is the common one.
         let prompt = match params["task_prompt"].as_str() {
             Some(t) if params["prompt"].is_null() => resolve_prompt(&json!({"prompt": t}), &spec.family, "page_parse", &prompts::PAGE_PARSE, language),
             _ => resolve_prompt(params, &spec.family, "page_parse", &prompts::PAGE_PARSE, language),
         };
-        let json_schema = (spec.family == "generic_json").then(|| blocks_schema(true));
+        // Capability, not family: a newly registered model declares whether guided
+        // decoding works, so `auto` and any proxied model get a schema too.
+        let json_schema = spec.supports_json_schema().then(|| blocks_schema(true));
         tracing::debug!(step = self.kind(), model, node = %ctx.node_id, "model_step");
         let resp = self
             .client
@@ -264,10 +298,11 @@ impl Step for LayoutDetect {
         let Artifact::PageImage(page) = inputs[0] else { return Err(StepError::InvalidParams("expected page_image".into())) };
         let model = model_param(params)?;
         let spec = self.client.spec(model).map_err(model_err)?;
-        let parser = parser_for(&spec.family).map_err(|e| StepError::InvalidParams(e.to_string()))?;
+        require_vision(spec, self.kind())?;
+        let parser = parser_for_spec(spec)?;
         let language = ctx.profile.language.as_str();
         let prompt = resolve_prompt(params, &spec.family, "layout", &prompts::LAYOUT_DETECT, language);
-        let json_schema = (spec.family == "generic_json").then(|| blocks_schema(false));
+        let json_schema = spec.supports_json_schema().then(|| blocks_schema(false));
         tracing::debug!(step = self.kind(), model, node = %ctx.node_id, "model_step");
         let resp = self
             .client
@@ -398,7 +433,7 @@ impl Step for RegionStep {
             return Ok(StepOutput { artifact: Artifact::Blocks(vec![]), model_ref: Some(spec.model_ref()), prompt_ref: Some(prompt.reference) });
         }
         let crops = crop_regions(page, selected, padding).await?;
-        let parser = parser_or_none(&spec.family);
+        let parser = parser_or_none(spec);
         let max_tokens = max_tokens(params, self.default_max_tokens());
         let client = &self.client;
         let prompt_text = &prompt.text;

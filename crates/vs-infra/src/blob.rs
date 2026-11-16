@@ -187,6 +187,13 @@ pub mod keys {
     pub fn page_result(document_hk: &str, run_id: &str, page_no: u32) -> String {
         format!("results/{document_hk}/{run_id}/page-{page_no}.json")
     }
+    /// Scratch object for an image handed to a model by link rather than inlined
+    /// (`image_transport = "url"`). Content-addressed, so the same image is uploaded once
+    /// however many models ask for it, and a retry reuses the object.
+    pub fn model_image(sha256: &str) -> String {
+        format!("model-images/{sha256}")
+    }
+
     pub fn doc_result(document_hk: &str, run_id: &str) -> String {
         format!("results/{document_hk}/{run_id}/doc.json")
     }

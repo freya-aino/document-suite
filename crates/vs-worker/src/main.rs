@@ -2,6 +2,7 @@
 
 mod dags;
 mod doc;
+mod images;
 mod ingest;
 mod page;
 mod runtime;
@@ -48,11 +49,20 @@ struct Models {
 }
 
 impl Models {
-    fn load(cfg: &Config) -> anyhow::Result<Self> {
+    /// `blob` backs `image_transport = "url"`: a model that asks for links needs
+    /// somewhere to put the image, and the registry decides per model whether it does.
+    fn load(cfg: &Config, blob: Arc<dyn vs_infra::BlobStore>) -> anyhow::Result<Self> {
         let path = &cfg.models.registry;
         let registry = ModelRegistry::load(path).map_err(|e| anyhow::anyhow!("model registry {}: {e}", path.display()))?;
-        tracing::info!(registry = %path.display(), models = registry.all().count(), "model registry loaded");
-        Ok(Self { client: Arc::new(OpenAiClient::new(registry)) })
+        let by_url = registry.all().filter(|m| m.images_by_url()).count();
+        tracing::info!(
+            registry = %path.display(),
+            models = registry.all().count(),
+            images_by_url = by_url,
+            "model registry loaded"
+        );
+        let client = OpenAiClient::new(registry).with_image_host(Arc::new(images::BlobImageHost { blob }));
+        Ok(Self { client: Arc::new(client) })
     }
 }
 
@@ -99,7 +109,7 @@ async fn run_worker() -> anyhow::Result<()> {
             max_pages: MAX_PAGES,
         }),
         Role::Page => {
-            let models = Models::load(&cfg)?;
+            let models = Models::load(&cfg, blob.clone())?;
             let steps = Arc::new(vs_steps::production_registry(models.client.clone()));
             let classify: vs_classify::ClassifyConfig = cfg.classify.clone().try_into().map_err(|e| anyhow::anyhow!("[classify] section: {e}"))?;
             let vision: Option<Arc<dyn vs_classify::VisionClassifier>> = match &cfg.stage2.classifier_model {
@@ -127,7 +137,7 @@ async fn run_worker() -> anyhow::Result<()> {
             })
         }
         Role::Doc => {
-            let models = Models::load(&cfg)?;
+            let models = Models::load(&cfg, blob.clone())?;
             let s2 = &cfg.stage2;
             for m in [&s2.extraction_model, &s2.verify_model].into_iter().chain(s2.judge_model.as_ref()) {
                 models.client.spec(m)?;
