@@ -71,6 +71,34 @@ struct Columns {
     cites_lnk_hk: Vec<String>,
     cites_block: Vec<String>,
     cites_entity: Vec<String>,
+
+    cell_hk: Vec<String>,
+    cell_block: Vec<String>,
+    cell_row: Vec<i32>,
+    cell_col: Vec<i32>,
+    cell_text: Vec<String>,
+    cell_header: Vec<bool>,
+    cell_column_header: Vec<Option<String>>,
+    cell_hash_diff: Vec<String>,
+
+    img_hk: Vec<String>,
+    img_block: Vec<String>,
+    img_seq: Vec<i32>,
+    img_text: Vec<String>,
+    img_hash_diff: Vec<String>,
+
+    match_lnk_hk: Vec<String>,
+    match_source: Vec<String>,
+    match_block: Vec<Option<String>>,
+    match_entity: Vec<Option<String>>,
+    match_via: Vec<String>,
+}
+
+/// A component's key is a readable string (`cell:<block>:<row>:<col>`), not a hash, so
+/// hashing it is what makes the column a `CHAR(64)` like every other key here. The input
+/// is already unique, so this is a narrowing, not a derivation.
+fn component_hk(node_key: &str) -> String {
+    HashKey::of(&[node_key]).to_string()
 }
 
 /// The graph's section node keys are `sec:<heading_block_hk>`; the vault wants a real
@@ -98,8 +126,55 @@ impl Columns {
             c.section_level.push(level);
         }
 
+        // Cells and in-image text are nodes, so they are collected from the node list;
+        // their edges only say which block they belong to, which the node already has.
+        for n in &graph.nodes {
+            match n.kind {
+                NodeKind::Cell => {
+                    let Some(block) = n.key.strip_prefix("cell:").and_then(|r| r.split(':').next()) else { continue };
+                    let text = n.props.get("text").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+                    let header = n.props.get("header").and_then(|v| v.as_bool()).unwrap_or(false);
+                    let column_header =
+                        n.props.get("column_header").and_then(|v| v.as_str()).map(str::to_string);
+                    c.cell_hash_diff.push(hash_diff(&json!({ "text": text, "header": header, "column_header": column_header })));
+                    c.cell_hk.push(component_hk(&n.key));
+                    c.cell_block.push(block.to_string());
+                    c.cell_row.push(n.props.get("row").and_then(|v| v.as_i64()).unwrap_or(0) as i32);
+                    c.cell_col.push(n.props.get("col").and_then(|v| v.as_i64()).unwrap_or(0) as i32);
+                    c.cell_text.push(text);
+                    c.cell_header.push(header);
+                    c.cell_column_header.push(column_header);
+                }
+                NodeKind::ImageText => {
+                    let Some(block) = n.key.strip_prefix("imgtext:").and_then(|r| r.split(':').next()) else { continue };
+                    let text = n.props.get("text").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+                    c.img_hash_diff.push(hash_diff(&json!({ "text": text })));
+                    c.img_hk.push(component_hk(&n.key));
+                    c.img_block.push(block.to_string());
+                    c.img_seq.push(n.props.get("index").and_then(|v| v.as_i64()).unwrap_or(0) as i32);
+                    c.img_text.push(text);
+                }
+                _ => {}
+            }
+        }
+
         for e in &graph.edges {
             match e.kind {
+                EdgeKind::MatchesText => {
+                    let source = component_hk(&e.from);
+                    // A match points at a block or an entity, never both; the target's
+                    // shape is how the two are told apart, since `via` says which.
+                    let via = e.props.get("via").and_then(|v| v.as_str()).unwrap_or("unknown").to_string();
+                    let (block, entity) = match via.as_str() {
+                        "entity_name" => (None, Some(e.to.clone())),
+                        _ => (Some(e.to.clone()), None),
+                    };
+                    c.match_lnk_hk.push(HashKey::of(&[&source, &e.to, &via]).to_string());
+                    c.match_source.push(source);
+                    c.match_block.push(block);
+                    c.match_entity.push(entity);
+                    c.match_via.push(via);
+                }
                 // document → section (top level) or section → section (nesting). The
                 // document case is stored with a NULL parent rather than its own table.
                 EdgeKind::HasSection => {
@@ -279,6 +354,100 @@ impl PgGraphStore {
             .map_err(unavailable)?;
         }
 
+        if !c.cell_hk.is_empty() {
+            sqlx::query(
+                "INSERT INTO vault.hub_cell (cell_hk, block_hk, run_id, row_idx, col_idx, load_dts, record_source)
+                 SELECT v.cell_hk, v.block_hk, $5, v.row_idx, v.col_idx, $6, $7
+                 FROM UNNEST($1::text[], $2::text[], $3::int[], $4::int[]) AS v(cell_hk, block_hk, row_idx, col_idx)
+                 ON CONFLICT (cell_hk) DO NOTHING",
+            )
+            .bind(&c.cell_hk)
+            .bind(&c.cell_block)
+            .bind(&c.cell_row)
+            .bind(&c.cell_col)
+            .bind(run_uuid)
+            .bind(now)
+            .bind(&src)
+            .execute(&mut *tx)
+            .await
+            .map_err(unavailable)?;
+
+            let sat = format!(
+                "INSERT INTO vault.sat_cell (cell_hk, load_dts, hash_diff, record_source, text, header, column_header)
+                 SELECT v.cell_hk, $1, v.hash_diff, $5, v.text, v.header, v.column_header
+                 FROM UNNEST($2::text[], $3::text[], $4::text[], $6::bool[], $7::text[])
+                      AS v(cell_hk, hash_diff, text, header, column_header)
+                 WHERE {}",
+                latest_differs("vault.sat_cell", "cell_hk")
+            );
+            sqlx::query(&sat)
+                .bind(now)
+                .bind(&c.cell_hk)
+                .bind(&c.cell_hash_diff)
+                .bind(&c.cell_text)
+                .bind(&src)
+                .bind(&c.cell_header)
+                .bind(&c.cell_column_header as &Vec<Option<String>>)
+                .execute(&mut *tx)
+                .await
+                .map_err(unavailable)?;
+        }
+
+        if !c.img_hk.is_empty() {
+            sqlx::query(
+                "INSERT INTO vault.hub_image_text (image_text_hk, block_hk, run_id, seq, load_dts, record_source)
+                 SELECT v.hk, v.block_hk, $4, v.seq, $5, $6
+                 FROM UNNEST($1::text[], $2::text[], $3::int[]) AS v(hk, block_hk, seq)
+                 ON CONFLICT (image_text_hk) DO NOTHING",
+            )
+            .bind(&c.img_hk)
+            .bind(&c.img_block)
+            .bind(&c.img_seq)
+            .bind(run_uuid)
+            .bind(now)
+            .bind(&src)
+            .execute(&mut *tx)
+            .await
+            .map_err(unavailable)?;
+
+            let sat = format!(
+                "INSERT INTO vault.sat_image_text (image_text_hk, load_dts, hash_diff, record_source, text)
+                 SELECT v.hk, $1, v.hash_diff, $4, v.text
+                 FROM UNNEST($2::text[], $3::text[], $5::text[]) AS v(hk, hash_diff, text)
+                 WHERE {}",
+                latest_differs("vault.sat_image_text", "image_text_hk")
+            );
+            sqlx::query(&sat)
+                .bind(now)
+                .bind(&c.img_hk)
+                .bind(&c.img_hash_diff)
+                .bind(&src)
+                .bind(&c.img_text)
+                .execute(&mut *tx)
+                .await
+                .map_err(unavailable)?;
+        }
+
+        if !c.match_lnk_hk.is_empty() {
+            sqlx::query(
+                "INSERT INTO vault.lnk_image_text_match (lnk_hk, image_text_hk, block_hk, entity_hk, via, load_dts, record_source)
+                 SELECT v.lnk_hk, v.source, v.block_hk, v.entity_hk, v.via, $6, $7
+                 FROM UNNEST($1::text[], $2::text[], $3::text[], $4::text[], $5::text[])
+                      AS v(lnk_hk, source, block_hk, entity_hk, via)
+                 ON CONFLICT (lnk_hk) DO NOTHING",
+            )
+            .bind(&c.match_lnk_hk)
+            .bind(&c.match_source)
+            .bind(&c.match_block as &Vec<Option<String>>)
+            .bind(&c.match_entity as &Vec<Option<String>>)
+            .bind(&c.match_via)
+            .bind(now)
+            .bind(&src)
+            .execute(&mut *tx)
+            .await
+            .map_err(unavailable)?;
+        }
+
         if let Some(dt) = &run.doc_type {
             let sat = concat!(
                 "INSERT INTO vault.sat_document_type (document_hk, load_dts, hash_diff, record_source, run_id, doc_type, confidence, source)
@@ -312,6 +481,9 @@ impl PgGraphStore {
             members = c.member_lnk_hk.len(),
             related = c.related_lnk_hk.len(),
             cites = c.cites_lnk_hk.len(),
+            cells = c.cell_hk.len(),
+            image_text = c.img_hk.len(),
+            text_matches = c.match_lnk_hk.len(),
             doc_type = ?run.doc_type.map(|d| d.doc_type),
             "graph layer written"
         );
@@ -416,6 +588,62 @@ mod tests {
         assert_eq!(c.related_assertion[0].len(), 64, "assertion ref must be hashed to CHAR(64)");
         assert_eq!(c.related_from, [e1]);
         assert_eq!(c.related_to, [e2]);
+    }
+
+    #[test]
+    fn cells_and_image_text_become_rows() {
+        let (tbl, fig, ent) = (hex('t'), hex('f'), hex('e'));
+        let cell_key = format!("cell:{tbl}:1:2");
+        let img_key = format!("imgtext:{fig}:0");
+        let graph = DocGraph {
+            nodes: vec![
+                node(NodeKind::Document, &hex('d'), json!({})),
+                node(
+                    NodeKind::Cell,
+                    &cell_key,
+                    json!({ "row": 1, "col": 2, "header": false, "text": "88.5", "column_header": "F1" }),
+                ),
+                node(NodeKind::ImageText, &img_key, json!({ "text": "BERT", "index": 0 })),
+            ],
+            edges: vec![
+                edge(EdgeKind::MatchesText, &img_key, &hex('b'), json!({ "via": "block_text" })),
+                edge(EdgeKind::MatchesText, &img_key, &ent, json!({ "via": "entity_name" })),
+            ],
+            embed_targets: vec![],
+        };
+        let c = Columns::of(&graph);
+
+        assert_eq!(c.cell_block, [tbl.clone()], "the cell's table comes out of its key");
+        assert_eq!((c.cell_row[0], c.cell_col[0]), (1, 2));
+        assert_eq!(c.cell_text, ["88.5"]);
+        assert_eq!(c.cell_column_header, [Some("F1".to_string())]);
+        assert_eq!(c.cell_hk[0].len(), 64, "a readable key must narrow to CHAR(64)");
+
+        assert_eq!(c.img_block, [fig]);
+        assert_eq!((c.img_seq[0], c.img_text[0].as_str()), (0, "BERT"));
+
+        // Exactly one of block_hk / entity_hk per match, which the table's CHECK enforces.
+        assert_eq!(c.match_lnk_hk.len(), 2);
+        let block_match = c.match_via.iter().position(|v| v == "block_text").unwrap();
+        let entity_match = c.match_via.iter().position(|v| v == "entity_name").unwrap();
+        assert!(c.match_block[block_match].is_some() && c.match_entity[block_match].is_none());
+        assert!(c.match_entity[entity_match].as_deref() == Some(ent.as_str()) && c.match_block[entity_match].is_none());
+    }
+
+    /// A malformed component key is dropped rather than inserted with a bad parent.
+    #[test]
+    fn components_with_unparseable_keys_are_skipped() {
+        let graph = DocGraph {
+            nodes: vec![
+                node(NodeKind::Document, &hex('d'), json!({})),
+                node(NodeKind::Cell, "not-a-cell-key", json!({ "text": "x" })),
+                node(NodeKind::ImageText, "also-wrong", json!({ "text": "y" })),
+            ],
+            edges: vec![],
+            embed_targets: vec![],
+        };
+        let c = Columns::of(&graph);
+        assert!(c.cell_hk.is_empty() && c.img_hk.is_empty());
     }
 
     /// Only the graph's own kinds are written here; the rest belong to `write_stage2`.

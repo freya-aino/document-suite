@@ -12,7 +12,8 @@ Migrations: `migrations/0001_ops_registry.sql`, `migrations/0002_vault.sql`,
 `migrations/0003_app_role_privileges.sql`, `migrations/0004_api_ops.sql` (idempotency
 keys, job state log, page-level evidence), `migrations/0005_graph.sql` (sections, the
 `related` shortcut, citations) and `migrations/0006_document_type.sql`, embedded via
-`sqlx::migrate!`.
+`sqlx::migrate!`, plus `migrations/0007_page_components.sql` (table cells, in-image text
+and its matches).
 
 System spec: [`docs/SPEC.md`](../../docs/SPEC.md) — decisions D5 (insert-only history)
 and D6 (this is the single system of record *and* the graph projection).
@@ -47,8 +48,11 @@ Remaining:
 - [ ] Document the read contract for the external RAG service — it now queries this schema
       and Qdrant directly, so tenant scoping and current-run filtering become the caller's
       responsibility. `v_current_run` is how it finds the current run.
-- [ ] `Cites` edges have a table (`lnk_block_entity_cites`) but `vs-graph` never emits the
-      edge, so it is always empty. See `vs-graph`'s status.
+- [ ] Table cells are stored per `(block, row, col)`, so a table whose structure changes
+      between runs leaves the previous run's cells addressable at the same coordinates
+      with different content. The satellite versions them, but a reader taking the latest
+      row gets the newest run's value, which is usually what is wanted and occasionally
+      not.
 - [ ] High-volume satellites are not partitioned (see "Performance notes").
 - [ ] Business vault and information marts (PIT and bridge tables) are out of scope for
       v1; the raw vault is shaped so they can be derived later.
