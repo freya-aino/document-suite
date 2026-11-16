@@ -6,7 +6,7 @@ pub struct Config {
     pub bus: BusConfig,
     pub blob: BlobConfig,
     pub postgres: PostgresConfig,
-    pub helix: HelixConfig,
+    pub qdrant: QdrantConfig,
     pub models: ModelsConfig,
     #[serde(default)]
     pub worker: WorkerConfig,
@@ -54,9 +54,26 @@ fn default_pool() -> u32 {
     16
 }
 
+/// Vector store (decision D9). Only the `doc` role connects, but the section is
+/// required for every role so a misconfigured deployment fails at startup rather than
+/// at the first document that reaches Stage 2.
 #[derive(Debug, Clone, Deserialize)]
-pub struct HelixConfig {
+#[serde(default)]
+pub struct QdrantConfig {
+    /// gRPC endpoint. Qdrant's gRPC port is 6334; 6333 is the REST port and will not work.
     pub url: String,
+    /// Env var holding the API key, if the deployment uses one.
+    pub api_key_env: Option<String>,
+    /// Prefixed onto every collection name, so one Qdrant can host several deployments.
+    pub collection_prefix: String,
+    /// Points per upsert request.
+    pub batch_size: usize,
+}
+
+impl Default for QdrantConfig {
+    fn default() -> Self {
+        Self { url: "http://127.0.0.1:6334".into(), api_key_env: None, collection_prefix: "vs".into(), batch_size: 256 }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

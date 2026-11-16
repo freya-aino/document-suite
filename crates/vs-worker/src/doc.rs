@@ -2,7 +2,7 @@
 //!
 //! `stage2` is the pure pipeline over trait objects (extractor, corpus resolver,
 //! embedder) so it can be tested with fakes; `DocHandler` wraps it with the job row,
-//! blob, vault and Helix writes. Every step is idempotent on retry: page results are
+//! blob, vault and vector-store writes. Every step is idempotent on retry: page results are
 //! read-only, the vault writer upserts, `GraphStore::write_run` drops a partial earlier
 //! attempt of the same run first, and `doc.json` is overwritten.
 
@@ -14,8 +14,8 @@ use serde::Serialize;
 
 use vs_core::{DocType, HashKey, JobSpec, JobState, PageResult, RunId, Task, TenantId};
 use vs_extract::{CorpusResolver, DocProfile, EmbeddingTypeNormalizer, ExtractConfig, ExtractError, ExtractionOutput, Extractor, LlmExtractor};
-use vs_graph::{DocGraph, EmbedTarget};
-use vs_helix::{GraphStore, RunInfo, Vectors};
+use vs_graph::{DocGraph, EmbedTarget, GraphStore, RunInfo, Vectors};
+
 use vs_infra::blob::{keys, BlobError, BlobStore};
 use vs_infra::config::Stage2Config;
 use vs_models::{Embedder, ModelError, OpenAiClient};
@@ -104,7 +104,7 @@ impl DocHandler {
             None => self.ops.active_dag_list_version(&spec.tenant).await?.unwrap_or_else(|| "none".into()),
         };
         let run_meta = RunMeta { run_id, dag_list_version, started_at: job.created_at };
-        // Vault first: it is the system of record; a Helix failure retries the task.
+        // Vault first: it is the system of record; a graph-store failure retries the task.
         self.vault.write_stage2(&run_meta, spec, &stitched, &out.ext, final_state).await?;
         self.graph.write_run(&out.run_info, &out.graph, &out.vectors).await?;
 

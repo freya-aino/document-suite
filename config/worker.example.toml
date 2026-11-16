@@ -13,8 +13,12 @@ region = "eu-west-1"
 url = "postgres://vs_app@pgbouncer.internal:6432/visual_suite"   # password: VS__POSTGRES__PASSWORD
 max_connections = 4
 
-[helix]
-url = "http://helix.internal:6969"
+[qdrant]
+# Qdrant gRPC port (6334), not the REST port (6333).
+url = "http://qdrant.internal:6334"
+# api_key_env = "QDRANT_API_KEY"
+collection_prefix = "vs"
+batch_size = 256
 
 [models]
 registry = "/etc/vs/models.toml"

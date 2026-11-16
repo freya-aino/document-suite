@@ -16,8 +16,9 @@ use tokio::sync::watch;
 
 use vs_infra::queue::{NatsBus, Role, TaskBus};
 use vs_infra::{Config, ObjectBlobStore};
-use vs_models::{ModelRegistry, OpenAiClient, OpenAiEmbedder};
-use vs_vault::{ops::Ops, PgOntologyStore, PgVault};
+use vs_models::{Embedder, ModelRegistry, OpenAiClient, OpenAiEmbedder};
+use vs_vault::{ops::Ops, PgCorpusResolver, PgGraphStore, PgOntologyStore, PgVault};
+use vs_vectors::{QdrantConfig, QdrantStore, VectorStore};
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum RoleArg {
@@ -40,8 +41,6 @@ struct Args {
 /// Classifier thumbnail size (vs-classify default).
 const THUMBNAIL_PX: u32 = 768;
 const MAX_PAGES: u32 = 5_000;
-/// Items per HelixDB batch query.
-const HELIX_BATCH: usize = 200;
 
 /// Model registry and client; `page` and `doc` roles only (ingest calls no model).
 struct Models {
@@ -134,8 +133,19 @@ async fn run_worker() -> anyhow::Result<()> {
                 models.client.spec(m)?;
             }
             let embedder = Arc::new(OpenAiEmbedder::new(models.client.clone(), &s2.embedding_model, s2.embed_batch_size)?);
-            let helix = Arc::new(vs_helix::HelixStore::new(cfg.helix.url.clone(), HELIX_BATCH)?);
-            let mut resolver = vs_helix::HelixResolver::new(helix.clone(), embedder.clone()).with_thresholds(s2.link_threshold, s2.judge_band);
+            let vectors: Arc<dyn VectorStore> = Arc::new(QdrantStore::new(&QdrantConfig {
+                url: cfg.qdrant.url.clone(),
+                api_key: cfg.qdrant.api_key_env.as_deref().and_then(|v| std::env::var(v).ok()),
+                collection_prefix: cfg.qdrant.collection_prefix.clone(),
+                batch_size: cfg.qdrant.batch_size,
+            })?);
+            // Collections are sized by the embedder, so this must happen after it is
+            // built and before the first document: a wrong dimension is unrecoverable
+            // once points are written.
+            vectors.ensure_ready(embedder.dimensions()).await?;
+
+            let mut resolver = PgCorpusResolver::new(ops.pool.clone(), vectors.clone(), embedder.clone())
+                .with_thresholds(s2.link_threshold, s2.judge_band);
             if let Some(judge) = &s2.judge_model {
                 resolver = resolver.with_judge(models.client.clone(), judge.clone());
             }
@@ -143,8 +153,8 @@ async fn run_worker() -> anyhow::Result<()> {
                 blob,
                 vault,
                 ontology: Arc::new(PgOntologyStore::new(ops.pool.clone())),
+                graph: Arc::new(PgGraphStore { pool: ops.pool.clone(), vectors }),
                 ops,
-                graph: helix,
                 client: models.client,
                 embedder,
                 resolver: Arc::new(resolver),
