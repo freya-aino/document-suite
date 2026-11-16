@@ -21,16 +21,14 @@ Remaining:
       literal `None` with the comment "pages are independent in v1". Nothing ever supplies
       a value, so cross-page smoothing never happens and text-only born-digital pages get
       `DocType::Other` forever.
-- [ ] `thumbnail_long_side_px` here is **not** the number ingest uses: `vs-worker` has its
-      own hard-coded `THUMBNAIL_PX = 768`, and `vs-adapt` reads this default. Three
-      sources for one value; collapse to one config key.
-- [ ] Tier 0 gets no real signal for non-PDF inputs — `vs-ingest`'s raster path returns
-      hard-coded constants, so every scan and photo is judged from its thumbnail alone.
+- [ ] Tier 0's only measured signal for a scan is `ink_coverage`, which is enough to skip
+      a blank page but not to tell a photograph from a form. Everything else about a
+      raster page still comes from the tier-1 thumbnail.
 - [ ] `confidence` is never calibrated against the labelled datasets `vs-adapt` runs, so
       `min_classifier_confidence` in the routing table is tuned blind.
 - [ ] Language/script detection: the caller's hint is always trusted (assumption A19).
-- [ ] Rotation is detected (`rotation_deg`) and recorded but never acted on; nothing
-      rotates pixels. Correction belongs in a `page.orient` pre-processing step.
+- [ ] Rotation is recorded (`rotation_deg`) and still never acted on. See `vs-ingest`'s
+      status for why orientation correction is not a pixel-statistics problem.
 
 ## Assumptions this component rests on
 
@@ -57,9 +55,16 @@ so tables and formulas are still found there.
 born_digital = text_chars >= born_digital_min_chars
                && text_layer_coverage >= born_digital_min_coverage
                && (!ocr_text_layer || trust_ocr_layer)
-has_images   = image_count > 0 && image_area_ratio >= min_image_area_ratio
-needs_vision = !(born_digital && !has_images && skip_vision_for_text_only_digital)
+has_images   = image_count > 0 && image_area_ratio >= min_image_area_ratio && !blank
+blank        = blank_ink_coverage > 0 && 0 < ink_coverage <= blank_ink_coverage
+needs_vision = !((born_digital && !has_images && skip_vision_for_text_only_digital) || blank)
 ```
+
+`ink_coverage` is the fraction of the page darker than its Otsu threshold, measured by
+ingest for raster inputs only. A blank scan is not worth a GPU call. The `0 < ink_coverage`
+guard is load-bearing: the field defaults to `0.0`, which means **not measured** (every PDF
+page, and any signals file written before the field existed), and "we did not look" must
+never be read as "there is nothing there".
 
 `ocr_text_layer` = an invisible text layer over a full-page image (a scan that was
 OCR'd before). Its quality is unknown, so by default it is **not** trusted and the page
@@ -94,7 +99,8 @@ is re-OCR'd. Set `trust_ocr_layer = true` per tenant to reuse it.
 | `skip_vision_for_text_only_digital` | true |
 | `flag_threshold` | 0.5 |
 | `rules_only_confidence` | 0.85 |
-| `thumbnail_long_side_px` | 768 |
+| `thumbnail_long_side_px` | 768 | — read by **both** the `ingest` role (which renders the thumbnail) and the `page` role (which consumes it), from `[classify]`, so the two cannot disagree |
+| `blank_ink_coverage` | 0.002 | ink coverage at or below which a scan counts as blank and tier 1 is skipped; 0 disables |
 
 ## Post-v1
 

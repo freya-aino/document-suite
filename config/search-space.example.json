@@ -1,5 +1,5 @@
 {
-  "max_candidates": 200,
+  "max_candidates": 400,
   "templates": [
     {
       "id": "e2e",
@@ -104,6 +104,160 @@
             "step": "region.ocr",
             "inputs": [
               "$page_image",
+              "layout"
+            ],
+            "params": {
+              "model": "{ocr_model}"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "deskew-layout-region-ocr",
+      "description": "Scans, deskewed first: the same pipeline as layout-region-ocr with conditioning in front, so scoring shows whether straightening the page pays for itself.",
+      "slots": {
+        "layout_model": [
+          "mineru-2.5"
+        ],
+        "ocr_model": [
+          "paddleocr-vl-1.5"
+        ],
+        "min_apply_deg": [
+          0.2,
+          1.0
+        ]
+      },
+      "dag": {
+        "output": "text",
+        "nodes": [
+          {
+            "id": "straight",
+            "step": "page.deskew",
+            "inputs": [
+              "$page_image"
+            ],
+            "params": {
+              "max_deg": 5.0,
+              "min_apply_deg": "{min_apply_deg}"
+            }
+          },
+          {
+            "id": "layout",
+            "step": "layout.detect",
+            "inputs": [
+              "straight"
+            ],
+            "params": {
+              "model": "{layout_model}"
+            }
+          },
+          {
+            "id": "text",
+            "step": "region.ocr",
+            "inputs": [
+              "straight",
+              "layout"
+            ],
+            "params": {
+              "model": "{ocr_model}"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "conditioned-e2e",
+      "description": "Photographed or poor-quality scans: normalise contrast, optionally denoise, then one end-to-end call. Binarisation is NOT combined with the figure branch anywhere, because page.binarize outputs greyscale.",
+      "slots": {
+        "model": [
+          "paddleocr-vl-1.5",
+          "mineru-2.5"
+        ],
+        "radius": [
+          1,
+          2
+        ]
+      },
+      "dag": {
+        "output": "parse",
+        "nodes": [
+          {
+            "id": "clean",
+            "step": "page.denoise",
+            "inputs": [
+              "$page_image"
+            ],
+            "params": {
+              "radius": "{radius}"
+            }
+          },
+          {
+            "id": "even",
+            "step": "page.normalize",
+            "inputs": [
+              "clean"
+            ],
+            "params": {}
+          },
+          {
+            "id": "parse",
+            "step": "page.parse_e2e",
+            "inputs": [
+              "even"
+            ],
+            "params": {
+              "model": "{model}"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "binarized-region-ocr",
+      "description": "Faint or bleed-through scans: crop the scanner border, binarise, then per-region OCR. Whether binarisation helps is model-dependent, which is exactly what this template exists to measure.",
+      "slots": {
+        "layout_model": [
+          "mineru-2.5"
+        ],
+        "ocr_model": [
+          "paddleocr-vl-1.5"
+        ]
+      },
+      "dag": {
+        "output": "text",
+        "nodes": [
+          {
+            "id": "trimmed",
+            "step": "page.crop_margins",
+            "inputs": [
+              "$page_image"
+            ],
+            "params": {}
+          },
+          {
+            "id": "bw",
+            "step": "page.binarize",
+            "inputs": [
+              "trimmed"
+            ],
+            "params": {}
+          },
+          {
+            "id": "layout",
+            "step": "layout.detect",
+            "inputs": [
+              "bw"
+            ],
+            "params": {
+              "model": "{layout_model}"
+            }
+          },
+          {
+            "id": "text",
+            "step": "region.ocr",
+            "inputs": [
+              "bw",
               "layout"
             ],
             "params": {

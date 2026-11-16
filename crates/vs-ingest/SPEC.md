@@ -11,21 +11,23 @@ PNG/JPEG/TIFF rasterizer with bit-depth normalisation and WhiteIsZero inversion,
 orientation, native text-layer extraction, tier-0 page signals, classifier thumbnails, and
 3 CPU DAG steps. 15 unit tests pass, plus pool and raster integration tests.
 
-**There is no image pre-processing of any kind.** No deskew, no denoise, no binarization,
-no contrast normalisation, no dewarping, no border removal, and no pixel rotation — the
-page goes to the model exactly as rendered. `rotation_deg` is computed and then ignored.
+Also implemented: **pre-processing as DAG steps** (`preprocess`) — `page.deskew`,
+`page.denoise`, `page.normalize`, `page.binarize`, `page.crop_margins`, on `imageproc`
+(pure Rust, goal G9). They are steps rather than a fixed pass so `vs-adapt` can measure
+whether each helps a given page class, which matters most for binarisation: it helps some
+recognition models and hurts others, and nothing here yet knows which.
 
 Remaining:
-- [ ] Pre-processing as DAG steps (`page.orient`, `page.deskew`, `page.denoise`,
-      `page.normalize`, `page.binarize`, `page.dewarp`, `page.crop_margins`), so
-      `vs-adapt` can score whether each one helps a given page class rather than assuming
-      it. Needs `imageproc`; the `image` crate is configured with `png`/`jpeg`/`tiff` only
-      and no filter features.
-- [ ] **Raster inputs get fabricated signals.** The non-PDF path returns hard-coded
-      constants (`text_chars: 0`, `coverage: 0.0`, `image_count: 1`,
-      `image_area_ratio: 1.0`, `rotation_deg: 0`), so every scan and photo reaches the
-      classifier with no real tier-0 evidence and is judged from its thumbnail alone.
-      At minimum: detected orientation and an ink-coverage estimate.
+- [ ] **No orientation correction.** `rotation_deg` is computed and still ignored, and
+      there is no `page.orient`. Deliberate: projection profiles can tell a sideways page
+      from an upright one, but not 90° from 270° or 0° from 180° — that needs to know
+      which way the glyphs face. A wrong guess leaves the page upside down, which is worse
+      than leaving it sideways, so this wants a model or an OCR-confidence comparison.
+- [ ] **No dewarping.** Correcting page curl in a photograph needs the page boundary
+      estimated first, which is the hard half; `imageproc` supplies the warp but not the
+      estimate.
+- [ ] Adaptive (Sauvola) binarisation. Only global Otsu is implemented, so a page with
+      uneven lighting binarises badly even after `page.normalize`.
 - [ ] Higher-DPI re-crop from the original is not implemented (see "`figure.crop`" below),
       so a small figure is described from page-DPI pixels.
 - [ ] `text_layer_coverage` is a stated v1 approximation; the connected-component estimate

@@ -26,10 +26,9 @@ Remaining:
       there is nothing to point it at.
 - [ ] Classifier accuracy is specified as part of adaptation ("a wrong class costs quality
       or speed") but is not actually scored — only DAG outputs are.
-- [ ] The pre-processing steps, once they exist, must enter `search-space.example.json` so
-      candidates with and without each operation are compared per page class.
-- [ ] Reads `ClassifyConfig`'s thumbnail default while the worker uses its own hard-coded
-      constant, so stage runs and production can rasterize thumbnails differently.
+- [ ] The conditioning templates in `search-space.example.json` are validated but have
+      never been scored on a real dataset, so whether deskewing or binarising helps any
+      page class is still unmeasured — the question they exist to answer.
 - [ ] `promote` uploads as a candidate; activation stays a manual API call by design.
 
 ## Assumptions this component rests on

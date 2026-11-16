@@ -8,16 +8,17 @@ The production step catalogue: one place that names every step a `page` worker c
 
 ## Status
 
-Implemented: `production_registry(client)` registering 10 steps — 3 CPU steps from
-`vs-ingest` and 7 model-backed steps from `vs-models`. 2 tests pass, one of which asserts
-the registry covers the documented catalogue.
+Implemented: `production_registry(client)` registering 15 steps — 3 CPU steps and 5
+pre-processing steps from `vs-ingest`, and 7 model-backed steps from `vs-models`. Tests
+assert the registry covers the documented catalogue, that the shipped example DAG list
+loads against it, and that every template in the example search space generates
+candidates it accepts.
 
 Remaining:
 - [ ] `blocks.verify` is in the `vs-dag` catalogue but has no implementation to register,
-      so the registry covers 10 of 11 documented kinds.
-- [ ] The pre-processing steps (`page.orient`, `page.deskew`, `page.denoise`,
-      `page.normalize`, `page.binarize`, `page.dewarp`, `page.crop_margins`) do not exist
-      yet and must be registered here once they do.
+      so the registry covers 15 of 16 documented kinds.
+- [ ] `page.orient` and `page.dewarp` are not implemented; see `vs-ingest`'s status for
+      why neither is a pixel-statistics problem.
 
 ## The one rule
 
@@ -36,6 +37,11 @@ its own list — a candidate it cannot validate here is a candidate production c
 | `blocks.merge_native` | CPU | `vs_ingest::steps::MergeNative` |
 | `blocks.merge` | CPU | `vs_ingest::steps::MergeBlocks` |
 | `figure.crop` | CPU | `vs_ingest::steps::FigureCrop` |
+| `page.deskew` | CPU | `vs_ingest::preprocess::Deskew` |
+| `page.denoise` | CPU | `vs_ingest::preprocess::Denoise` |
+| `page.normalize` | CPU | `vs_ingest::preprocess::Normalize` |
+| `page.binarize` | CPU | `vs_ingest::preprocess::Binarize` |
+| `page.crop_margins` | CPU | `vs_ingest::preprocess::CropMargins` |
 | `page.parse_e2e` | GPU | `vs_models::steps::PageParseE2e` |
 | `layout.detect` | GPU | `vs_models::steps::LayoutDetect` |
 | `region.ocr` | GPU | `vs_models::steps::RegionStep::ocr` |
