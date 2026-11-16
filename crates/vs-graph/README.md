@@ -1,4 +1,4 @@
-# vs-graph — Specification
+# vs-graph
 
 Builds the **document graph**: one in-memory, store-independent graph per document run,
 combining the structure layer (from stitching) and the semantic layer (from extraction).
@@ -6,10 +6,11 @@ Every store writes from this one structure, so no two stores can disagree about 
 extracted. This crate also owns the `GraphStore` trait, and depends on no store itself.
 System spec: [`docs/SPEC.md`](../../docs/SPEC.md).
 
-## Status
+## What it does
 
-Implemented: the node and edge model, `build()` over a `StitchedDocument` plus an
-`ExtractionOutput`, embed-target emission, and `validate()`.
+Builds the graph: the node and edge model, `build()` over a `StitchedDocument` plus an
+`ExtractionOutput`, embed-target emission, and `validate()`. Every store is written from
+this one structure, so no two stores can disagree about what was extracted.
 
 This crate is load-bearing — it is the single structure both stores are written from — and
 it is the least tested crate in the workspace. Fix that before extending it.
@@ -18,21 +19,22 @@ Also implemented: **table cells and in-image text as nodes** (`page`), the `Cite
 and the intra-page relations `vs-stitch` derives (`EnclosesRegion`, `ValueOf`). 21 tests,
 12 of them against a whole built document — the builder had none before.
 
-Remaining:
-- [ ] Column flow is repaired by reordering `global_order` in `vs-stitch`, so the graph
-      records the *corrected* reading order but not that a page had columns, nor which
-      block sat in which column. A reader cannot tell a repaired two-column page from a
-      single-column one.
-- [ ] In-image text is matched to body text by case-insensitive containment on fragments
-      of three characters or more. Deliberately conservative — a looser match would link a
-      chart's "AUC" label to every "auction" — but it therefore misses inflections and
-      any term the model transcribed differently from the body text.
-- [ ] `validate()` leaves `Evidence`, `MatchesText` and `HasSection` endpoint-kind
-      unconstrained, because each legitimately has two shapes. Those three could take a
-      pair-of-alternatives rule instead of being exempt.
-- [ ] Cell nodes come from re-parsing the table HTML, so a table the recognition model got
-      structurally wrong yields confidently wrong cells. Nothing cross-checks the parse
-      against the block's plain-text projection.
+## Known limitations
+
+- Column flow is repaired by reordering `global_order` in `vs-stitch`, so the graph
+  records the *corrected* reading order but not that a page had columns, nor which
+  block sat in which column. A reader cannot tell a repaired two-column page from a
+  single-column one.
+- In-image text is matched to body text by case-insensitive containment on fragments
+  of three characters or more. Deliberately conservative — a looser match would link a
+  chart's "AUC" label to every "auction" — but it therefore misses inflections and
+  any term the model transcribed differently from the body text.
+- `validate()` leaves `Evidence`, `MatchesText` and `HasSection` endpoint-kind
+  unconstrained, because each legitimately has two shapes. Those three could take a
+  pair-of-alternatives rule instead of being exempt.
+- Cell nodes come from re-parsing the table HTML, so a table the recognition model got
+  structurally wrong yields confidently wrong cells. Nothing cross-checks the parse
+  against the block's plain-text projection.
 
 ## Node kinds
 

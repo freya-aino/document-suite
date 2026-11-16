@@ -1,26 +1,27 @@
-# vs-dag — Specification
+# vs-dag
 
 Stage 1 workflows. A **DAG** describes how one page is turned into blocks: which steps
 run, in what order, with which parameters. DAGs are static data (JSON); they are produced
 by `vs-adapt` and selected per page by `vs-router`. System spec:
 [`docs/SPEC.md`](../../docs/SPEC.md) (reliability contract: §5.4).
 
-## Status
+## What it does
 
-Implemented: the DAG model, load-time validation with unreachable-node pruning, the
-level-parallel executor with per-node timeouts and optional-node fallback, artefact kinds,
-and `NodeTrace` provenance. 6 unit tests pass.
+Holds the DAG model, load-time validation with unreachable-node pruning, the
+level-parallel executor with per-node timeouts and optional-node fallback, the artefact
+kinds steps exchange, and the `NodeTrace` that records what each node did.
 
-Remaining:
-- [ ] `blocks.verify` is listed in the step catalogue below but **is not implemented and
-      not registered anywhere** — the only gap in the catalogue (15 of 16 kinds exist).
-      It is kept in the catalogue rather than dropped because the shape is settled (two
-      block sets in, confidence from agreement out) and `vs-stitch` names it as the
-      intended home for VLM-assisted link judgement; what is missing is a definition of
-      agreement between two block sets with different segmentations, which is the same
-      problem `vs-adapt`'s layout F1 solves and should share code with.
-- [ ] No artefact kind carries region relationships; `LayoutRegion` has no id and no
-      parent, so a step cannot express that one region contains another.
+## Known limitations
+
+- `blocks.verify` is listed in the step catalogue below but **is not implemented and
+  not registered anywhere** — the only gap in the catalogue (15 of 16 kinds exist).
+  It is kept in the catalogue rather than dropped because the shape is settled (two
+  block sets in, confidence from agreement out) and `vs-stitch` names it as the
+  intended home for VLM-assisted link judgement; what is missing is a definition of
+  agreement between two block sets with different segmentations, which is the same
+  problem `vs-adapt`'s layout F1 solves and should share code with.
+- No artefact kind carries region relationships; `LayoutRegion` has no id and no
+  parent, so a step cannot express that one region contains another.
 
 ## Data model
 

@@ -1,4 +1,4 @@
-//! Shared domain types for visual-suite. See `SPEC.md`.
+//! Shared domain types for visual-suite. See `README.md`.
 
 pub mod block;
 pub mod geometry;

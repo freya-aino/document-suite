@@ -68,7 +68,7 @@ impl Dag {
         format!("{}@{}", self.id, self.version)
     }
 
-    /// Validates the DAG (see SPEC.md) and returns execution levels as node indices.
+    /// Validates the DAG (see README.md) and returns execution levels as node indices.
     /// Nodes not on a path to `output` are pruned and do not appear in the levels.
     pub fn validate(&self, steps: &dyn StepSignatures) -> Result<Vec<Vec<usize>>, DagError> {
         let mut index: HashMap<&str, usize> = HashMap::new();

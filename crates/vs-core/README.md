@@ -1,17 +1,19 @@
-# vs-core — Specification
+# vs-core
 
 Shared domain types used by every other crate. No I/O, no async, no heavy dependencies.
 Cross-cutting contracts: [`docs/SPEC.md`](../../docs/SPEC.md) §5.1.
 
-## Status
+## What it does
 
-Implemented: every type and hash-key constructor below, with golden-value tests for key
-stability. 7 unit tests pass. This crate is stable — it is the bottom of the dependency
-graph, so a breaking change here is a breaking change everywhere.
+Defines every type and hash-key constructor described below, with golden-value tests
+pinning key stability. This crate is the bottom of the dependency graph, so a breaking
+change here is a breaking change everywhere — which is why the hash-key formulas and the
+serde naming rules are stated as rules rather than conventions.
 
-Remaining:
-- [ ] `LanguageTag` validation is loose (non-empty, ASCII, `-` separated); it accepts
-      strings that are not valid BCP-47. Tighten it or document the looseness as intended.
+## Known limitations
+
+- `LanguageTag` validation is loose (non-empty, ASCII, `-` separated); it accepts
+  strings that are not valid BCP-47. Tighten it or document the looseness as intended.
 
 ## Responsibilities
 

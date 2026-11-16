@@ -18,6 +18,18 @@ Face id and pin `--revision` / `MODEL_REVISION`. **The registry's `revision` mus
 what is served** (it is recorded in provenance). Changing the `embed` model changes the
 vector space: the vector store needs a new collection, back-filled, before switching.
 
+## Without this tier at all
+
+For development on one machine, `vs-litellm-up` runs a LiteLLM proxy on `:4000` that
+fronts whatever is serving the weights, and `config/models.litellm.toml` points every
+model id at it. The suite talks plain OpenAI to the proxy and never learns what is behind
+it, so none of the pools below have to exist — see
+[`crates/vs-models/SPEC.md`](../../crates/vs-models/SPEC.md) "Local development".
+
+Note that `hosted_vllm/` is LiteLLM's own routing prefix and belongs in its
+`litellm_params.model`, not in the suite's registry: the suite asks the proxy for the
+proxy's alias.
+
 ## How `config/models.toml` maps to the services
 
 Each `[[model]]` entry's `endpoints` are the base URLs of the pool that serves that id:
@@ -28,6 +40,7 @@ Each `[[model]]` entry's `endpoints` are the base URLs of the pool that serves t
 | docker compose, worker elsewhere | `http://<gpu-host>:800N/v1`, or put the services behind a reverse proxy per pool |
 | Kubernetes | `http://<pool>.vs-gpu.svc:8000/v1` (the Service name is the pool name) |
 | `config/models.example.toml` | DNS names `doc-parse-a.gpu.internal` etc.: one A record per replica, or one name per pool in front of a load balancer |
+| one machine, no GPU tier at all | `http://127.0.0.1:4000/v1` for every model, via the LiteLLM harness — see below |
 
 A pool with several replicas is either several endpoints in the list (client-side
 round-robin, no balancer) or one endpoint in front of a Service / load balancer. The

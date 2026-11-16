@@ -1,4 +1,4 @@
-//! Document graph model and builder. See `SPEC.md`.
+//! Document graph model and builder. See `README.md`.
 
 pub mod page;
 mod store;
@@ -173,7 +173,7 @@ impl DocGraph {
                 return Err(GraphError::AssertionWithoutEvidence(a.key.clone()));
             }
             // An assertion needs something to be about: at least one entity argument or
-            // one literal. SPEC.md has claimed this since the start; nothing checked it,
+            // one literal. the spec claimed this from the start; nothing checked it,
             // so an extraction that produced a bare predicate passed validation.
             let has_arg = self.edges.iter().any(|e| e.kind == EdgeKind::Arg && e.from == a.key);
             let has_literal = a.props.get("literals").and_then(|l| l.as_array()).is_some_and(|l| !l.is_empty());

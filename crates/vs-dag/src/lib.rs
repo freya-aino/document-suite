@@ -1,4 +1,4 @@
-//! Stage 1 workflow DAGs. See `SPEC.md`.
+//! Stage 1 workflow DAGs. See `README.md`.
 
 pub mod artifact;
 pub mod dag;

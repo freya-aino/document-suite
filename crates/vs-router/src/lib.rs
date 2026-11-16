@@ -1,4 +1,4 @@
-//! DAG list bundle and per-page DAG selection. See `SPEC.md`.
+//! DAG list bundle and per-page DAG selection. See `README.md`.
 
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};

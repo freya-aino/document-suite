@@ -4,8 +4,10 @@ Version: 0.2 · Status: implemented, storage migration in progress · Date: 2026
 
 This is the top-level spec: purpose, architecture, the component map, the cross-cutting
 contracts, and the decisions. Each component has its own `SPEC.md` next to its code
-(see [Component map](#4-component-map)), and **that spec is where the component's detail,
-its assumptions and its `## Status` checklist of remaining work live**. If a component
+(see [Component map](#4-component-map)), and **that file is where the component's detail,
+its assumptions and its remaining work live**. A component whose design is fully built
+carries a `README.md` describing what exists; one with work outstanding carries a
+`SPEC.md` with a `## Status` checklist. The Spec column of the component map says which. If a component
 spec and this file disagree on a cross-cutting contract, this file wins; on component
 detail, the component spec wins.
 
@@ -117,20 +119,20 @@ DAG list. The five commands and their inputs and outputs are specified once, in
 
 ## 4. Component map
 
-| Crate / folder | Kind | Responsibility | Spec |
+| Crate / folder | Kind | Responsibility | Docs |
 |---|---|---|---|
-| `vs-core` | lib | Shared types: IDs, hash keys, geometry, blocks, page profile, provenance, jobs | [SPEC](../crates/vs-core/SPEC.md) |
+| `vs-core` | lib | Shared types: IDs, hash keys, geometry, blocks, page profile, provenance, jobs | [README](../crates/vs-core/README.md) |
 | `vs-infra` | lib | Task bus, blob store, config, telemetry | [SPEC](../crates/vs-infra/SPEC.md) |
 | `vs-api` | bin | Public HTTP API: uploads, batches, status, DAG-list admin | [SPEC](../crates/vs-api/SPEC.md) |
 | `vs-ingest` | lib | Format detection, rasterization, native text layer, CPU steps | [SPEC](../crates/vs-ingest/SPEC.md) |
 | `vs-classify` | lib | Page classification → `PageProfile` | [SPEC](../crates/vs-classify/SPEC.md) |
-| `vs-dag` | lib | DAG model, step trait, validation, executor | [SPEC](../crates/vs-dag/SPEC.md) |
-| `vs-router` | lib | DAG list bundle (DAGs + routing table), DAG selection per page | [SPEC](../crates/vs-router/SPEC.md) |
+| `vs-dag` | lib | DAG model, step trait, validation, executor | [README](../crates/vs-dag/README.md) |
+| `vs-router` | lib | DAG list bundle (DAGs + routing table), DAG selection per page | [README](../crates/vs-router/README.md) |
 | `vs-models` | lib | Model registry, OpenAI-compatible client, model-backed steps, output parsers | [SPEC](../crates/vs-models/SPEC.md) |
-| `vs-steps` | lib | Production `StepRegistry` shared by worker, API and vs-adapt | [SPEC](../crates/vs-steps/SPEC.md) |
+| `vs-steps` | lib | Production `StepRegistry` shared by worker, API and vs-adapt | [README](../crates/vs-steps/README.md) |
 | `vs-stitch` | lib | Page results → one coherent document | [SPEC](../crates/vs-stitch/SPEC.md) |
 | `vs-extract` | lib | Mentions, assertions, entity resolution | [SPEC](../crates/vs-extract/SPEC.md) |
-| `vs-graph` | lib | Document graph model and builder | [SPEC](../crates/vs-graph/SPEC.md) |
+| `vs-graph` | lib | Document graph model and builder | [README](../crates/vs-graph/README.md) |
 | `vs-vault` | lib | Data Vault 2.0 writer + migrations; graph projection and corpus entity resolution | [SPEC](../crates/vs-vault/SPEC.md) |
 | `vs-vectors` | lib | Vector store trait + Qdrant implementation (dense and sparse) | [SPEC](../crates/vs-vectors/SPEC.md) |
 | `vs-worker` | bin | Worker process with roles `ingest`, `page`, `doc` | [SPEC](../crates/vs-worker/SPEC.md) |
@@ -155,7 +157,7 @@ in its own `SPEC.md`.
 
 - **Hash keys** follow Data Vault conventions: `SHA-256` over normalised business keys
   joined with `|`, hex-encoded. Defined once in `vs-core::ids`; the formula for each key
-  type is in [`vs-core/SPEC.md`](../crates/vs-core/SPEC.md).
+  type is in [`vs-core/README.md`](../crates/vs-core/README.md).
 - **Run** = one execution of the pipeline for one document under one DAG-list version.
   `run_id` is a UUIDv7.
 - **Provenance** is attached to every block, mention and assertion:
@@ -172,7 +174,7 @@ routing table encodes which pages may skip which steps. Who scales on what:
 [`vs-worker`](../crates/vs-worker/SPEC.md) and
 [`deploy/firecracker`](../deploy/firecracker/SPEC.md) on JetStream lag per role and lane;
 [`deploy/gpu`](../deploy/gpu/SPEC.md) on queue depth and batch fill per model pool;
-[`vs-router`](../crates/vs-router/SPEC.md) decides what is skipped.
+[`vs-router`](../crates/vs-router/README.md) decides what is skipped.
 
 ### 5.3 Priority lanes
 
@@ -187,7 +189,7 @@ Delivery is at-least-once, so **every write must be idempotent** — through has
 `ON CONFLICT DO NOTHING`. Retries, dead-lettering and the max-deliveries give-up path:
 [`vs-infra`](../crates/vs-infra/SPEC.md). Partial-document threshold:
 [`vs-worker`](../crates/vs-worker/SPEC.md). Per-step timeouts:
-[`vs-dag`](../crates/vs-dag/SPEC.md). Insert-only history:
+[`vs-dag`](../crates/vs-dag/README.md). Insert-only history:
 [`vs-vault`](../crates/vs-vault/SPEC.md).
 
 ### 5.5 Observability
@@ -268,7 +270,7 @@ Moved into the components that act on it: the parsing-VLM landscape and the outp
 table → [`vs-models`](../crates/vs-models/SPEC.md); the scoring benchmarks
 (OmniDocBench, PureDocBench, ParseBench, Dr. DocBench) →
 [`vs-adapt`](../crates/vs-adapt/SPEC.md); graph-construction research (KG4VD,
-MMGraphRAG) → [`vs-graph`](../crates/vs-graph/SPEC.md) and
+MMGraphRAG) → [`vs-graph`](../crates/vs-graph/README.md) and
 [`vs-extract`](../crates/vs-extract/SPEC.md).
 
 Agentic document navigation (SCoPE VLM, EACL 2026) stays a v1 non-goal: it belongs at

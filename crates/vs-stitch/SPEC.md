@@ -36,7 +36,7 @@ Remaining:
       is not used, so unnumbered headings all land at level 1.
 - [ ] Footnote anchoring: `Footnote` blocks are ordered but never linked to the reference
       marker in the body text.
-- [ ] No intra-page structure beyond these links — see `vs-graph`'s status for the region
+- [ ] No intra-page structure beyond these links — see [`vs-graph`](../vs-graph/README.md)'s known limitations for the region
       containment, column, form key/value and table cell work.
 - [ ] Link confidences (0.4–0.9) are hand-set constants, never validated against ground
       truth, and nothing downstream thresholds on them.

@@ -1,25 +1,26 @@
-# vs-steps — Specification
+# vs-steps
 
 The production step catalogue: one place that names every step a `page` worker can run.
 `vs-worker` executes from it, `vs-api` validates uploaded DAG lists against it, and
 `vs-adapt` generates candidates from it — so all three agree on what exists. System spec:
 [`docs/SPEC.md`](../../docs/SPEC.md). Step contract:
-[`vs-dag/SPEC.md`](../vs-dag/SPEC.md) "Step contract".
+[`vs-dag/README.md`](../vs-dag/README.md) "Step contract".
 
-## Status
+## What it does
 
-Implemented: `production_registry(client)` registering 15 steps — 3 CPU steps and 5
+`production_registry(client)` returns the 15 steps a worker knows: 3 CPU steps and 5
 pre-processing steps from `vs-ingest`, and 7 model-backed steps from `vs-models`. Tests
 assert the registry covers the documented catalogue, that the shipped example DAG list
 loads against it, and that every template in the example search space generates
 candidates it accepts.
 
-Remaining:
-- [ ] `blocks.verify` is in the `vs-dag` catalogue but has no implementation to register,
-      so the registry covers 15 of 16 documented kinds. See `vs-dag`'s status for what is
-      actually missing.
-- [ ] `page.orient` and `page.dewarp` are not implemented; see `vs-ingest`'s status for
-      why neither is a pixel-statistics problem.
+## Known limitations
+
+- `blocks.verify` is in the `vs-dag` catalogue but has no implementation to register,
+  so the registry covers 15 of 16 documented kinds. See [`vs-dag`](../vs-dag/README.md)'s
+  known limitations for what is actually missing.
+- `page.orient` and `page.dewarp` are not implemented; see `vs-ingest`'s status for
+  why neither is a pixel-statistics problem.
 
 ## The one rule
 
