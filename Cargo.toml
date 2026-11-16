@@ -14,7 +14,7 @@ members = [
     "crates/vs-extract",
     "crates/vs-graph",
     "crates/vs-vault",
-    "crates/vs-helix",
+    "crates/vs-vectors",
     "crates/vs-worker",
     "crates/vs-adapt",
 ]
@@ -40,7 +40,7 @@ vs-stitch = { path = "crates/vs-stitch" }
 vs-extract = { path = "crates/vs-extract" }
 vs-graph = { path = "crates/vs-graph" }
 vs-vault = { path = "crates/vs-vault" }
-vs-helix = { path = "crates/vs-helix" }
+vs-vectors = { path = "crates/vs-vectors" }
 
 # external
 anyhow = "1"
@@ -60,6 +60,7 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 object_store = { version = "0.11", features = ["aws"] }
 # `sync`: one process-wide binding shared across threads (calls are serialised).
 pdfium-render = { version = "0.8", features = ["sync"] }
+qdrant-client = "1.20"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

@@ -16,5 +16,5 @@ imports:
   - ./crates/vs-infra
   - ./crates/vs-vault
   - ./crates/vs-ingest
-  - ./crates/vs-helix
+  - ./crates/vs-vectors
   - ./crates/vs-worker
