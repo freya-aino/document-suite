@@ -22,6 +22,8 @@ impl Prompt {
 }
 
 pub const PAGE_CLASSIFY: Prompt = Prompt { id: "page_classify", text: include_str!("../prompts/page_classify.md") };
+pub const DOCUMENT_CLASSIFY: Prompt =
+    Prompt { id: "document_classify", text: include_str!("../prompts/document_classify.md") };
 pub const FIGURE_DESCRIBE: Prompt = Prompt { id: "figure_describe", text: include_str!("../prompts/figure_describe.md") };
 pub const CHART_TO_TABLE: Prompt = Prompt { id: "chart_to_table", text: include_str!("../prompts/chart_to_table.md") };
 pub const PAGE_PARSE: Prompt = Prompt { id: "page_parse", text: include_str!("../prompts/page_parse.md") };
@@ -51,7 +53,7 @@ pub const DOTS_OCR_TEXT: Prompt = Prompt { id: "dots_ocr_text", text: "Extract t
 
 /// Every compiled-in prompt (for `params.prompt` lookups by id).
 pub const ALL: &[&Prompt] = &[
-    &PAGE_CLASSIFY, &FIGURE_DESCRIBE, &CHART_TO_TABLE, &PAGE_PARSE, &LAYOUT_DETECT, &REGION_OCR, &TABLE_RECOGNIZE,
+    &PAGE_CLASSIFY, &DOCUMENT_CLASSIFY, &FIGURE_DESCRIBE, &CHART_TO_TABLE, &PAGE_PARSE, &LAYOUT_DETECT, &REGION_OCR, &TABLE_RECOGNIZE,
     &FORMULA_RECOGNIZE, &PADDLEOCR_VL_OCR, &PADDLEOCR_VL_TABLE, &PADDLEOCR_VL_FORMULA, &PADDLEOCR_VL_CHART, &MINERU_LAYOUT,
     &MINERU_TEXT, &MINERU_TABLE, &MINERU_FORMULA, &DOTS_OCR_LAYOUT_ALL, &DOTS_OCR_LAYOUT_ONLY, &DOTS_OCR_TEXT,
 ];

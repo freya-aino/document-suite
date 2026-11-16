@@ -131,6 +131,9 @@ pub struct Stage2Config {
     pub embedding_model: String,
     /// LLM judge for ambiguous corpus-resolution candidates; none = thresholds only.
     pub judge_model: Option<String>,
+    /// VLM that classifies a whole document from its opening page thumbnails.
+    /// None = the document type is the weighted page vote alone.
+    pub doc_classifier_model: Option<String>,
     /// Tier 1 page classifier (VLM). None = rules-only classification.
     pub classifier_model: Option<String>,
     /// Characters per extraction window.
@@ -154,6 +157,7 @@ impl Default for Stage2Config {
             verify_model: "extract-llm".into(),
             embedding_model: "embed-text".into(),
             judge_model: None,
+            doc_classifier_model: None,
             classifier_model: None,
             window_chars: 12_000,
             type_match_threshold: 0.85,

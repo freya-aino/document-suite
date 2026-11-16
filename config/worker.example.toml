@@ -51,7 +51,10 @@ extraction_model = "extract-llm"
 verify_model = "extract-llm"
 embedding_model = "embed-text"
 classifier_model = "page-classifier"   # omit for rules-only page classification
-# judge_model = "extract-llm"          # LLM judge for ambiguous corpus-resolution candidates
+# judge_model = "extract-llm"            # LLM judge for ambiguous corpus-resolution candidates
+# Document-level classifier: one VLM call over the opening page thumbnails. Unset means
+# the document type is the weighted page vote alone.
+# doc_classifier_model = "page-classifier"
 window_chars = 12000
 type_match_threshold = 0.85
 link_threshold = 0.92
