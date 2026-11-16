@@ -1,0 +1,600 @@
+//! Image conditioning, as DAG steps.
+//!
+//! These exist as steps rather than a fixed pass so `vs-adapt` can measure whether each
+//! one actually helps a given page class. That is not a formality: binarisation helps some
+//! recognition models and hurts others, and nothing in this repo yet knows which.
+//!
+//! Every step is `page_image → page_image`, so they compose and a DAG can apply none, one
+//! or several. Two consequences worth knowing before wiring one into a DAG:
+//!
+//! - **Failure passes the page through unchanged.** `Artifact::empty` has no empty form
+//!   for a page image, so these cannot be `optional` in the usual sense; instead a decode
+//!   or encode failure logs and forwards the input. A step that cannot improve a page must
+//!   not be able to destroy it.
+//! - **`page.binarize` produces greyscale.** Feeding its output to `figure.describe` would
+//!   describe a black-and-white figure. Put conditioning on the recognition branch of a
+//!   DAG, not ahead of the figure branch.
+//!
+//! Not here, deliberately: orientation detection and dewarping. Both need more than
+//! pixel statistics — distinguishing 90° from 270°, or 0° from 180°, requires knowing
+//! which way the glyphs face, and estimating a page-curl warp requires finding the page
+//! boundary. A wrong guess at either is worse than leaving the page alone, so they are
+//! recorded as open items in SPEC.md rather than approximated here.
+
+use async_trait::async_trait;
+use image::{DynamicImage, GrayImage, RgbImage};
+use serde::Deserialize;
+
+use vs_dag::{Artifact, ArtifactKind, PageImage, Signature, Step, StepContext, StepError, StepOutput};
+
+/// Re-encodes as PNG **preserving the colour type**.
+///
+/// Deliberately not `raster::encode_png`, which converts to RGB: that would undo
+/// `page.binarize`, tripling the size of an image whose whole point is to be one channel.
+fn encode_preserving(img: &DynamicImage) -> Result<(Vec<u8>, u32, u32), String> {
+    let mut out = Vec::new();
+    img.write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
+        .map_err(|e| e.to_string())?;
+    Ok((out, img.width(), img.height()))
+}
+
+/// Long side used for the *analysis* copy. Deskew and margin detection only need the
+/// layout of ink, not its detail, and measuring on a downscaled copy keeps a 200 dpi page
+/// well under a second. The transform itself is always applied to the full-size image.
+const ANALYSIS_LONG_SIDE: u32 = 1000;
+
+// ---------------------------------------------------------------------------------------
+// Shared plumbing
+// ---------------------------------------------------------------------------------------
+
+/// Runs `op` on the decoded page and re-encodes the result, or returns the page unchanged.
+///
+/// `op` returning `None` means "nothing to do" — a page already straight, or already
+/// cropped — and costs no re-encode, so a step that finds nothing to fix is nearly free.
+async fn map_page(
+    page: &PageImage,
+    step: &'static str,
+    op: impl FnOnce(DynamicImage) -> Option<DynamicImage> + Send + 'static,
+) -> Result<StepOutput, StepError> {
+    let bytes = page.bytes.clone();
+    let dpi = page.dpi;
+    // Decoding and re-encoding a full page is CPU-bound; keep it off the async executor.
+    let result = tokio::task::spawn_blocking(move || {
+        let img = image::load_from_memory(&bytes).map_err(|e| format!("decode: {e}"))?;
+        match op(img) {
+            Some(out) => encode_preserving(&out).map(Some).map_err(|e| format!("encode: {e}")),
+            None => Ok(None),
+        }
+    })
+    .await
+    .map_err(|e| StepError::Io(format!("{step} task failed: {e}")))?;
+
+    let artifact = match result {
+        Ok(Some((bytes, width_px, height_px))) => Artifact::PageImage(PageImage {
+            // Distinct from the input so provenance shows the page a model actually saw
+            // was conditioned, and by which step.
+            uri: format!("{}#{step}", page.uri),
+            bytes: std::sync::Arc::from(bytes),
+            width_px,
+            height_px,
+            dpi,
+        }),
+        Ok(None) => Artifact::PageImage(page.clone()),
+        // The page is the one artifact a step must never lose: a model can still read an
+        // unconditioned page, but it cannot read nothing.
+        Err(reason) => {
+            tracing::warn!(step, %reason, "pre-processing skipped; page passed through unchanged");
+            Artifact::PageImage(page.clone())
+        }
+    };
+    Ok(StepOutput { artifact, model_ref: None, prompt_ref: None })
+}
+
+fn page_signature() -> Signature {
+    Signature { inputs: vec![ArtifactKind::PageImage], output: ArtifactKind::PageImage }
+}
+
+fn page_input(inputs: &[&Artifact]) -> Result<PageImage, StepError> {
+    match inputs.first() {
+        Some(Artifact::PageImage(p)) => Ok(p.clone()),
+        _ => Err(StepError::InvalidParams("expected a page image".into())),
+    }
+}
+
+fn params_of<T: for<'de> Deserialize<'de> + Default>(params: &serde_json::Value) -> Result<T, StepError> {
+    if params.is_null() {
+        return Ok(T::default());
+    }
+    serde_json::from_value(params.clone()).map_err(|e| StepError::InvalidParams(e.to_string()))
+}
+
+/// Greyscale copy with its long side at most `long_side`, for measurement only.
+fn analysis_gray(img: &DynamicImage, long_side: u32) -> GrayImage {
+    let (w, h) = (img.width(), img.height());
+    let scaled = if w.max(h) > long_side {
+        let scale = long_side as f32 / w.max(h) as f32;
+        let (nw, nh) = ((w as f32 * scale).max(1.0) as u32, (h as f32 * scale).max(1.0) as u32);
+        img.resize_exact(nw, nh, image::imageops::FilterType::Triangle)
+    } else {
+        img.clone()
+    };
+    scaled.to_luma8()
+}
+
+// ---------------------------------------------------------------------------------------
+// Measurements
+// ---------------------------------------------------------------------------------------
+
+/// Fraction of pixels darker than the Otsu threshold: how much ink is on the page.
+///
+/// A real signal for a raster input, which otherwise reaches the classifier with nothing
+/// but a thumbnail: it separates a blank or near-blank scan (< 0.005) from a dense one.
+pub fn ink_coverage(gray: &GrayImage) -> f32 {
+    let total = (gray.width() as usize) * (gray.height() as usize);
+    if total == 0 {
+        return 0.0;
+    }
+    let level = imageproc::contrast::otsu_level(gray);
+    let dark = gray.pixels().filter(|p| p.0[0] <= level).count();
+    dark as f32 / total as f32
+}
+
+/// The rotation, in degrees, that would straighten the page — i.e. the value to hand
+/// straight to a rotate, not the page's own tilt, which has the opposite sign.
+///
+/// Projection profile: a straight page of text has rows that alternate between dense ink
+/// and empty space, so the horizontal ink histogram has high variance. Shearing the ink
+/// by a candidate angle and scoring the histogram finds the angle that maximises it.
+///
+/// The shear is computed by projecting each dark pixel to `y + x·tan θ` rather than by
+/// rotating the image once per candidate, so the whole search is a handful of passes over
+/// the dark pixels instead of 40 image rotations.
+pub fn skew_angle(gray: &GrayImage, max_deg: f32, step_deg: f32) -> f32 {
+    let (w, h) = (gray.width() as i64, gray.height() as i64);
+    if w == 0 || h == 0 {
+        return 0.0;
+    }
+    let level = imageproc::contrast::otsu_level(gray);
+    // Collect dark pixels once; the search then only iterates over ink.
+    let ink: Vec<(i64, i64)> = gray
+        .enumerate_pixels()
+        .filter(|(_, _, p)| p.0[0] <= level)
+        .map(|(x, y, _)| (x as i64, y as i64))
+        .collect();
+    // Too little ink to measure anything: a blank or near-blank page has no skew to find.
+    if ink.len() < 200 {
+        return 0.0;
+    }
+
+    let max_deg = max_deg.abs().clamp(0.0, 20.0);
+    let step_deg = if step_deg > 0.0 { step_deg } else { 0.25 };
+    let mut best = (0.0f32, f32::MIN);
+    let mut angle = -max_deg;
+    while angle <= max_deg + f32::EPSILON {
+        let tan = angle.to_radians().tan();
+        // Room for the shear at both ends, so no ink falls outside the histogram.
+        let margin = (w as f32 * tan.abs()).ceil() as i64 + 1;
+        let bins = (h + 2 * margin) as usize;
+        let mut hist = vec![0u32; bins];
+        for (x, y) in &ink {
+            let row = *y + (*x as f32 * tan) as i64 + margin;
+            if row >= 0 && (row as usize) < bins {
+                hist[row as usize] += 1;
+            }
+        }
+        // Sum of squares: maximal when ink is concentrated into few rows, i.e. when the
+        // text lines are horizontal. Equivalent to maximising variance here, because the
+        // total ink is the same for every angle.
+        let score: f64 = hist.iter().map(|c| (*c as f64) * (*c as f64)).sum();
+        if score as f32 > best.1 {
+            best = (angle, score as f32);
+        }
+        angle += step_deg;
+    }
+    best.0
+}
+
+/// Ink bounding box in fractions of the page, or `None` when there is no ink to bound.
+pub fn ink_bounds(gray: &GrayImage, min_ink_per_line: f32) -> Option<(f32, f32, f32, f32)> {
+    let (w, h) = (gray.width(), gray.height());
+    if w == 0 || h == 0 {
+        return None;
+    }
+    let level = imageproc::contrast::otsu_level(gray);
+    let mut rows = vec![0u32; h as usize];
+    let mut cols = vec![0u32; w as usize];
+    for (x, y, p) in gray.enumerate_pixels() {
+        if p.0[0] <= level {
+            rows[y as usize] += 1;
+            cols[x as usize] += 1;
+        }
+    }
+    // A per-line floor keeps a speck of scanner noise in the margin from defeating the
+    // crop, which is the usual way a naive ink-bounds crop does nothing at all.
+    let row_floor = (min_ink_per_line * w as f32).max(1.0) as u32;
+    let col_floor = (min_ink_per_line * h as f32).max(1.0) as u32;
+    let first = |v: &[u32], floor: u32| v.iter().position(|c| *c >= floor);
+    let last = |v: &[u32], floor: u32| v.iter().rposition(|c| *c >= floor);
+    let (y0, y1) = (first(&rows, row_floor)?, last(&rows, row_floor)?);
+    let (x0, x1) = (first(&cols, col_floor)?, last(&cols, col_floor)?);
+    Some((x0 as f32 / w as f32, y0 as f32 / h as f32, (x1 + 1) as f32 / w as f32, (y1 + 1) as f32 / h as f32))
+}
+
+/// Percentile bounds of the luma histogram, used as the contrast-stretch input range.
+fn luma_percentiles(gray: &GrayImage, low: f32, high: f32) -> (u8, u8) {
+    let mut hist = [0u32; 256];
+    for p in gray.pixels() {
+        hist[p.0[0] as usize] += 1;
+    }
+    let total: u32 = hist.iter().sum();
+    if total == 0 {
+        return (0, 255);
+    }
+    let pick = |frac: f32| -> u8 {
+        let target = (total as f32 * frac.clamp(0.0, 1.0)) as u32;
+        let mut acc = 0u32;
+        for (v, c) in hist.iter().enumerate() {
+            acc += c;
+            if acc >= target {
+                return v as u8;
+            }
+        }
+        255
+    };
+    let (lo, hi) = (pick(low), pick(high));
+    if lo >= hi { (0, 255) } else { (lo, hi) }
+}
+
+// ---------------------------------------------------------------------------------------
+// Steps
+// ---------------------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+pub struct DeskewParams {
+    /// Largest skew searched, in degrees either way.
+    pub max_deg: f32,
+    /// Search granularity, in degrees.
+    pub step_deg: f32,
+    /// Angles below this are left alone: rotating costs a resample, which is a real loss
+    /// of detail for a correction nobody can see.
+    pub min_apply_deg: f32,
+}
+
+impl Default for DeskewParams {
+    fn default() -> Self {
+        Self { max_deg: 5.0, step_deg: 0.25, min_apply_deg: 0.2 }
+    }
+}
+
+/// Straightens a scan whose text lines are not horizontal.
+pub struct Deskew;
+
+#[async_trait]
+impl Step for Deskew {
+    fn kind(&self) -> &'static str {
+        "page.deskew"
+    }
+    fn signature(&self) -> Signature {
+        page_signature()
+    }
+    fn default_timeout_ms(&self) -> u64 {
+        30_000
+    }
+    async fn run(&self, _ctx: &StepContext, inputs: &[&Artifact], params: &serde_json::Value) -> Result<StepOutput, StepError> {
+        let page = page_input(inputs)?;
+        let p: DeskewParams = params_of(params)?;
+        map_page(&page, "page.deskew", move |img| {
+            let gray = analysis_gray(&img, ANALYSIS_LONG_SIDE);
+            let angle = skew_angle(&gray, p.max_deg, p.step_deg);
+            if angle.abs() < p.min_apply_deg.max(0.0) {
+                return None;
+            }
+            tracing::debug!(angle, "deskewing page");
+            let rgb = img.to_rgb8();
+            // White border: a document's background. Black would be read as ink by every
+            // downstream measurement, including this step's own on a second pass.
+            let rotated = imageproc::geometric_transformations::rotate_about_center(
+                &rgb,
+                // `skew_angle` returns the correction, so it is applied as-is. Negating
+                // here doubles the skew instead of removing it; the round-trip test in
+                // this module is what pins the direction.
+                angle.to_radians(),
+                imageproc::geometric_transformations::Interpolation::Bilinear,
+                imageproc::geometric_transformations::Border::Constant(image::Rgb([255u8, 255, 255])),
+            );
+            Some(DynamicImage::ImageRgb8(rotated))
+        })
+        .await
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+pub struct DenoiseParams {
+    /// Median window radius in pixels. 1 (a 3×3 window) clears scanner speckle; larger
+    /// starts eating thin strokes and punctuation.
+    pub radius: u32,
+}
+
+impl Default for DenoiseParams {
+    fn default() -> Self {
+        Self { radius: 1 }
+    }
+}
+
+/// Median filter, for speckled scans and photos.
+pub struct Denoise;
+
+#[async_trait]
+impl Step for Denoise {
+    fn kind(&self) -> &'static str {
+        "page.denoise"
+    }
+    fn signature(&self) -> Signature {
+        page_signature()
+    }
+    fn default_timeout_ms(&self) -> u64 {
+        60_000
+    }
+    async fn run(&self, _ctx: &StepContext, inputs: &[&Artifact], params: &serde_json::Value) -> Result<StepOutput, StepError> {
+        let page = page_input(inputs)?;
+        let p: DenoiseParams = params_of(params)?;
+        let radius = p.radius.clamp(1, 4);
+        map_page(&page, "page.denoise", move |img| {
+            // Per channel, so colour survives: a denoise that greyscaled the page would
+            // also degrade any figure on it.
+            let rgb: RgbImage = img.to_rgb8();
+            Some(DynamicImage::ImageRgb8(imageproc::filter::median_filter(&rgb, radius, radius)))
+        })
+        .await
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+pub struct NormalizeParams {
+    /// Luma percentiles mapped to black and white.
+    pub low_percentile: f32,
+    pub high_percentile: f32,
+}
+
+impl Default for NormalizeParams {
+    fn default() -> Self {
+        Self { low_percentile: 0.02, high_percentile: 0.98 }
+    }
+}
+
+/// Contrast normalisation for faint or unevenly lit pages.
+pub struct Normalize;
+
+#[async_trait]
+impl Step for Normalize {
+    fn kind(&self) -> &'static str {
+        "page.normalize"
+    }
+    fn signature(&self) -> Signature {
+        page_signature()
+    }
+    fn default_timeout_ms(&self) -> u64 {
+        30_000
+    }
+    async fn run(&self, _ctx: &StepContext, inputs: &[&Artifact], params: &serde_json::Value) -> Result<StepOutput, StepError> {
+        let page = page_input(inputs)?;
+        let p: NormalizeParams = params_of(params)?;
+        map_page(&page, "page.normalize", move |img| {
+            // Bounds come from luma and are applied to every channel equally, so a faint
+            // page is brightened without shifting its colour balance — which per-channel
+            // stretching would do, turning a yellowed scan blue.
+            let gray = img.to_luma8();
+            let (lo, hi) = luma_percentiles(&gray, p.low_percentile, p.high_percentile);
+            if (lo, hi) == (0, 255) {
+                return None;
+            }
+            let rgb = img.to_rgb8();
+            Some(DynamicImage::ImageRgb8(imageproc::contrast::stretch_contrast(&rgb, lo, hi, 0, 255)))
+        })
+        .await
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct BinarizeParams {
+    /// Fixed threshold instead of Otsu's, for a corpus where Otsu is known to misbehave.
+    pub threshold: Option<u8>,
+}
+
+/// Otsu binarisation.
+///
+/// Helps some recognition models and hurts others, which is the clearest case in the
+/// catalogue for being a scored step rather than an assumption. **Outputs greyscale**, so
+/// it must not feed a figure or chart branch.
+pub struct Binarize;
+
+#[async_trait]
+impl Step for Binarize {
+    fn kind(&self) -> &'static str {
+        "page.binarize"
+    }
+    fn signature(&self) -> Signature {
+        page_signature()
+    }
+    fn default_timeout_ms(&self) -> u64 {
+        30_000
+    }
+    async fn run(&self, _ctx: &StepContext, inputs: &[&Artifact], params: &serde_json::Value) -> Result<StepOutput, StepError> {
+        let page = page_input(inputs)?;
+        let p: BinarizeParams = params_of(params)?;
+        map_page(&page, "page.binarize", move |img| {
+            let gray = img.to_luma8();
+            let level = p.threshold.unwrap_or_else(|| imageproc::contrast::otsu_level(&gray));
+            let out = imageproc::contrast::threshold(&gray, level, imageproc::contrast::ThresholdType::Binary);
+            Some(DynamicImage::ImageLuma8(out))
+        })
+        .await
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+pub struct CropMarginsParams {
+    /// Margin kept around the ink, as a fraction of the page.
+    pub padding: f32,
+    /// Ink a row or column needs, as a fraction of its length, to count as content.
+    pub min_ink_per_line: f32,
+    /// Refuse a crop that would keep less than this fraction of the page area. A crop
+    /// that aggressive almost always means the ink measurement was wrong, not that the
+    /// page is 90 % margin.
+    pub min_kept_area: f32,
+}
+
+impl Default for CropMarginsParams {
+    fn default() -> Self {
+        Self { padding: 0.01, min_ink_per_line: 0.005, min_kept_area: 0.2 }
+    }
+}
+
+/// Trims scanner borders and blank margins.
+pub struct CropMargins;
+
+#[async_trait]
+impl Step for CropMargins {
+    fn kind(&self) -> &'static str {
+        "page.crop_margins"
+    }
+    fn signature(&self) -> Signature {
+        page_signature()
+    }
+    fn default_timeout_ms(&self) -> u64 {
+        30_000
+    }
+    async fn run(&self, _ctx: &StepContext, inputs: &[&Artifact], params: &serde_json::Value) -> Result<StepOutput, StepError> {
+        let page = page_input(inputs)?;
+        let p: CropMarginsParams = params_of(params)?;
+        map_page(&page, "page.crop_margins", move |img| {
+            let gray = analysis_gray(&img, ANALYSIS_LONG_SIDE);
+            let (x0, y0, x1, y1) = ink_bounds(&gray, p.min_ink_per_line)?;
+            let pad = p.padding.clamp(0.0, 0.2);
+            let (x0, y0) = ((x0 - pad).max(0.0), (y0 - pad).max(0.0));
+            let (x1, y1) = ((x1 + pad).min(1.0), (y1 + pad).min(1.0));
+            let kept = (x1 - x0) * (y1 - y0);
+            if kept < p.min_kept_area.clamp(0.0, 1.0) || kept >= 0.999 {
+                return None;
+            }
+            let (w, h) = (img.width() as f32, img.height() as f32);
+            let (px, py) = ((x0 * w).round() as u32, (y0 * h).round() as u32);
+            let (pw, ph) = (((x1 - x0) * w).round().max(1.0) as u32, ((y1 - y0) * h).round().max(1.0) as u32);
+            tracing::debug!(kept, "cropping page margins");
+            Some(img.crop_imm(px, py, pw, ph))
+        })
+        .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use image::Luma;
+
+    /// A page of horizontal "text lines": dark bands separated by white.
+    fn lined_page(w: u32, h: u32) -> GrayImage {
+        GrayImage::from_fn(w, h, |x, y| {
+            let in_margin = x < w / 10 || x > w * 9 / 10;
+            let on_line = (y / 4) % 3 == 0 && y > h / 10 && y < h * 9 / 10;
+            if on_line && !in_margin { Luma([20]) } else { Luma([240]) }
+        })
+    }
+
+    fn blank(w: u32, h: u32) -> GrayImage {
+        GrayImage::from_pixel(w, h, Luma([250]))
+    }
+
+    /// Rotates a page the way a crooked scan is crooked, using the same primitive the
+    /// step uses to correct it.
+    fn rotated(src: &GrayImage, deg: f32) -> GrayImage {
+        imageproc::geometric_transformations::rotate_about_center(
+            src,
+            deg.to_radians(),
+            imageproc::geometric_transformations::Interpolation::Bilinear,
+            imageproc::geometric_transformations::Border::Constant(Luma([240])),
+        )
+    }
+
+    #[test]
+    fn ink_coverage_separates_blank_from_dense() {
+        assert!(ink_coverage(&blank(200, 200)) < 0.01);
+        let dense = ink_coverage(&lined_page(200, 200));
+        assert!((0.05..0.5).contains(&dense), "lined page coverage was {dense}");
+        assert_eq!(ink_coverage(&GrayImage::new(0, 0)), 0.0);
+    }
+
+    #[test]
+    fn a_straight_page_reads_as_straight() {
+        assert!(skew_angle(&lined_page(400, 400), 5.0, 0.25).abs() < 0.3);
+    }
+
+    /// The property that matters, and the one that pins the sign convention: applying the
+    /// correction the step applies must leave the page measurably straighter than it was.
+    /// Asserting the returned angle against a "true" angle instead would only test my
+    /// arithmetic for generating the test image.
+    #[test]
+    fn the_correction_straightens_a_crooked_page() {
+        let page = lined_page(400, 400);
+        for truth in [-3.0f32, -1.5, 1.0, 2.5] {
+            let crooked = rotated(&page, truth);
+            let found = skew_angle(&crooked, 5.0, 0.25);
+            assert!(found.abs() > 0.5, "rotated by {truth}° but measured {found}° — no skew detected");
+
+            // Exactly what `Deskew` does with the measurement.
+            let corrected = rotated(&crooked, found);
+            let residual = skew_angle(&corrected, 5.0, 0.25);
+            assert!(
+                residual.abs() < found.abs() / 2.0,
+                "rotated {truth}°, measured {found}°, residual after correction {residual}°"
+            );
+            assert!(residual.abs() < 0.8, "residual {residual}° after correcting {truth}°");
+        }
+    }
+
+    /// Nothing to measure must read as no skew, not as a random angle.
+    #[test]
+    fn blank_and_tiny_pages_have_no_skew() {
+        assert_eq!(skew_angle(&blank(300, 300), 5.0, 0.25), 0.0);
+        assert_eq!(skew_angle(&GrayImage::new(0, 0), 5.0, 0.25), 0.0);
+        assert_eq!(skew_angle(&lined_page(4, 4), 5.0, 0.25), 0.0);
+    }
+
+    #[test]
+    fn ink_bounds_find_the_content_block() {
+        let page = lined_page(400, 400);
+        let (x0, y0, x1, y1) = ink_bounds(&page, 0.005).unwrap();
+        // The generator leaves a tenth of the page blank on every side.
+        assert!((0.05..0.15).contains(&x0), "x0 = {x0}");
+        assert!((0.05..0.15).contains(&y0), "y0 = {y0}");
+        assert!((0.85..0.96).contains(&x1), "x1 = {x1}");
+        assert!((0.85..0.96).contains(&y1), "y1 = {y1}");
+        assert_eq!(ink_bounds(&blank(100, 100), 0.005), None, "a blank page has no bounds");
+    }
+
+    /// A speck of noise in the margin must not defeat the crop.
+    #[test]
+    fn ink_bounds_ignore_isolated_specks() {
+        let mut page = lined_page(400, 400);
+        page.put_pixel(2, 2, Luma([0]));
+        page.put_pixel(397, 397, Luma([0]));
+        let (x0, _, x1, _) = ink_bounds(&page, 0.005).unwrap();
+        assert!(x0 > 0.05, "a corner speck should not widen the bounds to the page edge");
+        assert!(x1 < 0.96);
+    }
+
+    #[test]
+    fn percentiles_bracket_the_histogram() {
+        let (lo, hi) = luma_percentiles(&lined_page(200, 200), 0.02, 0.98);
+        assert!(lo < hi);
+        assert!(hi >= 200, "the paper background should land near white, got {hi}");
+        // A flat image has nothing to stretch, which the caller reads as "do nothing".
+        assert_eq!(luma_percentiles(&blank(50, 50), 0.02, 0.98), (0, 255));
+        assert_eq!(luma_percentiles(&GrayImage::new(0, 0), 0.02, 0.98), (0, 255));
+    }
+}

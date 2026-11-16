@@ -5,6 +5,7 @@ pub mod format;
 mod image_raster;
 mod pdf;
 pub mod pool;
+pub mod preprocess;
 pub mod raster;
 pub mod steps;
 

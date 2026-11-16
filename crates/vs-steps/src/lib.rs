@@ -14,7 +14,14 @@ pub fn production_registry(client: Arc<OpenAiClient>) -> StepRegistry {
     let mut reg = StepRegistry::new();
     reg.register(Arc::new(vs_ingest::steps::MergeNative))
         .register(Arc::new(vs_ingest::steps::MergeBlocks))
-        .register(Arc::new(vs_ingest::steps::FigureCrop));
+        .register(Arc::new(vs_ingest::steps::FigureCrop))
+        // Pre-processing. Steps rather than a fixed pass so `vs-adapt` can measure
+        // whether each one helps a given page class instead of assuming it does.
+        .register(Arc::new(vs_ingest::preprocess::Deskew))
+        .register(Arc::new(vs_ingest::preprocess::Denoise))
+        .register(Arc::new(vs_ingest::preprocess::Normalize))
+        .register(Arc::new(vs_ingest::preprocess::Binarize))
+        .register(Arc::new(vs_ingest::preprocess::CropMargins));
     vs_models::register_steps(&mut reg, client);
     reg
 }

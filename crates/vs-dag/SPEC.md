@@ -15,9 +15,6 @@ Remaining:
 - [ ] `blocks.verify` is listed in the step catalogue below but **is not implemented and
       not registered anywhere** — the only gap in the catalogue (10 of 11 kinds exist).
       Implement it or drop the row.
-- [ ] `Artifact::empty` has no empty form for `PageImage`, so a step whose output is a
-      page image cannot be `optional` in the usual way. Pre-processing steps are exactly
-      that shape, so the step contract needs a documented pass-through-on-failure rule.
 - [ ] No artefact kind carries region relationships; `LayoutRegion` has no id and no
       parent, so a step cannot express that one region contains another.
 
@@ -74,6 +71,17 @@ pub trait Step: Send + Sync {
 - Step implementations live in `vs-ingest` (CPU steps) and `vs-models` (model steps), and
   are registered in a `StepRegistry` at worker start.
 
+### Pass-through on failure (`page_image → page_image` steps)
+
+A step whose output kind is `PageImage` cannot be `optional` in the usual way, because
+`Artifact::empty` has no empty form for a page image — and rightly so: an empty page is
+not a usable input to anything. Such a step must instead **return its input unchanged**
+when it cannot do its work, and log why.
+
+This is what makes the pre-processing steps safe to wire into a DAG speculatively: a step
+that cannot improve a page must not be able to destroy it. A model can still read an
+unconditioned page; it cannot read nothing.
+
 ## Validation (`Dag::validate`)
 
 Run when a DAG list is loaded (worker start, registry change) and by `vs-adapt` before
@@ -113,7 +121,12 @@ earlier levels). Nodes in one level run concurrently.
 | `chart.to_table` | GPU | chart crops → data table HTML |
 | `blocks.merge_native` | CPU | native text layer + layout (+ recognised tables/formulas) → blocks |
 | `blocks.merge` | CPU | merge several block sets (union by IoU, keeps highest-confidence) |
-| `blocks.verify` | CPU/GPU | compares two block sets; sets confidence from agreement |
+| `blocks.verify` | CPU/GPU | compares two block sets; sets confidence from agreement — **not implemented** |
+| `page.deskew` | CPU | straightens a crooked scan (projection profile) |
+| `page.denoise` | CPU | median filter for speckled scans and photos |
+| `page.normalize` | CPU | contrast normalisation for faint or unevenly lit pages |
+| `page.binarize` | CPU | Otsu threshold; **outputs greyscale** |
+| `page.crop_margins` | CPU | trims scanner borders and blank margins |
 
 ## Metrics
 

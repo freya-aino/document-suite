@@ -50,4 +50,10 @@ fn production_registry_step_signatures() {
     expect("chart.to_table", &[FigureCrops], Blocks);
     expect("blocks.merge", &[Blocks, Blocks], Blocks);
     expect("blocks.merge_native", &[TextLayer, Layout, Blocks], Blocks);
+    // Pre-processing is page_image -> page_image, which is what lets it compose and lets
+    // a DAG apply none, one or several operations.
+    for kind in ["page.deskew", "page.denoise", "page.normalize", "page.binarize", "page.crop_margins"] {
+        expect(kind, &[PageImage], PageImage);
+    }
 }
+
