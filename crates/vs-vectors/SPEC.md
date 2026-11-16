@@ -19,9 +19,14 @@ need Qdrant from `devenv up`.
 This crate replaced the vector half of the HelixDB writer (decisions D6/D9).
 
 Remaining:
-- [ ] **Nothing has run against a live Qdrant yet.** The integration tests exist but have
-      only been compiled, so the collection bootstrap, the `is_tenant` index and the
-      sparse-vector wire format are unverified against the server.
+- [ ] **Nothing has run against a live Qdrant.** The 3 integration tests exist and have
+      only ever been compiled — there is not even a Qdrant state directory under
+      `.devenv`. Specifically unverified: creating a collection with a dense named vector
+      *and* a sparse config in one call; the `is_tenant` keyword index through
+      `CreateFieldIndexCollectionBuilder`; the `m = 0` / `payload_m = 16` HNSW layout;
+      whether `Query::new_nearest` with `.using("dense")` and `with_vectors(true)`
+      returns the named vector `dense_of` expects; and whether Qdrant accepts the
+      UUID-shaped point ids derived from graph keys.
 - [ ] No hybrid-search helper. Dense and sparse points are both written, but fusing them
       is left entirely to the reader (per decision 5), so nothing in-repo proves the two
       halves are jointly queryable.

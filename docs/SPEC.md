@@ -1,6 +1,6 @@
 # Visual Suite — System Specification
 
-Version: 0.2 · Status: implemented, storage migration in progress · Date: 2026-11-16
+Version: 0.3 · Status: implemented; storage layer unverified against live services · Date: 2026-11-17
 
 This is the top-level spec: purpose, architecture, the component map, the cross-cutting
 contracts, and the decisions. Each component has its own `SPEC.md` next to its code

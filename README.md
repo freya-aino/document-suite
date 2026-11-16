@@ -46,13 +46,17 @@ integration tests are `#[ignore]`d** because they need Postgres, NATS, Garage or
 from `devenv up`. No `todo!()` or `unimplemented!()` remains anywhere in the tree.
 
 Five components are done and carry a README; the rest carry a `SPEC.md` whose `## Status`
-section lists what is left — 84 items in total. The cross-cutting gaps:
+section lists what is left — 76 items in total. The cross-cutting gaps:
 
 - **No CI.** Nothing enforces the green build, so every claim here and in those
   checklists is verified by hand.
-- **Nothing has run end to end.** Each stage is tested in isolation against fakes; no run
-  goes upload → ingest → Stage 1 → Stage 2 → Postgres + Qdrant. The storage layer in
-  particular has never been exercised against a live Postgres or Qdrant.
+- **Nothing has run end to end, and the storage layer has never run at all.** Each stage
+  is tested in isolation against fakes; no run goes upload → ingest → Stage 1 → Stage 2 →
+  Postgres + Qdrant. Worse than it sounds: the 10 Postgres integration tests *predate*
+  the storage rewrite, so running them would not verify it either. Migrations 0005 to
+  0007 have never been applied, and `PgGraphStore`, `PgCorpusResolver`'s SQL and the
+  whole of `vs-vectors` have unit tests of their column and point projections only. This
+  is the largest unverified surface in the repo and the first thing worth closing.
 - **No auth.** `vs-api` takes the tenant from `X-VS-Tenant` and admin rights from
   `X-VS-Admin`, both of which any caller can set. Keep it on a trusted network.
 - **Telemetry is a stub** (`crates/vs-infra/src/telemetry.rs`): structured logs only, no
@@ -131,9 +135,12 @@ or Qdrant are `#[ignore]`d; with `devenv up` running:
 cargo test --workspace -- --include-ignored
 ```
 
-Those 17 are the ones that matter most and the ones least often run: they are the only
-tests that touch a real store, so the Postgres and Qdrant write paths are unverified
-until they pass. Run them before trusting anything in the storage layer.
+Those 17 are the only tests that touch a real store, and they have never been run. Even
+passing them would leave gaps: 10 of them predate the storage rewrite and cover
+`write_document`, `write_page` and the `ops` schema, while the newer write paths — the
+graph layer, document type, cells, in-image text, corpus resolution — have no integration
+test at all yet. Treat anything in `vs-vault` or `vs-vectors` added after the HelixDB
+removal as unproven until that changes.
 
 ## Build
 

@@ -25,7 +25,15 @@ Implemented: the full raw vault (now 9 hubs, 12 links, 12 satellites), the `ops`
 lists, entity and relation types), role separation between the migration owner and the
 runtime role, `write_document`, `write_page`, `write_stage2`, the `v_current_run` view,
 the graph layer (`PgGraphStore`) and corpus entity resolution (`PgCorpusResolver`).
-13 unit tests and 10 Postgres integration tests.
+15 unit tests, plus 10 `#[ignore]`d Postgres integration tests.
+
+**Read that test count carefully.** The 10 integration tests predate the storage rewrite
+and cover only `write_document`, `write_page`, the `ops` schema and the runtime role's
+privileges. Everything added since — migrations 0005 to 0007, `PgGraphStore`,
+`PgCorpusResolver`'s SQL, the document-type satellite, cells, in-image text and its
+matches — has **unit tests of its column projection only**. No statement in those three
+migrations has ever been parsed by a Postgres, and no row has ever been inserted by the
+new write paths.
 
 This is now the suite's only graph store (D6), and it was already richer than the one it
 replaced: it keeps **both** span and region evidence, full `load_dts` history, block
@@ -42,9 +50,21 @@ Remaining:
       `context` column, so `PgCorpusResolver`'s judge sees only the stored name, type and
       aliases — the same blind spot the previous store had, and the one Postgres could
       actually fix. It needs the column plus the context threaded into `write_stage2`.
-- [ ] **Nothing has exercised `PgGraphStore` against a live Postgres.** Its column mapping
-      is unit-tested, but migration `0005_graph.sql` has never been applied and no
-      integration test writes a section tree or a `related` edge.
+- [ ] **No integration coverage of anything added since the storage rewrite.** Migrations
+      `0005_graph.sql`, `0006_document_type.sql` and `0007_page_components.sql` have never
+      been applied, so their DDL is unparsed; and no test writes a section tree, a
+      `related` edge, a document type, a table cell or an in-image-text match. The things
+      that can only fail on execution: the `UNNEST` binds for nullable text arrays
+      (`cell_column_header`, `tree_parent`), the `::smallint[]` and `::bool[]` casts, how
+      `latest_differs` composes inside the four new satellite inserts, and whether
+      `lnk_image_text_match`'s CHECK accepts rows inserted through `UNNEST` with NULLs.
+- [ ] **`PgCorpusResolver`'s SQL is likewise unexecuted.** `decide()` is unit-tested over
+      typed candidates, but `load_labels`' `JOIN LATERAL` against `sat_entity_label` has
+      never run, so the one query standing between a document and a wrong entity link is
+      unverified.
+- [ ] Applying the new migrations is a deploy-ordering constraint: `check_migrations`
+      refuses to start a worker whose database is missing any embedded migration, so
+      `vs-migrate` has to run before any binary that was built with 0005 to 0007.
 - [ ] Document the read contract for the external RAG service — it now queries this schema
       and Qdrant directly, so tenant scoping and current-run filtering become the caller's
       responsibility. `v_current_run` is how it finds the current run.
