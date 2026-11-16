@@ -17,6 +17,13 @@ pub struct PageSignals {
     pub image_count: u32,
     pub image_area_ratio: f32,
     pub rotation_deg: u16,
+    /// Fraction of the page darker than its Otsu threshold: how much ink is on it.
+    ///
+    /// The one measured signal a scan can offer. Without it a raster page reaches tier 1
+    /// with nothing but a thumbnail, so a blank scan costs the same GPU call as a dense
+    /// one. `0.0` also means "not measured", which is why it only ever *skips* work.
+    #[serde(default)]
+    pub ink_coverage: f32,
 }
 
 /// Output of the tier 1 vision classifier.
@@ -42,6 +49,9 @@ pub struct ClassifyConfig {
     pub flag_threshold: f32,
     pub rules_only_confidence: f32,
     pub thumbnail_long_side_px: u32,
+    /// Ink coverage at or below which a scan counts as blank, so tier 1 is skipped.
+    /// Set to 0 to disable, which is also the effect on inputs that cannot measure it.
+    pub blank_ink_coverage: f32,
 }
 
 impl Default for ClassifyConfig {
@@ -55,6 +65,9 @@ impl Default for ClassifyConfig {
             flag_threshold: 0.5,
             rules_only_confidence: 0.85,
             thumbnail_long_side_px: 768,
+            // Deliberately low: a page with a faint signature or a pale logo must not be
+            // mistaken for blank, so this only catches pages with essentially nothing.
+            blank_ink_coverage: 0.002,
         }
     }
 }
@@ -64,6 +77,9 @@ pub struct Tier0 {
     pub born_digital: bool,
     pub has_images: bool,
     pub needs_vision: bool,
+    /// Measured as having essentially no ink. Only ever set for inputs that report
+    /// `ink_coverage`, so a PDF page is never flagged blank this way.
+    pub blank: bool,
 }
 
 pub fn tier0(s: &PageSignals, cfg: &ClassifyConfig) -> Tier0 {
@@ -71,8 +87,11 @@ pub fn tier0(s: &PageSignals, cfg: &ClassifyConfig) -> Tier0 {
         && s.text_layer_coverage >= cfg.born_digital_min_coverage
         && (!s.ocr_text_layer || cfg.trust_ocr_layer);
     let has_images = s.image_count > 0 && s.image_area_ratio >= cfg.min_image_area_ratio;
-    let needs_vision = !(born_digital && !has_images && cfg.skip_vision_for_text_only_digital);
-    Tier0 { born_digital, has_images, needs_vision }
+    // `> 0.0` keeps an unmeasured page (ink_coverage defaulting to 0.0) out of this:
+    // "we did not look" must not be read as "there is nothing there".
+    let blank = cfg.blank_ink_coverage > 0.0 && s.ink_coverage > 0.0 && s.ink_coverage <= cfg.blank_ink_coverage;
+    let text_only_digital = born_digital && !has_images && cfg.skip_vision_for_text_only_digital;
+    Tier0 { born_digital, has_images: has_images && !blank, needs_vision: !(text_only_digital || blank), blank }
 }
 
 /// Combines tier 0 and (optional) tier 1 into a profile.
@@ -165,7 +184,20 @@ mod tests {
     #[test]
     fn text_only_digital_skips_vision() {
         let t = tier0(&digital(), &ClassifyConfig::default());
-        assert_eq!(t, Tier0 { born_digital: true, has_images: false, needs_vision: false });
+        assert_eq!(t, Tier0 { born_digital: true, has_images: false, needs_vision: false, blank: false });
+    }
+
+    #[test]
+    fn a_blank_scan_skips_the_vision_call() {
+        let cfg = ClassifyConfig::default();
+        let scan = |ink: f32| PageSignals { image_count: 1, image_area_ratio: 1.0, ink_coverage: ink, ..Default::default() };
+        let t = tier0(&scan(0.0005), &cfg);
+        assert!(t.blank && !t.needs_vision && !t.has_images, "a blank scan is not worth a GPU call: {t:?}");
+        // A faint signature is not blank.
+        assert!(!tier0(&scan(0.01), &cfg).blank);
+        // Unmeasured (0.0) must not be mistaken for blank — it means nobody looked.
+        let unmeasured = tier0(&scan(0.0), &cfg);
+        assert!(!unmeasured.blank && unmeasured.needs_vision);
     }
 
     #[test]

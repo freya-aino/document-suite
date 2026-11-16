@@ -80,7 +80,8 @@ impl Rasterizer for ImageRasterizer {
 
     fn signals(&mut self, page_no: u32) -> Result<PageSignals, IngestError> {
         check_page(page_no, self.page_count)?;
-        Ok(image_signals())
+        let (img, _) = self.decode(page_no)?;
+        Ok(image_signals(&img))
     }
 
     fn page(&mut self, page_no: u32, dpi: u32, thumb_long_side_px: u32) -> Result<PageAssets, IngestError> {
@@ -89,20 +90,30 @@ impl Rasterizer for ImageRasterizer {
             image: render(&img, src_dpi, dpi, page_no)?,
             thumbnail: thumbnail(&img, src_dpi, thumb_long_side_px, page_no)?,
             text_layer: TextLayer::default(),
-            signals: image_signals(),
+            signals: image_signals(&img),
         })
     }
 }
 
 /// A raster page is one full-page image without a text layer.
-fn image_signals() -> PageSignals {
+///
+/// The zeroes are honest rather than lazy: a scan genuinely has no text layer and no
+/// embedded image objects, it *is* one image. `ink_coverage` is the one thing that can
+/// actually be measured here, and it is measured on a downscaled copy — distinguishing a
+/// blank page from a dense one does not need full resolution.
+fn image_signals(img: &DynamicImage) -> PageSignals {
+    const INK_ANALYSIS_LONG_SIDE: u32 = 600;
+    let gray = img.thumbnail(INK_ANALYSIS_LONG_SIDE, INK_ANALYSIS_LONG_SIDE).to_luma8();
     PageSignals {
         text_chars: 0,
         text_layer_coverage: 0.0,
         ocr_text_layer: false,
         image_count: 1,
         image_area_ratio: 1.0,
+        // EXIF orientation is already applied by the decoder, so what remains is a
+        // genuinely mis-oriented scan, which pixels alone cannot resolve.
         rotation_deg: 0,
+        ink_coverage: crate::preprocess::ink_coverage(&gray),
     }
 }
 

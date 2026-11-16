@@ -288,6 +288,10 @@ fn signals(page: &PdfPage, geom: &PageGeom, layer: &TextLayer, page_no: u32) -> 
         image_count: images.len() as u32,
         image_area_ratio: images.iter().map(|b| b.area()).sum::<f32>().min(1.0),
         rotation_deg: geom.rotation,
+        // Not measured for a PDF: it would mean rasterising the page twice, and a PDF
+        // already has better evidence in its text layer and image objects. 0.0 reads as
+        // "not measured", so tier 0 never calls a PDF page blank on this basis.
+        ink_coverage: 0.0,
     })
 }
 

@@ -39,8 +39,6 @@ struct Args {
     shutdown_grace: u64,
 }
 
-/// Classifier thumbnail size (vs-classify default).
-const THUMBNAIL_PX: u32 = 768;
 const MAX_PAGES: u32 = 5_000;
 
 /// Model registry and client; `page` and `doc` roles only (ingest calls no model).
@@ -105,13 +103,16 @@ async fn run_worker() -> anyhow::Result<()> {
             scratch_dir: cfg.worker.scratch_dir.clone().unwrap_or_else(std::env::temp_dir),
             bucket: cfg.blob.bucket.clone(),
             render_dpi: cfg.worker.render_dpi,
-            thumbnail_px: THUMBNAIL_PX,
+            // From `[classify]`, not a constant here: ingest renders the thumbnail and
+            // the `page` role consumes it, so the size has to come from one place or the
+            // two roles can disagree about what they are passing each other.
+            thumbnail_px: classify_config(&cfg)?.thumbnail_long_side_px,
             max_pages: MAX_PAGES,
         }),
         Role::Page => {
             let models = Models::load(&cfg, blob.clone())?;
             let steps = Arc::new(vs_steps::production_registry(models.client.clone()));
-            let classify: vs_classify::ClassifyConfig = cfg.classify.clone().try_into().map_err(|e| anyhow::anyhow!("[classify] section: {e}"))?;
+            let classify = classify_config(&cfg)?;
             let vision: Option<Arc<dyn vs_classify::VisionClassifier>> = match &cfg.stage2.classifier_model {
                 Some(model) => {
                     models.client.spec(model)?; // fail at startup, not per page
@@ -189,6 +190,12 @@ async fn run_worker() -> anyhow::Result<()> {
 }
 
 /// Render children are this binary with `render-child`.
+/// The `[classify]` section. Read by the `ingest` role for the thumbnail size and by the
+/// `page` role for everything else, so a mismatch is impossible by construction.
+fn classify_config(cfg: &Config) -> anyhow::Result<vs_classify::ClassifyConfig> {
+    cfg.classify.clone().try_into().map_err(|e| anyhow::anyhow!("[classify] section: {e}"))
+}
+
 fn render_pool(cfg: &Config) -> anyhow::Result<vs_ingest::RenderPool> {
     let w = &cfg.worker;
     let size = w.render_processes.unwrap_or_else(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2));

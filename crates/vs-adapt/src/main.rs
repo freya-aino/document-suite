@@ -197,6 +197,7 @@ async fn main() -> anyhow::Result<()> {
                 vs_ingest::PoolConfig { size, page_timeout: Duration::from_secs(60), open_timeout: Duration::from_secs(60) },
             ));
             let classify_cfg = vs_classify::ClassifyConfig::default();
+            let thumb_px = classify_cfg.thumbnail_long_side_px;
             let classifier = classifier_model.map(|model| vs_classify::Classifier {
                 cfg: classify_cfg.clone(),
                 vision: Arc::new(vs_models::classifier::VlmPageClassifier { client: client.clone(), model }),
@@ -221,7 +222,10 @@ async fn main() -> anyhow::Result<()> {
                     rounds,
                     max_pages,
                     dpi,
-                    thumb_px: vs_classify::ClassifyConfig::default().thumbnail_long_side_px,
+                    // Same source the worker reads, so a stage run rasterises thumbnails
+                    // the way production does. Scoring a classifier against a different
+                    // thumbnail size than it will see is worse than not scoring it.
+                    thumb_px,
                     parallel,
                     split,
                     keep_share: 1.0 / 3.0,
