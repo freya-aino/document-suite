@@ -1,0 +1,80 @@
+# Model registry for local development through a LiteLLM proxy (`vs-litellm-up`).
+#
+# Point the suite at this with `--models config/models.litellm.toml`. Every entry targets
+# one endpoint — the proxy on :4000 — and the proxy fans out to whatever is actually
+# serving the weights (a local vLLM, Ollama, or a hosted API), configured in
+# `config/litellm.yaml`.
+#
+# Note on `served_name` vs `provider`: when talking **to** the proxy, the model name is
+# the proxy's own alias from its `model_list`, with no prefix. `provider` exists for the
+# opposite case — pointing the suite directly at a gateway that wants a routing prefix
+# such as `hosted_vllm/`. Setting both here would ask the proxy for a model called
+# `hosted_vllm/doc-parse`, which it does not have.
+#
+# `revision` is still recorded in provenance, so keep it meaningful even locally:
+# "dev" tells you the numbers came from a laptop, not a pinned deployment.
+
+# A document-parsing VLM whose output format we already have a parser for.
+[[model]]
+id = "doc-parse"
+revision = "dev"
+family = "paddleocr_vl"
+task = ["page_parse", "region_ocr", "table", "formula"]
+endpoints = ["http://127.0.0.1:4000/v1"]
+served_name = "doc-parse"
+# A laptop runs one request at a time; the proxy queues the rest.
+max_concurrency = 2
+timeout_ms = 180000
+
+# The same weights addressed through `auto`, for checking that a model with no bespoke
+# parser still produces blocks. Swap `served_name` to any small doc VLM in litellm.yaml
+# (GLM-OCR, HunyuanOCR, LightOnOCR) and nothing else here has to change — which is the
+# whole point of the family.
+[[model]]
+id = "doc-parse-auto"
+revision = "dev"
+family = "auto"
+task = ["page_parse", "layout", "region_ocr", "table", "formula"]
+endpoints = ["http://127.0.0.1:4000/v1"]
+served_name = "doc-parse"
+max_concurrency = 2
+timeout_ms = 180000
+# Most small doc VLMs report pixels of the model input; declare it when you know, so a
+# thousandths-reporting model is not read as pixels and clamped to the page edge.
+coord_scale = "pixels"
+
+# General VLM for figure descriptions, charts and page classification.
+[[model]]
+id = "vlm-general"
+revision = "dev"
+family = "generic_json"
+task = ["figure_describe", "chart_to_table", "page_classify", "judge"]
+endpoints = ["http://127.0.0.1:4000/v1"]
+served_name = "vlm-general"
+max_concurrency = 2
+timeout_ms = 180000
+# Small local models often have a modest vision window; declaring it downscales the page
+# here instead of failing at the server.
+max_image_px = 1536
+
+[[model]]
+id = "extract-llm"
+revision = "dev"
+family = "generic_json"
+task = ["extract", "verify", "type_normalise", "entity_judge"]
+endpoints = ["http://127.0.0.1:4000/v1"]
+served_name = "extract-llm"
+max_concurrency = 2
+timeout_ms = 300000
+
+[[model]]
+id = "embed-text"
+revision = "dev"
+family = "embedding"
+task = ["embed"]
+endpoints = ["http://127.0.0.1:4000/v1"]
+served_name = "embed-text"
+max_concurrency = 4
+# Must match the served embedder, and it fixes the Qdrant collection size on first use.
+dimensions = 1024
+batch_size = 16

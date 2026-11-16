@@ -6,33 +6,120 @@ through this crate. System spec: [`docs/SPEC.md`](../../docs/SPEC.md) — decisi
 
 ## Status
 
-Implemented: the model registry, the OpenAI-compatible client with round-robin over
-endpoints, passive health ejection and jittered retries, the per-model concurrency
-semaphore, `OpenAiEmbedder`, 8 compiled-in prompts plus the doc-VLM families' native task
-prompts, **5 output parsers with captured-output fixtures**, 7 model-backed steps, and the
-tier-1 page classifier. 52 unit tests pass — the best-covered crate in the workspace.
+Implemented: the model registry with declared capabilities, the OpenAI-compatible client
+with round-robin over endpoints, passive health ejection and jittered retries, the
+per-model concurrency semaphore, `OpenAiEmbedder`, 8 compiled-in prompts plus the doc-VLM
+families' native task prompts, **6 output parsers with captured-output fixtures**
+(including `auto`), 7 model-backed steps, the tier-1 page classifier, the `url` image
+transport behind an `ImageHost`, and per-model image downscaling. 29 unit tests plus 28
+integration tests — the best-covered crate in the workspace.
+
+**A model with no bespoke parser now needs no Rust.** `family = "auto"` plus a few
+capability fields in the registry is the whole integration. See "The `auto` family".
 
 Remaining:
-- [ ] **A model with no bespoke parser needs new Rust today.** `parser_for` is a closed
-      match over 5 families, so plugging in a newly released doc-VLM means writing a
-      parser. Add a `family = "auto"` path that tries a strict JSON-schema parse, then each
-      known family, then the Markdown fallback, and reports which path won in the
-      `NodeTrace` so `vs-adapt` can score it. Goal: a new model is a registry entry, not a
-      code change.
-- [ ] `ModelSpec` cannot declare capabilities, so steps assume them. Add
-      `supports_json_schema` (today every `generic_json` step assumes guided decoding
-      works), `supports_vision` (fail fast rather than with a confusing model error),
-      `max_image_px` (per-model downscale), `provider` (proxy prefixes such as LiteLLM's
-      `hosted_vllm/`), and `coord_scale` (override bbox-convention detection).
-- [ ] `image_transport = "url"` is accepted but silently behaves like base64 — the only
-      `TODO` in the Rust tree. Upload oversized pages and send a presigned URL;
-      `BlobStore::presign_get` already exists.
-- [ ] No "Model landscape" section: there is no record of which small doc-VLMs are current,
-      how they score, or which family each maps to, so model choice is undocumented.
-- [ ] `crop_dpi` is a documented step param that is ignored (uses the page image).
-- [ ] No local-development path: every endpoint in the example registry is an internal GPU
-      host, so Stage 1 cannot be exercised on a laptop. A LiteLLM proxy config would give
-      one endpoint that this crate talks to unmodified.
+- [ ] Which parse path `auto` took is reported by a `tracing` event on the
+      `vs_models::metrics` target, not in the `NodeTrace`, because the `Step` trait has no
+      channel for per-node metadata. `vs-adapt` therefore cannot score it yet; threading
+      it properly means changing that trait signature for all 10 steps.
+- [ ] `coord_scale` is honoured only by `auto` and `generic_json`. The document-VLM
+      families hardcode their own convention, which is correct for them but means a
+      declared override is silently ignored if the family is one of those.
+- [ ] `crop_dpi` is a documented step param that is still ignored (uses the page image).
+- [ ] The model landscape below is from vendor-curated leaderboard snapshots, not from
+      our own measurement. `vs-adapt` is the thing that should decide, and it has not been
+      run on a real dataset.
+- [ ] No parser fixtures for the newer families (GLM-OCR, HunyuanOCR, LightOnOCR,
+      DeepSeek-OCR). `auto` covers them by falling back, but a bespoke parser would read
+      their structure rather than approximating it.
+
+## The `auto` family
+
+For a model the suite has no parser for. `auto` inspects the output and routes it to
+whichever known family can read it, falling back to the Markdown splitter, which never
+fails. The result is identical to naming the family outright — that equivalence is
+asserted against the captured fixtures in `tests/auto.rs`.
+
+Candidate order is decided by the *shape* of the output, not by a fixed list, and that
+matters more than it looks:
+
+| Output looks like | Tried first |
+|---|---|
+| `<\|box_start\|>` / `<\|md_start\|>` tags | `mineru` |
+| HTML with `data-bbox` | `logics_parsing` |
+| JSON with `blocks` / `regions` | `generic_json` (unmistakably our schema) |
+| JSON with `text_level` / `page_idx` / `table_body` | `mineru` |
+| JSON with `parsing_res_list` / `block_label` | `paddleocr_vl` |
+| JSON with `category` | `dots_ocr` |
+| anything else | the families in turn, then Markdown |
+
+`generic_json` goes **last** among the JSON candidates unless the payload is unmistakably
+ours, because it is the most permissive reader here: it accepts any item carrying a `type`
+or `label` field. Tried early it would claim MinerU's `content_list` and read its
+per-mille boxes as pixels — a plausible-looking result with every box in the wrong place.
+It also silently falls back to Markdown when there is no JSON at all, which is why it is
+never offered for non-JSON output: it would swallow MinerU's tagged format before MinerU's
+own parser saw it.
+
+An empty parse is not treated as a win, so a parser that reads the output and finds
+nothing lets the next candidate try.
+
+## Capabilities
+
+Declared in the registry, so integrating a model is configuration. Each is optional and
+falls back to what the family implies, which is what existing registry files rely on.
+
+| Key | Unset default | What it changes |
+|-----|---------------|-----------------|
+| `supports_json_schema` | true for `generic_json` and `auto`, false otherwise | whether `response_format: json_schema` is sent. Document VLMs are trained on fixed task strings that guided decoding fights with, hence the family-dependent default |
+| `supports_vision` | true | a step that sends an image refuses the model up front, instead of surfacing whatever the server says about an unexpected content part |
+| `max_image_px` | unset | pages whose long side exceeds it are downscaled and re-encoded as PNG before sending. Images already within the limit are not decoded at all |
+| `provider` | none | prefix a gateway needs, e.g. `hosted_vllm`, joined to the served name with `/` |
+| `coord_scale` | detected | `fractions`, `thousandths` or `pixels`, for `auto` and `generic_json`. An unrecognised value warns and falls back to detection rather than failing startup |
+
+## Model landscape
+
+Which model to serve is ultimately `vs-adapt`'s decision, measured per page class. This
+table is only a starting shortlist. **The numbers are from vendor-curated leaderboard
+snapshots (OmniDocBench v1.6 full, dated 2026.04–05) and sources disagree with each
+other**, so treat the ordering as indicative and the "family" column as the actionable
+part.
+
+| Model | Params | OmniDocBench v1.6 (full) | Family to register |
+|---|---|---|---|
+| MinerU2.5-Pro | 1.2B | 95.69 | `mineru` |
+| GLM-OCR | 0.9B | 95.15 | `generic_json` (it fills a schema you supply) or `auto` |
+| PaddleOCR-VL-1.5 | 0.9B | 94.87 | `paddleocr_vl` |
+| Youtu-Parsing | 2.5B | 93.68 | `auto` |
+| ABot-OCR | 2B | 93.3 | `auto` |
+| Logics-Parsing-v2 | 4B | 93.27 | `logics_parsing` |
+| FireRed-OCR | 2B | 93.2 | `auto` |
+| OpenDoc-0.1B | 0.1B | 90.64 | `auto` |
+| dots.ocr | 3B | 90.5 | `dots_ocr` |
+| DeepSeek-OCR 2 | 3B | 90.17 | `auto` |
+| HunyuanOCR | 1B | 89.87 | `auto` |
+| Qwen3-VL-2B | 2B | 80.05 | `generic_json` |
+
+Four of the top six are already covered by a bespoke parser. vLLM ships dedicated
+architectures for GLM-OCR, HunyuanOCR and LightOnOCR-1B, so those serve behind the
+existing client with no transport work — which, with `auto`, makes them a registry entry.
+
+Note what the parameter counts say: the leaders are all **under 1.5B**, and a 0.1B model
+scores 90. Throughput (goal G1) and model quality are not in tension here the way they
+would be with a general VLM, so the GPU tier is sized for many small models rather than
+few large ones.
+
+## Local development
+
+`config/models.litellm.toml` plus `config/litellm.yaml` run the whole model tier behind one
+LiteLLM proxy on `:4000`, started with `vs-litellm-up`. The suite talks plain OpenAI to it
+and never learns what is behind it, so swapping which weights serve a slot is a change to
+`litellm.yaml` alone.
+
+One trap worth stating: `hosted_vllm/` is LiteLLM's *internal* routing prefix and belongs
+in its `litellm_params.model`, not in this crate's registry. The suite asks the proxy for
+the proxy's own alias. `provider` is for the other case — pointing the suite straight at a
+gateway that wants the prefix itself.
 
 ## Assumptions this component rests on
 
@@ -59,7 +146,14 @@ served_name = "PaddleOCR-VL"       # optional: name the server knows the model b
 api_key_env = "SOME_KEY"           # optional: env var with a bearer token (hosted APIs)
 dimensions = 1024                  # embedding models: vector size (required for OpenAiEmbedder)
 batch_size = 32                    # embedding models: texts per /embeddings request
-image_transport = "base64"         # "url" reserved for presigned URLs of very large pages
+image_transport = "base64"         # "url" uploads and links instead of inlining base64
+
+# Capabilities — all optional; see "Capabilities" above for the defaults each falls back to.
+supports_json_schema = true        # does the server honour response_format: json_schema?
+supports_vision = true             # refuse image-sending steps up front if false
+max_image_px = 2048                # downscale pages whose long side exceeds this
+provider = "hosted_vllm"           # routing prefix a gateway needs, joined with "/"
+coord_scale = "thousandths"        # bbox convention, for `auto` / `generic_json` only
 ```
 
 - `id@revision` is the `model_ref` in provenance (`ModelSpec::model_ref`). Changing weights
@@ -75,8 +169,14 @@ image_transport = "base64"         # "url" reserved for presigned URLs of very l
 
 `OpenAiClient` — `POST {endpoint}/chat/completions` with:
 
-- images as `data:image/png;base64,…` content parts (`image_transport = "url"` is accepted
-  but currently behaves like base64 — see the TODO in `build_body`);
+- images as `data:image/png;base64,…` content parts, or, with `image_transport = "url"`,
+  links produced by an `ImageHost` — a seam the worker implements over the blob store, so
+  this crate needs no dependency on it. Uploads are content-addressed, so the same page
+  sent to two models is stored once and a retried task reuses the object. Asking for
+  `"url"` with no `ImageHost` configured warns and inlines, because inlining still works;
+- images downscaled to `max_image_px` when the model declares one. An image already within
+  the limit is not decoded, and a decode or encode failure sends the original rather than
+  failing the step;
 - `temperature = 0`, `max_tokens` from the step params;
 - structured output with `response_format: {type: "json_schema", strict: true}` where the
   step needs JSON (vLLM guided decoding);

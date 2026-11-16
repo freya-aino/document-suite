@@ -18,7 +18,7 @@ crates/
   vs-classify/            page classification
   vs-dag/                 DAG model, step trait, executor, DAG list
   vs-router/              routing table + DAG selection
-  vs-models/              model registry, vLLM client, model-backed steps
+  vs-models/              model registry, vLLM client, model-backed steps, output parsers
   vs-stitch/              page results -> coherent document
   vs-extract/             mentions, assertions, entity resolution
   vs-graph/               document graph model + builder, GraphStore trait
@@ -65,6 +65,7 @@ own in a `devenv.nix` next to its code; `devenv.yaml` imports them all:
 | `crates/vs-infra/devenv.nix` | NATS with JetStream (:4222), Garage S3 (:3900, bucket `visual-suite`, fixed dev key), `nats` CLI |
 | `crates/vs-vault/devenv.nix` | PostgreSQL 17 (:5432, db/user/pass `visual_suite`/`vs`/`vs`), sqlx-cli, `DATABASE_URL`, `vs-migrate` |
 | `crates/vs-ingest/devenv.nix` | pdfium (`PDFIUM_DYNAMIC_LIB_PATH`) |
+| `crates/vs-models/devenv.nix` | LiteLLM; `vs-litellm-up` / `vs-litellm-check` (not started by `devenv up`) |
 | `crates/vs-vectors/devenv.nix` | Qdrant (gRPC :6334, REST :6333), `VS__QDRANT__URL` |
 | `crates/vs-worker/devenv.nix` | `vs-worker-release` |
 | `deploy/firecracker/devenv.nix` | firecracker, e2fsprogs; opt-in: `devenv --profile firecracker shell` |
