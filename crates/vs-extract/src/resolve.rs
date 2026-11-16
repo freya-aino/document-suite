@@ -219,7 +219,7 @@ pub enum Resolution {
     New { entity_hk: HashKey },
 }
 
-/// Cross-document canonicalisation against HelixDB (implemented in vs-helix / vs-worker).
+/// Cross-document canonicalisation (implemented in vs-vault over Postgres + the vector store).
 #[async_trait]
 pub trait CorpusResolver: Send + Sync {
     async fn resolve(&self, tenant: &TenantId, entity: &DocEntity, context: &str) -> Result<Resolution, ExtractError>;

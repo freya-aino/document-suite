@@ -6,6 +6,7 @@ pub mod model;
 pub mod ontology;
 pub mod parse;
 pub mod resolve;
+pub mod similarity;
 pub mod tables;
 pub mod verify;
 pub mod visual;

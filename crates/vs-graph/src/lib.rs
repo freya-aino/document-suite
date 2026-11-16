@@ -1,5 +1,8 @@
 //! Document graph model and builder. See `SPEC.md`.
 
+mod store;
+pub use store::{GraphStore, RunInfo, StoreError, Vectors};
+
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};

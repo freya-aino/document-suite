@@ -40,6 +40,14 @@ impl HashKey {
         Self::of(&[tenant.as_str(), canonical_key])
     }
 
+    /// `H(heading_block_hk)` — a section is identified by the heading that opens it.
+    ///
+    /// No `run_id` part is needed: `block_hk` already contains one, so a section key is
+    /// run-scoped through its heading. A document with no headings has no sections.
+    pub fn section(heading_block: &HashKey) -> Self {
+        Self::of(&[heading_block.as_str()])
+    }
+
     /// `H(run_id | predicate | sorted argument keys)`
     pub fn assertion(run: &RunId, predicate: &str, args: &[&HashKey]) -> Self {
         let mut keys: Vec<&str> = args.iter().map(|k| k.as_str()).collect();
