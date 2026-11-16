@@ -3,7 +3,41 @@
 GPU tier: model servers reached by workers over an OpenAI-compatible HTTP API
 (decision D3). Default server: **vLLM** (assumption A1). Runs on bare metal or Kubernetes
 (assumption A4); if GPU workloads must be VM-isolated, use Cloud Hypervisor with VFIO
-passthrough (Firecracker cannot do this).
+passthrough (Firecracker cannot do this). System spec:
+[`docs/SPEC.md`](../../docs/SPEC.md) — decision D1.
+
+## Status
+
+Implemented: `docker-compose.yml` with one vLLM service per pool, `models.compose.toml`
+as the matching model registry, `k8s/` with a Deployment, Service and HPA per pool, and an
+optional Prometheus profile. See "What exists here" below for the detail.
+
+**None of it has been run against real GPUs.** The vLLM flags, memory fractions and HPA
+thresholds are reasoned starting points, not measured ones.
+
+Remaining:
+- [ ] Validate every pool actually serves on real hardware, and correct the vLLM settings
+      below from measurements rather than estimates.
+- [ ] Decide GPU hardware and the expected pages/day range — this is the open question
+      that blocks pool sizing, tensor-parallel degrees and the batch-vs-interactive split.
+- [ ] The HPA keys on the Pods metric `vllm-num-requests-waiting` through a
+      `kube-metrics-adapter` annotation; it needs porting to whichever adapter the target
+      cluster runs (prometheus-adapter or KEDA).
+- [ ] No reserved replica set for the interactive lane, so a large batch can starve
+      interactive requests at the GPU even though the task bus keeps the lanes separate.
+- [ ] Add a local-development path (a LiteLLM proxy in front of one small model), so Stage 1
+      can be exercised without this tier.
+- [ ] No sparse-embedding pool. Lexical search is planned as Qdrant sparse vectors computed
+      in-process; if BM42-quality sparse embeddings are wanted later, that encoder would
+      need a pool here.
+
+## Assumptions this component rests on
+
+| ID | Assumption |
+|----|-----------|
+| A1 | "VLLM" means vision-language models served by **vLLM**; the OpenAI-compatible client works with other servers too. |
+| A3 | NVIDIA GPUs; exact type unknown. Model pools are configured per model. |
+| A4 | Model servers run outside Firecracker (bare metal / Kubernetes). |
 
 ## Pools
 

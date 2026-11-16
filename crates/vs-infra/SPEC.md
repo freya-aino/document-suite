@@ -1,7 +1,37 @@
 # vs-infra — Specification
 
 Thin adapters to infrastructure, behind traits so the pipeline crates never touch a
-client library directly.
+client library directly. System spec: [`docs/SPEC.md`](../../docs/SPEC.md) — this crate
+owns the §5.3 lane, §5.4 reliability and §5.5 observability contracts.
+
+## Status
+
+Implemented: the NATS JetStream bus in full (stream topology, DLQ, max-deliveries
+advisories, lane fairness, message de-duplication, double acks, the exhausted-task give-up
+path), the S3/Garage blob store, and TOML + environment config. 8 unit tests pass; 4
+integration tests need NATS and Garage from `devenv up`.
+
+**`telemetry` is the one real stub in this workspace.** It initialises `tracing` and then
+logs `"OTLP / metrics exporters not wired yet"` if either is configured. Consequence: the
+workers emit no metrics and no traces at all, and only `vs-api` serves `/metrics` (through
+its own exporter). Every per-crate metric specified elsewhere in these docs is currently
+unobservable in a worker.
+
+Remaining:
+- [ ] Wire the OTLP trace exporter from `telemetry.otlp_endpoint`.
+- [ ] Serve Prometheus on `telemetry.metrics_addr` in the worker, bound to the microVM's
+      internal interface only.
+- [ ] Figure and chart crops have a key helper (`keys::crop`) that nothing calls, so crops
+      are never uploaded and the `crop://…` URIs in stored blocks do not resolve.
+- [ ] Encryption at rest for originals (§5.6) is asserted but not configured here.
+- [ ] No Kafka implementation behind `TaskBus` (A6 allows it; nothing needs it yet).
+
+## Assumptions this component rests on
+
+| ID | Assumption |
+|----|-----------|
+| A6 | Task bus is **NATS JetStream**; the `TaskBus` trait allows swapping in Kafka. |
+| A7 | Object storage is S3-compatible (Garage locally and in production). |
 
 ## Task bus (`queue`)
 
@@ -72,7 +102,7 @@ Rendered pages are reused across runs at the same DPI (no re-render on reprocess
 ## Config (`config`)
 
 TOML file + environment overrides (`VS__SECTION__KEY`). Sections: `bus`, `blob`,
-`postgres`, `helix`, `models` (path to model registry file), `classify`, `worker`,
+`postgres`, `qdrant`, `models` (path to model registry file), `classify`, `worker`,
 `stage2`, `api`, `telemetry`. Secrets only from environment. See `config/worker.example.toml`.
 
 `stage2` (`Stage2Config`, all keys defaulted) names the models of the `page` classifier and

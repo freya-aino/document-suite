@@ -3,7 +3,42 @@
 Runs in **dev/stage only**. Given datasets of documents, it generates candidate Stage 1
 DAGs, runs them, scores them per page class, and emits a **DAG list** (DAGs + routing
 table) to promote to production. This is where the "best performing workflow per
-language/content" knowledge is produced (G3).
+language/content" knowledge is produced (G3). System spec:
+[`docs/SPEC.md`](../../docs/SPEC.md).
+
+## Status
+
+Implemented: all five commands (`generate`, `run`, `score`, `select`, `promote`), template
+× slot candidate generation validated against `vs_steps::production_registry`, successive
+halving with resumable `runs.jsonl`, the page metrics (edit-distance text similarity, TEDS
+for tables, LaTeX similarity, reading order, layout F1 at IoU 0.5), the judge path for
+unlabelled data, the objective with per-class back-off, and `report.md`. 33 unit tests
+pass.
+
+**It has never been run end to end on a real dataset.** Every metric is unit-tested
+against synthetic inputs, so the machinery is proven but its outputs are not calibrated.
+
+Remaining:
+- [ ] Run it on a real labelled corpus and check the selected DAGs beat the hand-written
+      `config/dag-list.example.json`. Until that happens, "content-aware routing" (G2) is
+      an untested claim.
+- [ ] No dataset exists in-repo or is referenced; the manifest format is specified but
+      there is nothing to point it at.
+- [ ] Classifier accuracy is specified as part of adaptation ("a wrong class costs quality
+      or speed") but is not actually scored — only DAG outputs are.
+- [ ] The pre-processing steps, once they exist, must enter `search-space.example.json` so
+      candidates with and without each operation are compared per page class.
+- [ ] Reads `ClassifyConfig`'s thumbnail default while the worker uses its own hard-coded
+      constant, so stage runs and production can rasterize thumbnails differently.
+- [ ] `promote` uploads as a candidate; activation stays a manual API call by design.
+
+## Assumptions this component rests on
+
+| ID | Assumption |
+|----|-----------|
+| A13 | DAG scoring = quality floor per page class, then weighted quality vs latency vs GPU cost. |
+| A15 | Datasets may lack labels; then scoring uses agreement between strong models / a judge model, marked as lower-trust scores. |
+| A16 | `vs-adapt` searches over a registered step catalogue and its parameters (model, prompt template, DPI, crop strategy), not free-form prompts. |
 
 ```
 train → DAG list → prod upload → classification → selected DAG

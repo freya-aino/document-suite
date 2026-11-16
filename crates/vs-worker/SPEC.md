@@ -3,12 +3,33 @@
 One binary, three roles (decision D2). Runs inside Firecracker microVMs, CPU only; all
 model work goes over HTTP to the GPU tier. One microVM runs one worker process with one
 role (set via `--role` / `VS_ROLE`, passed by the fleet manager through the kernel
-command line or MMDS).
+command line or MMDS). System spec: [`docs/SPEC.md`](../../docs/SPEC.md) §5.2 and §5.4.
+
+## Status
+
+Implemented: all three roles end to end, the common pull loop over both lanes with
+heartbeats, retry with backoff, dead-lettering, the max-deliveries give-up path, graceful
+drain on SIGTERM, and the cached DAG-list provider. 14 unit tests pass, with the Stage 2
+pipeline tested over fakes for the extractor, resolver and embedder.
+
+Remaining:
+- [ ] **No metrics and no traces.** `vs-infra`'s telemetry is a stub, so a running worker
+      is observable only through its logs. Everything in §5.5 of the system spec is
+      unimplemented from a worker's point of view.
+- [ ] Sizing guidance below is a starting guess, never validated by a load test, so the
+      vCPU/RAM figures and the `tasks_per_worker_target` the autoscaler would use are
+      unverified.
+- [ ] `THUMBNAIL_PX` is hard-coded here while `vs-classify` and `vs-adapt` each have their
+      own source for the same number.
+- [ ] The `page` role passes `known_doc_type = None` unconditionally, so the document-level
+      type smoothing `vs-classify` provides for never happens.
+- [ ] Figure and chart crops produced during Stage 1 are never uploaded, so the
+      `crop://…` URIs written into page results do not resolve for a reviewer.
 
 ## Common loop
 
 ```
-connect bus, blob, postgres, helix; load model registry; build StepRegistry
+connect bus, blob, postgres, vector store; load model registry; build StepRegistry
 load active DAG list → Router (refresh on registry change notification / every 60 s)
 loop:
   pull from interactive lane (up to interactive_share of slots), then batch lane
@@ -33,7 +54,7 @@ Startup per role (`src/main.rs`): all roles connect bus, blob and Postgres. `pag
 startup error for these roles only — `ingest` calls no model), build the
 `OpenAiClient` and check at startup that every configured `[stage2]` model exists in
 the registry. `page` builds `vs_steps::production_registry`; `doc` builds the
-`HelixStore`, the `OpenAiEmbedder` and the `HelixResolver`.
+the `QdrantStore`, the `OpenAiEmbedder`, the `PgGraphStore` and the `PgCorpusResolver`.
 
 `max_in_flight` concurrent tasks per process (default 32 for `page`; most of the time
 is spent waiting on model calls, so this is much larger than the vCPU count).
@@ -130,7 +151,7 @@ extractor = LlmExtractor(ExtractConfig from [stage2]; language = spec.language;
             scientific_paper → Scientific, contract → Legal, invoice|receipt → Financial, else Generic)
             with EmbeddingTypeNormalizer(PgOntologyStore, embedder, type_match_threshold)
 ext      = extractor.extract(stitched, spec.profile)
-for every DocEntity (8 concurrent): HelixResolver::resolve(tenant, entity, context)
+for every DocEntity (8 concurrent): PgCorpusResolver::resolve(tenant, entity, context)
             context = text of the block of the entity's first mention; sets entity_hk;
             RunInfo::note_resolution collects the New entities
 graph    = vs_graph::build(stitched, ext, title); graph.validate()
@@ -151,14 +172,14 @@ counts, graph node/edge counts, vectors).
 version at doc time, else `none` (the same rule ingest applies; the two can differ only
 if a list was activated between ingest and doc, which the `sat_run` history then shows).
 
-Vault before Helix: the vault is the system of record; if the Helix write fails the
+Postgres before the vector store: the vault is the system of record; if the vector write fails the
 task is retried. Every step is idempotent on retry: page results are read-only, the
 vault writer upserts, `write_run` drops a partial earlier attempt of the same run
 first, and `doc.json` is overwritten.
 
 Error classes: too many failed pages, unparseable page results, stitch errors (no
 pages / mixed runs), extraction schema violations and graph invariant violations are
-permanent; model, embedder, ontology-store, Helix, blob and Postgres failures are
+permanent; model, embedder, ontology-store, vector-store, blob and Postgres failures are
 transient. `give_up` sets the job to `Failed` with the error.
 
 ## Sizing guidance (to validate in load tests)

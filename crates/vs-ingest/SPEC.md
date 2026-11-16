@@ -1,6 +1,44 @@
 # vs-ingest — Specification
 
 Runs once per document (worker role `ingest`) and provides the CPU-only DAG steps.
+System spec: [`docs/SPEC.md`](../../docs/SPEC.md).
+
+## Status
+
+Implemented: magic-byte format detection, the pdfium PDF rasterizer with a crash-isolated
+render-child pool (hangs killed on timeout, crashes retried once on a fresh child), the
+PNG/JPEG/TIFF rasterizer with bit-depth normalisation and WhiteIsZero inversion, EXIF
+orientation, native text-layer extraction, tier-0 page signals, classifier thumbnails, and
+3 CPU DAG steps. 15 unit tests pass, plus pool and raster integration tests.
+
+**There is no image pre-processing of any kind.** No deskew, no denoise, no binarization,
+no contrast normalisation, no dewarping, no border removal, and no pixel rotation — the
+page goes to the model exactly as rendered. `rotation_deg` is computed and then ignored.
+
+Remaining:
+- [ ] Pre-processing as DAG steps (`page.orient`, `page.deskew`, `page.denoise`,
+      `page.normalize`, `page.binarize`, `page.dewarp`, `page.crop_margins`), so
+      `vs-adapt` can score whether each one helps a given page class rather than assuming
+      it. Needs `imageproc`; the `image` crate is configured with `png`/`jpeg`/`tiff` only
+      and no filter features.
+- [ ] **Raster inputs get fabricated signals.** The non-PDF path returns hard-coded
+      constants (`text_chars: 0`, `coverage: 0.0`, `image_count: 1`,
+      `image_area_ratio: 1.0`, `rotation_deg: 0`), so every scan and photo reaches the
+      classifier with no real tier-0 evidence and is judged from its thumbnail alone.
+      At minimum: detected orientation and an ink-coverage estimate.
+- [ ] Higher-DPI re-crop from the original is not implemented (see "`figure.crop`" below),
+      so a small figure is described from page-DPI pixels.
+- [ ] `text_layer_coverage` is a stated v1 approximation; the connected-component estimate
+      on the rendered page is the documented improvement path and is unbuilt.
+- [ ] Crops stay in memory with a placeholder `crop://…` URI because `StepContext` has no
+      blob store. Nothing uploads them, so the URIs never resolve.
+- [ ] Office formats via a LibreOffice-headless converter pool (A18, post-v1).
+
+## Assumptions this component rests on
+
+| ID | Assumption |
+|----|-----------|
+| A18 | v1 formats: PDF, PNG, JPEG, TIFF (multi-page). Office formats via an optional converter in ingest. |
 
 ## Ingest flow
 

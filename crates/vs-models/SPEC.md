@@ -1,7 +1,45 @@
 # vs-models — Specification
 
 Everything that talks to a model. Workers never call model servers directly; they go
-through this crate.
+through this crate. System spec: [`docs/SPEC.md`](../../docs/SPEC.md) — decision D3
+(OpenAI-compatible access) and D7 (guided decoding).
+
+## Status
+
+Implemented: the model registry, the OpenAI-compatible client with round-robin over
+endpoints, passive health ejection and jittered retries, the per-model concurrency
+semaphore, `OpenAiEmbedder`, 8 compiled-in prompts plus the doc-VLM families' native task
+prompts, **5 output parsers with captured-output fixtures**, 7 model-backed steps, and the
+tier-1 page classifier. 52 unit tests pass — the best-covered crate in the workspace.
+
+Remaining:
+- [ ] **A model with no bespoke parser needs new Rust today.** `parser_for` is a closed
+      match over 5 families, so plugging in a newly released doc-VLM means writing a
+      parser. Add a `family = "auto"` path that tries a strict JSON-schema parse, then each
+      known family, then the Markdown fallback, and reports which path won in the
+      `NodeTrace` so `vs-adapt` can score it. Goal: a new model is a registry entry, not a
+      code change.
+- [ ] `ModelSpec` cannot declare capabilities, so steps assume them. Add
+      `supports_json_schema` (today every `generic_json` step assumes guided decoding
+      works), `supports_vision` (fail fast rather than with a confusing model error),
+      `max_image_px` (per-model downscale), `provider` (proxy prefixes such as LiteLLM's
+      `hosted_vllm/`), and `coord_scale` (override bbox-convention detection).
+- [ ] `image_transport = "url"` is accepted but silently behaves like base64 — the only
+      `TODO` in the Rust tree. Upload oversized pages and send a presigned URL;
+      `BlobStore::presign_get` already exists.
+- [ ] No "Model landscape" section: there is no record of which small doc-VLMs are current,
+      how they score, or which family each maps to, so model choice is undocumented.
+- [ ] `crop_dpi` is a documented step param that is ignored (uses the page image).
+- [ ] No local-development path: every endpoint in the example registry is an internal GPU
+      host, so Stage 1 cannot be exercised on a laptop. A LiteLLM proxy config would give
+      one endpoint that this crate talks to unmodified.
+
+## Assumptions this component rests on
+
+| ID | Assumption |
+|----|-----------|
+| A1 | "VLLM" means vision-language models served by **vLLM**. The client is OpenAI-compatible, so other servers (SGLang, LiteLLM, hosted APIs) also work. |
+| A2 | Self-hosted open-weight models by default. Hosted APIs can be registered the same way but are off unless listed. |
 
 ## Model registry
 

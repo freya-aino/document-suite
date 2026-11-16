@@ -12,6 +12,59 @@ Migrations: `migrations/0001_ops_registry.sql`, `migrations/0002_vault.sql`,
 `migrations/0003_app_role_privileges.sql`, `migrations/0004_api_ops.sql` (idempotency
 keys, job state log, page-level evidence), embedded via `sqlx::migrate!`.
 
+System spec: [`docs/SPEC.md`](../../docs/SPEC.md) — decisions D5 (insert-only history)
+and D6 (this is the single system of record *and* the graph projection).
+
+## Status
+
+Implemented: the full raw vault (now 9 hubs, 12 links, 12 satellites), the `ops` schema
+(jobs, batches, page tasks, state log, idempotency keys), the `registry` schema (DAG
+lists, entity and relation types), role separation between the migration owner and the
+runtime role, `write_document`, `write_page`, `write_stage2`, the `v_current_run` view,
+the graph layer (`PgGraphStore`) and corpus entity resolution (`PgCorpusResolver`).
+13 unit tests and 10 Postgres integration tests.
+
+This is now the suite's only graph store (D6), and it was already richer than the one it
+replaced: it keeps **both** span and region evidence, full `load_dts` history, block
+provenance, and the DAG and model hubs — none of which the graph projection held.
+
+Remaining:
+- [ ] **The graph write path is split in two.** `write_stage2` projects entities,
+      assertions, mentions and evidence from `StitchedDocument` + `ExtractionOutput`,
+      while `PgGraphStore::write_run` writes sections, `related` and `cites` from the
+      `DocGraph`. Two code paths therefore decide what a document contains, which is
+      exactly the divergence D6 exists to prevent. `write_stage2` should take the
+      `DocGraph` and both should write from that one structure.
+- [ ] **The judge cannot see a candidate's context sentence.** `sat_entity_label` has no
+      `context` column, so `PgCorpusResolver`'s judge sees only the stored name, type and
+      aliases — the same blind spot the previous store had, and the one Postgres could
+      actually fix. It needs the column plus the context threaded into `write_stage2`.
+- [ ] **Nothing has exercised `PgGraphStore` against a live Postgres.** Its column mapping
+      is unit-tested, but migration `0005_graph.sql` has never been applied and no
+      integration test writes a section tree or a `related` edge.
+- [ ] Document the read contract for the external RAG service — it now queries this schema
+      and Qdrant directly, so tenant scoping and current-run filtering become the caller's
+      responsibility. `v_current_run` is how it finds the current run.
+- [ ] `Cites` edges have a table (`lnk_block_entity_cites`) but `vs-graph` never emits the
+      edge, so it is always empty. See `vs-graph`'s status.
+- [ ] High-volume satellites are not partitioned (see "Performance notes").
+- [ ] Business vault and information marts (PIT and bridge tables) are out of scope for
+      v1; the raw vault is shaped so they can be derived later.
+
+Deliberate non-goals here:
+- `Next` (reading order) has no link table and needs none: it is reconstructible from
+  `sat_block_content.global_order` plus `furniture`, so a table would be a second,
+  divergeable copy.
+- No vectors (D9) — they live in [`vs-vectors`](../vs-vectors/SPEC.md).
+
+## Assumptions this component rests on
+
+| ID | Assumption |
+|----|-----------|
+| A5 | Relational DB is **PostgreSQL** (`ops`, `registry` and `vault` schemas). Schema names are fixed, not configurable: the suite expects to own them in whichever Postgres instance it is pointed at. |
+| A10 | New entity/relation types are normalised automatically; new types get `review_status = pending`. |
+| A12 | Reprocessing adds new versions (D5); readers that want one consistent view use `v_current_run`. |
+
 ## Roles and migrations
 
 | Role | Used by | Privileges |
@@ -160,7 +213,8 @@ connect to the test database as `vs_app`. Run with
 
 ## Performance notes
 
-- `vault` tables partitioned by `load_dts` month for satellites with high volume
-  (`sat_block_content`, `sat_mention`).
+- High-volume satellites (`sat_block_content`, `sat_mention`) **should** be partitioned by
+  `load_dts` month. This is not implemented — no migration declares a partition — so it is
+  a sizing decision still to be made, not a property of the current schema.
 - Workers write through a bounded pool (`postgres.max_connections` per worker); with many
   microVMs, put PgBouncer (transaction mode) in front.

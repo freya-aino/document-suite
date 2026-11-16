@@ -1,7 +1,19 @@
 # vs-router — Specification
 
 Chooses the Stage 1 DAG for each page. This is where most of the throughput gain comes
-from: the routing table encodes which pages can skip expensive steps.
+from: the routing table encodes which pages can skip expensive steps. System spec:
+[`docs/SPEC.md`](../../docs/SPEC.md) §5.2 — this crate is the "skipping work" lever.
+
+## Status
+
+Implemented: the `DagList` bundle, load-time validation against a step catalogue,
+specificity-then-score rule selection, the low-confidence fallback and per-call pinning.
+5 unit tests pass. No known gaps.
+
+Remaining:
+- [ ] Routing decisions are not counted by rule id, so there is no way to see in
+      production which rules actually fire (the metric is specified below but the
+      telemetry exporter it would feed is itself a stub — see `vs-infra`).
 
 ## DAG list (the deployable bundle)
 

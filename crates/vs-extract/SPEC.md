@@ -3,7 +3,39 @@
 Stage 2 information extraction over a `StitchedDocument`: entities, relations (binary
 and n-ary), their evidence, and entity resolution. The quality bar is **scientific
 papers**: method/task/dataset/metric/result relations, comparisons, citations, with
-every assertion grounded in a quoted span.
+every assertion grounded in a quoted span. System spec:
+[`docs/SPEC.md`](../../docs/SPEC.md) — goal G5 (graph, not flat extraction) and G6
+(open-schema extraction).
+
+## Status
+
+Implemented: section-scoped extraction windows, grounded JSON parsing with a
+hallucination guard that locates every model-provided quote in the block text,
+embedding-based ontology type normalisation, in-document entity resolution, batched
+assertion verification, bibliography parsing with citation linking, result-table mining,
+and visual relations from figure descriptions. 31 unit tests pass.
+
+Remaining:
+- [ ] **Quality has never been measured.** "Quality targets" below states a grounding rate
+      ≥ 0.97 and per-frame precision and recall targets; none of them has been run against
+      a labelled dataset, so the numbers below are aspirations, not results.
+- [ ] `CorpusResolver` is implemented outside this crate, now as
+      `vs_vault::PgCorpusResolver` over Postgres and Qdrant. The trait is store-neutral,
+      so this crate did not change when the store did — keep it that way.
+- [ ] Stage 2 is one fixed pipeline with per-document-type prompt profiles; it is not part
+      of the `vs-adapt` search (A17), so unlike Stage 1 nothing measures whether a
+      different Stage 2 shape would do better.
+- [ ] The document type that selects the prompt profile comes from a plurality vote over
+      page types in `vs-worker`, not from a document classifier — see `vs-classify`.
+- [ ] Tables reach extraction as opaque HTML, so a cell value cannot be cited
+      individually; result-table mining re-parses that HTML with its own heuristics.
+
+## Assumptions this component rests on
+
+| ID | Assumption |
+|----|-----------|
+| A10 | New entity/relation types are normalised automatically; new types get `review_status = pending` for optional later review. |
+| A17 | Stage 2 is one pipeline in v1 with per-document-type prompt profiles; Stage 2 search is post-v1. |
 
 ## Output model
 
@@ -86,7 +118,7 @@ Local ids are prefixed by their source so they are unique across a document:
    rewritten to the surviving `local_id`.
 8. **Type normalisation** (`TypeNormalizer`): each distinct raw entity type → `type_id`, each
    distinct predicate (with the roles seen for it) → `predicate_id`.
-9. **Corpus resolution** (`CorpusResolver`, implemented in vs-helix): not called by
+9. **Corpus resolution** (`CorpusResolver`, implemented in vs-vault): not called by
    `extract`; the worker runs it afterwards and sets `entity_hk`.
 
 Model or JSON errors fail the whole extraction (`ExtractError::Model` / `Schema`) so the
@@ -163,7 +195,7 @@ LlmExtractor::with_backend(backend: Arc<dyn ChatBackend>, config, normalizer)  /
 
 `ChatBackend` abstracts the chat side of `OpenAiClient` (`model_ref(model)`, `chat(model,
 req)`) so the orchestration is unit-tested with a fake. Corpus-resolution settings
-(`link_threshold`, `judge_band`, `embedding_model`) belong to the resolver (vs-helix).
+(`link_threshold`, `judge_band`, `embedding_model`) belong to the resolver (vs-vault).
 
 ## Quality targets (to measure in vs-adapt)
 

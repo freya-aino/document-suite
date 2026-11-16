@@ -3,6 +3,29 @@
 First step of Stage 2. Turns the independent `PageResult`s of one document into one
 `StitchedDocument`. Stage 1 works per page for parallelism; stitching repairs everything
 that page boundaries break. It is **CPU-only and deterministic** (no model calls in v1).
+System spec: [`docs/SPEC.md`](../../docs/SPEC.md).
+
+## Status
+
+Implemented: global reading order, furniture detection, paragraph and table continuation
+links, caption pairing, the section tree, and multilingual cross-references (9 language
+label tables). 12 unit tests pass.
+
+Remaining:
+- [ ] **Multi-column flow repair** is not implemented, so a two-column page whose model
+      returned interleaved reading order stays interleaved. The most common structural
+      failure on scientific papers — the format this suite sets its quality bar by.
+- [ ] Caption pairing ignores the above/below preference this spec describes below and the
+      horizontal-overlap test: the code only minimises absolute vertical-centre distance,
+      so a caption between two figures can attach to the wrong one.
+- [ ] Heading level falls back to numbering (`2.3.1`) only; font size from the text layer
+      is not used, so unnumbered headings all land at level 1.
+- [ ] Footnote anchoring: `Footnote` blocks are ordered but never linked to the reference
+      marker in the body text.
+- [ ] No intra-page structure beyond these links — see `vs-graph`'s status for the region
+      containment, column, form key/value and table cell work.
+- [ ] Link confidences (0.4–0.9) are hand-set constants, never validated against ground
+      truth, and nothing downstream thresholds on them.
 
 ## Input / output
 
@@ -79,5 +102,6 @@ Missing pages break continuation links across the gap; they are never guessed.
 
 ## Post-v1
 
-VLM-assisted judgement for low-confidence links (`blocks.verify`-style), footnote
-anchoring, multi-column flow repair across pages.
+VLM-assisted judgement for low-confidence links (`blocks.verify`-style) — which would make
+this crate non-deterministic, so it stays a deliberate v1 exclusion. Footnote anchoring and
+multi-column flow repair are now scheduled; see `## Status`.

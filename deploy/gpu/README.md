@@ -16,7 +16,7 @@ endpoints that serve it, and `vs-models` round-robins over them. Design: [SPEC.m
 The weights are placeholders for the candidates `vs-adapt` evaluates; swap the Hugging
 Face id and pin `--revision` / `MODEL_REVISION`. **The registry's `revision` must match
 what is served** (it is recorded in provenance). Changing the `embed` model changes the
-vector space: vs-helix needs a new vector index, back-filled, before switching.
+vector space: the vector store needs a new collection, back-filled, before switching.
 
 ## How `config/models.toml` maps to the services
 

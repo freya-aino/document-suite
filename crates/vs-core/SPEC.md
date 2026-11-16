@@ -1,6 +1,17 @@
 # vs-core — Specification
 
 Shared domain types used by every other crate. No I/O, no async, no heavy dependencies.
+Cross-cutting contracts: [`docs/SPEC.md`](../../docs/SPEC.md) §5.1.
+
+## Status
+
+Implemented: every type and hash-key constructor below, with golden-value tests for key
+stability. 7 unit tests pass. This crate is stable — it is the bottom of the dependency
+graph, so a breaking change here is a breaking change everywhere.
+
+Remaining:
+- [ ] `LanguageTag` validation is loose (non-empty, ASCII, `-` separated); it accepts
+      strings that are not valid BCP-47. Tighten it or document the looseness as intended.
 
 ## Responsibilities
 
@@ -16,7 +27,20 @@ Shared domain types used by every other crate. No I/O, no async, no heavy depend
 1. **Hash keys**: `HashKey::of(&[parts])` = lowercase hex SHA-256 of the parts, each
    trimmed, joined with `|`. Empty parts are encoded as an empty string, never skipped,
    so `["a", "", "b"]` ≠ `["a", "b"]`. Constructors for each key type live here so every
-   crate computes them the same way (see `docs/SPEC.md` §5.1).
+   crate computes them the same way. The formulas, with `H` = `HashKey::of`:
+
+   | Key | Formula | Consequence |
+   |-----|---------|-------------|
+   | `document_hk` | `H(tenant \| sha256(original bytes))` | re-uploading the same file is idempotent |
+   | `page_hk` | `H(document_hk \| page_no)` | stable across runs |
+   | `block_hk` | `H(page_hk \| run_id \| block_index)` | blocks belong to a run; a new DAG gives new blocks |
+   | `section_hk` | `H(heading_block_hk)` | run-scoped through its heading block |
+   | `entity_hk` | `H(tenant \| canonical_entity_key)` | shared across runs and documents |
+   | `assertion_hk` | `H(run_id \| predicate \| sorted argument keys)` | per-run, so reprocessing re-asserts |
+
+   Note the asymmetry: `document_hk`, `page_hk` and `entity_hk` outlive a run, while
+   `block_hk` and `assertion_hk` are scoped to one. Stores rely on this when dropping a
+   partial run without touching shared rows.
 2. **Bounding boxes** are normalised to `[0, 1]` relative to the page (origin top-left).
    Pixel coordinates are recovered with the page's render size. This keeps boxes stable
    when pages are re-rendered at another DPI.

@@ -1,7 +1,37 @@
 # deploy/firecracker — Specification
 
 CPU tier: `vs-worker` processes in Firecracker microVMs. One microVM = one worker
-process = one role.
+process = one role. System spec: [`docs/SPEC.md`](../../docs/SPEC.md) — decision D1.
+
+## Status
+
+Implemented: `build-rootfs.sh` (guest image with the glibc worker and its shared
+libraries), `init.sh` (guest init, MMDS config fetch), `vm-config.example.json`, and
+`firecracker-run.sh` to boot one VM locally with a TAP device and NAT egress.
+
+**This is a single-VM development path, not a deployable fleet.** Nothing here has been
+run against real hardware in CI or staging, because there is no CI.
+
+Remaining:
+- [ ] **No host agent**, so there is no way to run more than one microVM per host on
+      purpose. Deliberately out of scope for this repo (options: flintlock,
+      firecracker-containerd, or a small agent over the Firecracker API), but it means the
+      CPU tier is not deployable as specified until it exists.
+- [ ] **No autoscaler.** "Fleet management" below specifies the target-count formula and
+      the GPU-latency cap on page workers; nothing computes either.
+- [ ] No snapshot-based warm start, so the sub-second boot the design relies on is
+      unproven.
+- [ ] Per-microVM network egress allow-lists and Firecracker rate limiters are specified
+      under "Networking" but not configured in `vm-config.example.json`.
+- [ ] The guest init is settled as `init.sh`; "Guest image" below still presents it as an
+      open either/or with running the worker as PID 1.
+- [ ] Sizing figures are initial guesses pending a load test (see `vs-worker`).
+
+## Assumptions this component rests on
+
+| ID | Assumption |
+|----|-----------|
+| A4 | Model servers run outside Firecracker (bare metal / Kubernetes), because Firecracker has no GPU passthrough. Cloud Hypervisor with VFIO is the option if GPU workloads must be VM-isolated. |
 
 ## Why Firecracker here (and not for models)
 
@@ -80,7 +110,7 @@ add queueing on the GPUs).
 ## Networking
 
 Each microVM gets a TAP device with egress allowed only to: NATS, Postgres (PgBouncer),
-object store, HelixDB, model endpoints, OTLP collector. Rate limits per microVM with
+object store, Qdrant, model endpoints, OTLP collector. Rate limits per microVM with
 Firecracker's built-in limiter (network and block) to protect shared services.
 
 ## Sizing (initial)

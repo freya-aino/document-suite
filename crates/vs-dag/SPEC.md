@@ -2,7 +2,24 @@
 
 Stage 1 workflows. A **DAG** describes how one page is turned into blocks: which steps
 run, in what order, with which parameters. DAGs are static data (JSON); they are produced
-by `vs-adapt` and selected per page by `vs-router`.
+by `vs-adapt` and selected per page by `vs-router`. System spec:
+[`docs/SPEC.md`](../../docs/SPEC.md) (reliability contract: §5.4).
+
+## Status
+
+Implemented: the DAG model, load-time validation with unreachable-node pruning, the
+level-parallel executor with per-node timeouts and optional-node fallback, artefact kinds,
+and `NodeTrace` provenance. 6 unit tests pass.
+
+Remaining:
+- [ ] `blocks.verify` is listed in the step catalogue below but **is not implemented and
+      not registered anywhere** — the only gap in the catalogue (10 of 11 kinds exist).
+      Implement it or drop the row.
+- [ ] `Artifact::empty` has no empty form for `PageImage`, so a step whose output is a
+      page image cannot be `optional` in the usual way. Pre-processing steps are exactly
+      that shape, so the step contract needs a documented pass-through-on-failure rule.
+- [ ] No artefact kind carries region relationships; `LayoutRegion` has no id and no
+      parent, so a step cannot express that one region contains another.
 
 ## Data model
 

@@ -2,6 +2,41 @@
 
 Turns a page into a `PageProfile`, the only page information the router uses. It must be
 **cheap**: classification cost is paid on every page, whatever DAG runs afterwards.
+System spec: [`docs/SPEC.md`](../../docs/SPEC.md).
+
+## Status
+
+Implemented: tier 0 rules, the tier 1 `VisionClassifier` trait (implemented in
+`vs-models` as `VlmPageClassifier`), and `combine()`. 3 unit tests pass. Pure functions,
+no I/O — the worker calls `tier0` and `combine` directly.
+
+Remaining:
+- [ ] **Document-level classification does not exist.** The only aggregation is
+      `dominant_doc_type` in `vs-worker/src/doc.rs`, a plurality vote (ties go to the type
+      seen first) whose result feeds only the extraction prompt profile and **is never
+      persisted**. It should be a confidence-weighted, first-page-weighted function here,
+      and the result should be stored.
+- [ ] **`known_doc_type` is dead code.** `combine()` takes it, and "Two tiers" below
+      promises document-level type inheritance, but `vs-worker/src/page.rs` passes a
+      literal `None` with the comment "pages are independent in v1". Nothing ever supplies
+      a value, so cross-page smoothing never happens and text-only born-digital pages get
+      `DocType::Other` forever.
+- [ ] `thumbnail_long_side_px` here is **not** the number ingest uses: `vs-worker` has its
+      own hard-coded `THUMBNAIL_PX = 768`, and `vs-adapt` reads this default. Three
+      sources for one value; collapse to one config key.
+- [ ] Tier 0 gets no real signal for non-PDF inputs — `vs-ingest`'s raster path returns
+      hard-coded constants, so every scan and photo is judged from its thumbnail alone.
+- [ ] `confidence` is never calibrated against the labelled datasets `vs-adapt` runs, so
+      `min_classifier_confidence` in the routing table is tuned blind.
+- [ ] Language/script detection: the caller's hint is always trusted (assumption A19).
+- [ ] Rotation is detected (`rotation_deg`) and recorded but never acted on; nothing
+      rotates pixels. Correction belongs in a `page.orient` pre-processing step.
+
+## Assumptions this component rests on
+
+| ID | Assumption |
+|----|-----------|
+| A14 | Page classifier v1 = rules (tier 0) + one small vision classifier (tier 1). |
 
 ## Two tiers
 
@@ -63,5 +98,6 @@ is re-OCR'd. Set `trust_ocr_layer = true` per tenant to reuse it.
 
 ## Post-v1
 
-Language/script detection (replacing the hint as an option), rotation correction model,
-document-level type smoothing across pages.
+Confidence calibration against `vs-adapt`'s labelled runs, and a script-detection model
+for documents whose language hint is absent or wrong. Everything else once listed here
+(rotation correction, document-level smoothing) is now scheduled — see `## Status`.

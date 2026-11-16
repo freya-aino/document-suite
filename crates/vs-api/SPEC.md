@@ -2,23 +2,40 @@
 
 The suite's ingress. Your existing front-end service-api calls it. **Stateless**: all state
 is in Postgres (`ops`), the object store and the task bus, so it scales horizontally on
-request rate, independently of the workers.
+request rate, independently of the workers. System spec:
+[`docs/SPEC.md`](../../docs/SPEC.md) §5.6 (security) and §5.3 (lanes).
+
+## Status
+
+Implemented: every endpoint below, multipart and JSON upload, `Idempotency-Key` replay,
+interactive back-pressure (`429` with `Retry-After`), source-URI tenant-prefix checks,
+DAG-list admin with `vs_router::Router::load` validation, and `/metrics`. 4 unit tests
+pass — thin coverage for ~960 lines of HTTP surface.
+
+Remaining:
+- [ ] **No auth.** The tenant comes from the `X-VS-Tenant` header (`[A-Za-z0-9_-]+`) and
+      admin rights from `X-VS-Admin: 1`, both of which any caller can set. This is the
+      largest open item in the suite: it is the only thing standing between two tenants'
+      documents. Keep the API on a trusted network until it is replaced. The intended
+      design is mTLS or a JWT from your service-api — **still to be decided**.
+- [ ] Test coverage: no test exercises idempotency replay, back-pressure, the batch path,
+      the source-URI prefix check, or DAG-list activation. These are exactly the paths
+      where a regression silently loses or mis-attributes work.
+- [ ] No rate limiting per tenant; a single tenant can fill the batch lane.
+- [ ] No Kafka bus (inherited from `vs-infra`; nothing needs it yet).
+
+## Assumptions this component rests on
+
+| ID | Assumption |
+|----|-----------|
+| A19 | The language hint (BCP-47) applies to all pages of a document in v1; it is never detected. |
+| A20 | Per-call options: `language` (required), `priority`, optional `profile` (`quality`/`balanced`/`fast`), optional DAG-list version pin. |
 
 ## Endpoints (v1)
 
 All endpoints are tenant-scoped; the tenant comes from the auth token (mTLS or JWT from
-your service-api — to be decided), never from the body.
-
-**Current state:** until auth is decided, the tenant is read from the `X-VS-Tenant`
-header (`[A-Za-z0-9_-]+`), which any caller can set. Keep the API on a trusted network
-until this is replaced.
-
-Admin routes (DAG lists) additionally require `X-VS-Admin: 1` — the same kind of
-placeholder until roles come from the auth token.
-
-Implemented: every endpoint below, multipart and JSON upload, `Idempotency-Key`,
-interactive back-pressure (`429`), `/metrics`. Not yet: auth (tenant and admin come from
-headers), Kafka bus.
+your service-api — to be decided), never from the body. See `## Status` for what that
+means today.
 
 ### `POST /v1/documents`
 

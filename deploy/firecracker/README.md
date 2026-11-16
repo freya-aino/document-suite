@@ -41,7 +41,7 @@ busybox keeps the image small. The build needs no root: `mkfs.ext4 -d` populates
 image from a directory.
 
 The baked `worker.toml` holds everything that is not secret (NATS, object store,
-Postgres URL without password, Helix URL, model registry path). Secrets arrive via MMDS.
+Postgres URL without password, Qdrant URL, model registry path). Secrets arrive via MMDS.
 
 ## 2. Boot one VM locally
 
@@ -82,7 +82,7 @@ powers off when the worker exits (`reboot=k panic=1` makes Firecracker exit).
    render processes), and powers off when the worker exits.
 
 Everything the worker needs is reachable from the TAP network only: NATS, PgBouncer,
-object store, HelixDB, the GPU tier's endpoints and the OTLP collector. No SSH, no
+object store, Qdrant, the GPU tier's endpoints and the OTLP collector. No SSH, no
 inbound ports.
 
 ## Driving the API by hand

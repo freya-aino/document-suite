@@ -1,10 +1,13 @@
 # Visual Suite — System Specification
 
-Version: 0.1 (draft) · Status: scaffold · Date: 2026-11-06
+Version: 0.2 · Status: implemented, storage migration in progress · Date: 2026-11-16
 
-This is the top-level spec. Each component has its own `SPEC.md` next to its code
-(see [Component map](#4-component-map)). If a component spec and this file disagree,
-this file wins until the component spec is updated.
+This is the top-level spec: purpose, architecture, the component map, the cross-cutting
+contracts, and the decisions. Each component has its own `SPEC.md` next to its code
+(see [Component map](#4-component-map)), and **that spec is where the component's detail,
+its assumptions and its `## Status` checklist of remaining work live**. If a component
+spec and this file disagree on a cross-cutting contract, this file wins; on component
+detail, the component spec wins.
 
 ---
 
@@ -14,8 +17,9 @@ Extract as much traceable information as possible from heterogeneous documents
 (born-digital PDFs, scans, photos, handwriting, embedded images, tables, formulas,
 charts) and load it into:
 
-- a **relational Data Vault 2.0** warehouse (the system of record and audit trail), and
-- **HelixDB** (graph + vector store) for traversal and retrieval by the existing RAG service.
+- a **relational Data Vault 2.0** warehouse in Postgres — the system of record, the audit
+  trail, and the document graph the existing RAG service traverses, and
+- **Qdrant** for the dense and sparse vectors that same service searches.
 
 Every stored fact must be traceable back to a page region, the workflow (DAG) that
 produced it, and the exact model and prompt version used.
@@ -69,12 +73,13 @@ produced it, and the exact model and prompt version used.
                    │            └──────────────────────┘              │
                    ▼                                                  ▼
        ┌──────────────────────┐   ┌───────────────┐   ┌──────────────────────┐
-       │ Postgres             │   │ Object store  │   │ HelixDB              │
-       │  ops schema (jobs)   │   │ (S3-compat.)  │   │ graph + vectors      │
-       │  vault schema (DV2.0)│   │ originals,    │   │ ← RAG service reads  │
-       │  registry (DAG lists)│   │ page images,  │   └──────────────────────┘
-       └──────────────────────┘   │ page results  │
-                                  └───────────────┘
+       │ Postgres             │   │ Object store  │   │ Qdrant               │
+       │  ops schema (jobs)   │   │ (S3-compat.)  │   │ dense + sparse       │
+       │  vault schema (DV2.0)│   │ originals,    │   │ vectors              │
+       │   = history + graph  │   │ page images,  │   └──────────┬───────────┘
+       │  registry (DAG lists)│   │ page results  │              │
+       └──────────┬───────────┘   └───────────────┘              │
+                  └──────────── RAG service reads ───────────────┘
 ```
 
 **Key decision D1:** Firecracker has no GPU passthrough, so microVMs run CPU work only
@@ -101,19 +106,14 @@ upload(lang hint, priority, [profile], [dag_list pin])
                 extract mentions + assertions (binary and n-ary) with evidence
                 resolve entities (in-document, then cross-corpus canonicalisation)
                 embed blocks / figures / entities
-                write vault (entities, assertions, evidence) + HelixDB (graph, vectors)
+                write vault (graph, entities, assertions, evidence) + Qdrant (vectors)
 ```
 
 ### 3.2 Adaptation flow (dev / stage only)
 
-```
-datasets (+ optional ground truth)
-  └─▶ vs-adapt generate   : candidate DAGs from step catalogue × search space
-  └─▶ vs-adapt run        : execute candidates on stage cluster
-  └─▶ vs-adapt score      : per page class: quality metrics, latency, GPU-seconds
-  └─▶ vs-adapt select     : best DAG per class under objective → DAG list + routing table
-  └─▶ promote (manual)    : DAG list becomes active in prod registry
-```
+Datasets → candidate DAGs → scored per page class → the winners promoted as a versioned
+DAG list. The five commands and their inputs and outputs are specified once, in
+[`vs-adapt/SPEC.md`](../crates/vs-adapt/SPEC.md) "Commands".
 
 ## 4. Component map
 
@@ -127,12 +127,12 @@ datasets (+ optional ground truth)
 | `vs-dag` | lib | DAG model, step trait, validation, executor | [SPEC](../crates/vs-dag/SPEC.md) |
 | `vs-router` | lib | DAG list bundle (DAGs + routing table), DAG selection per page | [SPEC](../crates/vs-router/SPEC.md) |
 | `vs-models` | lib | Model registry, OpenAI-compatible client, model-backed steps, output parsers | [SPEC](../crates/vs-models/SPEC.md) |
-| `vs-steps` | lib | Production `StepRegistry` shared by worker, API and vs-adapt | — |
+| `vs-steps` | lib | Production `StepRegistry` shared by worker, API and vs-adapt | [SPEC](../crates/vs-steps/SPEC.md) |
 | `vs-stitch` | lib | Page results → one coherent document | [SPEC](../crates/vs-stitch/SPEC.md) |
 | `vs-extract` | lib | Mentions, assertions, entity resolution | [SPEC](../crates/vs-extract/SPEC.md) |
 | `vs-graph` | lib | Document graph model and builder | [SPEC](../crates/vs-graph/SPEC.md) |
-| `vs-vault` | lib | Data Vault 2.0 writer + migrations | [SPEC](../crates/vs-vault/SPEC.md) |
-| `vs-helix` | lib | HelixDB writer (nodes, edges, vectors) | [SPEC](../crates/vs-helix/SPEC.md) |
+| `vs-vault` | lib | Data Vault 2.0 writer + migrations; graph projection and corpus entity resolution | [SPEC](../crates/vs-vault/SPEC.md) |
+| `vs-vectors` | lib | Vector store trait + Qdrant implementation (dense and sparse) | [SPEC](../crates/vs-vectors/SPEC.md) |
 | `vs-worker` | bin | Worker process with roles `ingest`, `page`, `doc` | [SPEC](../crates/vs-worker/SPEC.md) |
 | `vs-adapt` | bin | Workflow generation, scoring, selection | [SPEC](../crates/vs-adapt/SPEC.md) |
 | `deploy/firecracker` | ops | microVM image and fleet | [SPEC](../deploy/firecracker/SPEC.md) |
@@ -141,60 +141,69 @@ datasets (+ optional ground truth)
 
 Dependency direction (no cycles):
 `vs-core` ← `vs-infra`, `vs-dag` ← `vs-router`, `vs-classify`, `vs-ingest`, `vs-models`
-← `vs-stitch` ← `vs-extract` ← `vs-graph` ← `vs-vault`, `vs-helix` ← `vs-worker`, `vs-api`, `vs-adapt`.
+← `vs-stitch` ← `vs-extract` ← `vs-graph` ← `vs-vectors` ← `vs-vault` ← `vs-worker`, `vs-api`, `vs-adapt`.
+
+`vs-graph` owns the `GraphStore` trait and the `DocGraph` both stores are written from, so
+it sits below every store crate and depends on none of them.
 
 ## 5. Cross-cutting concerns
+
+These are the contracts every component must honour. How each component honours them is
+in its own `SPEC.md`.
 
 ### 5.1 Identifiers and provenance
 
 - **Hash keys** follow Data Vault conventions: `SHA-256` over normalised business keys
-  joined with `|`, hex-encoded. Defined once in `vs-core::ids`.
-  - `document_hk = H(tenant | sha256(original bytes))` → re-uploading the same file is idempotent.
-  - `page_hk = H(document_hk | page_no)`
-  - `block_hk = H(page_hk | run_id | block_index)` (blocks belong to a run; a new DAG gives new blocks)
-  - `entity_hk = H(tenant | canonical_entity_key)`
-  - `assertion_hk = H(run_id | predicate | sorted argument keys)`
+  joined with `|`, hex-encoded. Defined once in `vs-core::ids`; the formula for each key
+  type is in [`vs-core/SPEC.md`](../crates/vs-core/SPEC.md).
 - **Run** = one execution of the pipeline for one document under one DAG-list version.
   `run_id` is a UUIDv7.
-- **Provenance** (attached to every block, mention and assertion):
+- **Provenance** is attached to every block, mention and assertion:
   `run_id, dag_id@version, node_id, step_kind, model_id@revision, prompt_id@hash,
   params_hash, started_at, duration_ms, confidence`.
-- **Evidence**: assertions point to `(block_hk, char_start, char_end)` spans and, for
-  visual evidence, `(page_hk, bbox)`.
+- **Evidence** (A9): assertions point to `(block_hk, char_start, char_end)` spans and, for
+  visual evidence, `(page_hk, bbox)`. Every stored fact traces back to a page region.
 
 ### 5.2 Scaling and throughput
 
-- API is stateless; scale on request rate.
-- Workers scale on JetStream consumer lag, separately per role and per lane.
-- GPU pools scale per model on queue depth and batch fill.
-- Page tasks are the unit of parallelism. Model calls are batched across pages and
-  documents by vLLM continuous batching; workers keep many requests in flight.
-- **Skipping work is the main lever**: born-digital pages with a good text layer skip
-  OCR; pages without images skip figure steps; and so on. The routing table encodes this.
+Page tasks are the unit of parallelism, and **skipping work is the main lever** — the
+routing table encodes which pages may skip which steps. Who scales on what:
+[`vs-api`](../crates/vs-api/SPEC.md) on request rate;
+[`vs-worker`](../crates/vs-worker/SPEC.md) and
+[`deploy/firecracker`](../deploy/firecracker/SPEC.md) on JetStream lag per role and lane;
+[`deploy/gpu`](../deploy/gpu/SPEC.md) on queue depth and batch fill per model pool;
+[`vs-router`](../crates/vs-router/SPEC.md) decides what is skipped.
 
 ### 5.3 Priority lanes
 
-Two lanes: `interactive` (small batches, reserved worker share, shorter timeouts) and
-`batch` (everything else). Same code path; different streams and consumers.
+Two lanes, `interactive` and `batch`: the same code path over different streams and
+consumers. Stream topology and lane fairness:
+[`vs-infra`](../crates/vs-infra/SPEC.md). Admission and back-pressure:
+[`vs-api`](../crates/vs-api/SPEC.md).
 
 ### 5.4 Reliability
 
-- At-least-once delivery; all writes idempotent via hash keys and `ON CONFLICT DO NOTHING`.
-- Page task retries with backoff (default 3), then dead-letter. A document with failed
-  pages proceeds to Stage 2 as `partial` when the failed fraction is ≤ a threshold (default 5 %).
-- Every step has a timeout taken from the DAG node or step default.
+Delivery is at-least-once, so **every write must be idempotent** — through hash keys and
+`ON CONFLICT DO NOTHING`. Retries, dead-lettering and the max-deliveries give-up path:
+[`vs-infra`](../crates/vs-infra/SPEC.md). Partial-document threshold:
+[`vs-worker`](../crates/vs-worker/SPEC.md). Per-step timeouts:
+[`vs-dag`](../crates/vs-dag/SPEC.md). Insert-only history:
+[`vs-vault`](../crates/vs-vault/SPEC.md).
 
 ### 5.5 Observability
 
-`tracing` spans per job → page → node → model call; OpenTelemetry export; Prometheus
-metrics for per-step latency, GPU-seconds per page, tokens, skip rates, routing decisions
-by rule, and confidence distributions.
+Standard span fields on every trace: `job_id`, `run_id`, `document_hk`, `page_no`,
+`node_id`. Exporters and the Prometheus endpoint:
+[`vs-infra`](../crates/vs-infra/SPEC.md) — **currently a stub; logs only**. Each
+component's metric names are in its own spec.
 
 ### 5.6 Security
 
-Tenancy is part of every hash key. Workers have no inbound ports. Secrets come via the
-environment / metadata service, never in DAG or config files. Originals are encrypted at
-rest in the object store.
+Tenancy is part of every hash key, and the tenant never comes from a request body.
+Auth and tenant scoping: [`vs-api`](../crates/vs-api/SPEC.md) — **currently a header
+placeholder**. Network isolation and the no-inbound-ports rule:
+[`deploy/firecracker`](../deploy/firecracker/SPEC.md). Secrets from the environment, and
+encryption at rest: [`vs-infra`](../crates/vs-infra/SPEC.md).
 
 ## 6. Decisions
 
@@ -202,55 +211,65 @@ rest in the object store.
 |----|----------|--------|
 | D1 | CPU work in Firecracker, models on a separate GPU tier over HTTP | Firecracker has no GPU passthrough |
 | D2 | One worker binary with roles | One rootfs image, simpler fleet |
-| D3 | Model access through an OpenAI-compatible API | Works with vLLM (and SGLang, hosted APIs) without code changes |
+| D3 | Model access through an OpenAI-compatible API | Works with vLLM (and SGLang, LiteLLM, hosted APIs) without code changes |
 | D4 | Workflows are static DAGs, chosen per page from a versioned DAG list | Reproducible; optimisation happens offline in `vs-adapt` |
 | D5 | Data Vault is insert-only; reprocessing adds satellites with a new run | Natural DV2.0 history; old results stay traceable |
-| D6 | HelixDB holds the *current* projection; the vault holds full history | RAG reads one consistent view |
+| D6 | The Postgres Data Vault holds both the full history **and** the current graph projection | One system of record; the vault already stores richer evidence (region as well as span) than a separate graph store did |
 | D7 | Structured model output via guided decoding (JSON schema) | Parseable output, fewer hallucinated formats |
 | D8 | Large intermediate artefacts (page images, page results) live in the object store; queues carry references only | Small messages, no shared FS in Firecracker |
-| D9 | HelixDB accessed only through HelixQL (`.hx` schema, migrations and queries in `vs-helix`); pinned to Helix 2.3.5 | Queries and data model versioned with the code; HelixQL is not available in Helix 3.x |
+| D9 | Vectors live in a dedicated vector store (Qdrant) behind a `VectorStore` trait, keyed by tenant and run | The vector store stays swappable; the graph stays in SQL next to its provenance |
 
-## 7. Assumptions (unanswered questions — please confirm or correct)
+**D6/D9 replaced the original HelixDB decisions.** HelixDB held the current graph
+projection and the vectors. It has been removed in favour of Postgres (graph) and Qdrant
+(vectors), so the suite has one system of record instead of two stores that could
+disagree about what was extracted, and the vector store sits behind a trait so the next
+change of mind is cheap. Remaining work is tracked in the `## Status` checklists of
+[`vs-vault`](../crates/vs-vault/SPEC.md) and [`vs-vectors`](../crates/vs-vectors/SPEC.md).
+
+## 7. Assumptions
+
+Only the two genuinely cross-cutting assumptions stay here. The other eighteen moved into
+the spec of the component that rests on them, under "Assumptions this component rests on".
 
 | ID | Assumption |
 |----|-----------|
-| A1 | "VLLM" means vision-language models served by **vLLM**. The client is OpenAI-compatible so other servers also work. |
-| A2 | Self-hosted open-weight models by default. Hosted APIs can be registered as models but are off by default. |
-| A3 | NVIDIA GPUs; exact type unknown. Model pools are configured per model. |
-| A4 | Model servers run outside Firecracker (bare metal / Kubernetes). Cloud Hypervisor is an option if GPU isolation is required. |
-| A5 | Relational DB is **PostgreSQL** (ops, registry and vault schemas). |
-| A6 | Task bus is **NATS JetStream**; the `TaskBus` trait allows swapping in Kafka. |
-| A7 | Object storage is S3-compatible. |
-| A8 | HelixDB licensing (AGPL vs commercial/cloud) is settled on your side; we call compiled HelixQL queries over HTTP (D9). |
-| A9 | Traceability at bbox + character-span level. |
-| A10 | New entity/relation types are normalised automatically; new types get `review_status = pending` for optional later review. |
-| A11 | No human review loop in v1; confidence and review status are stored. |
-| A12 | Reprocessing adds new versions (D5); HelixDB is switched to the newest run per document. |
-| A13 | DAG scoring = quality floor per page class, then weighted quality vs latency vs GPU cost. |
-| A14 | Page classifier v1 = rules (tier 0) + one small vision classifier (tier 1). |
-| A15 | Datasets may lack labels; then scoring uses agreement between strong models / a judge model, marked as lower-trust scores. |
-| A16 | `vs-adapt` searches over a registered step catalogue and its parameters (model, prompt template, DPI, crop strategy), not free-form prompts. |
-| A17 | Stage 2 is one pipeline in v1 with per-document-type prompt profiles; Stage 2 search is post-v1. |
-| A18 | v1 formats: PDF, PNG, JPEG, TIFF (multi-page). Office formats via an optional converter in ingest. |
-| A19 | The language hint (BCP-47) applies to all pages of a document in v1. |
-| A20 | Per-call options: `language` (required), `priority`, optional `profile` (`quality`/`balanced`/`fast`), optional DAG-list version pin. |
+| A9 | Traceability at bbox + character-span level (see §5.1). |
+| A11 | No human review loop in v1; confidence and review status are stored but unused. |
+
+Where the rest went: A1, A2, A7 → [`vs-models`](../crates/vs-models/SPEC.md) and
+[`vs-infra`](../crates/vs-infra/SPEC.md) · A3, A4 →
+[`deploy/gpu`](../deploy/gpu/SPEC.md), [`deploy/firecracker`](../deploy/firecracker/SPEC.md)
+· A5, A10, A12 → [`vs-vault`](../crates/vs-vault/SPEC.md) · A6 →
+[`vs-infra`](../crates/vs-infra/SPEC.md) · A8 → withdrawn with HelixDB (its licensing question is moot) · A13, A15, A16 →
+[`vs-adapt`](../crates/vs-adapt/SPEC.md) · A14 →
+[`vs-classify`](../crates/vs-classify/SPEC.md) · A17 →
+[`vs-extract`](../crates/vs-extract/SPEC.md) · A18 →
+[`vs-ingest`](../crates/vs-ingest/SPEC.md) · A19, A20 →
+[`vs-api`](../crates/vs-api/SPEC.md).
 
 ## 8. Open questions
 
-1. GPU hardware and the expected pages/day range (to size pools).
-2. Which document types matter most after scientific papers (to seed adaptation datasets).
-3. Ground-truth availability, especially relation-annotated scientific papers.
-4. Retention rules for originals and page images.
-5. Whether the RAG service needs anything beyond the HelixDB model in `vs-helix/SPEC.md`.
+1. GPU hardware and the expected pages/day range, to size the pools →
+   [`deploy/gpu`](../deploy/gpu/SPEC.md).
+2. Which document types matter most after scientific papers, to seed the adaptation
+   datasets → [`vs-adapt`](../crates/vs-adapt/SPEC.md).
+3. Ground-truth availability, especially relation-annotated scientific papers →
+   [`vs-adapt`](../crates/vs-adapt/SPEC.md).
+4. Retention rules for originals and page images →
+   [`vs-infra`](../crates/vs-infra/SPEC.md).
+
+Resolved: what the RAG service needs from the graph store. It now queries Postgres and
+Qdrant directly; the contract it reads is documented in
+[`vs-vault/SPEC.md`](../crates/vs-vault/SPEC.md) and the vector store's spec.
 
 ## 9. Research basis
 
-- Document parsing VLMs: PaddleOCR-VL-1.5, MinerU2.5, dots.ocr, Logics-Parsing,
-  olmOCR-2, DeepSeek-OCR, general VLMs (Qwen3-VL). Pipeline (layout → region recognition)
-  and end-to-end page parsing both stay as step options; `vs-adapt` decides per class.
-- Benchmarks for scoring: OmniDocBench, PureDocBench (2026), ParseBench (2026),
-  Dr. DocBench (2026). Parsing is not solved (best ~74 on PureDocBench), so verification
-  and confidence are required.
-- Graph construction: KG4VD (2026) — entities/relations grounded to parser regions,
-  cross-page entity alignment; MMGraphRAG — figures as scene graphs linked to text entities.
-- Agentic navigation: SCoPE VLM (EACL 2026) — post-v1, query-time.
+Moved into the components that act on it: the parsing-VLM landscape and the output-family
+table → [`vs-models`](../crates/vs-models/SPEC.md); the scoring benchmarks
+(OmniDocBench, PureDocBench, ParseBench, Dr. DocBench) →
+[`vs-adapt`](../crates/vs-adapt/SPEC.md); graph-construction research (KG4VD,
+MMGraphRAG) → [`vs-graph`](../crates/vs-graph/SPEC.md) and
+[`vs-extract`](../crates/vs-extract/SPEC.md).
+
+Agentic document navigation (SCoPE VLM, EACL 2026) stays a v1 non-goal: it belongs at
+query time, in the RAG service, not at ingest.
