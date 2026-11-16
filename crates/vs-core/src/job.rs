@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{HashKey, LanguageTag, RunId, TenantId};
+use crate::{DocType, HashKey, LanguageTag, RunId, TenantId};
 
 /// Queue lane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
@@ -38,6 +38,16 @@ pub struct JobSpec {
     pub source_uri: String,
     /// Caller's own reference, stored as a satellite attribute.
     pub external_ref: Option<String>,
+    /// Document type, when the caller already knows it.
+    ///
+    /// A caller uploading a batch of invoices knows more than a classifier guessing from
+    /// pixels, so this is trusted over both the per-page vote and the document
+    /// classifier. It also reaches **page** classification, where it is the only way a
+    /// page can be told what document it belongs to: pages are classified in parallel
+    /// across workers with no shared per-document state, so nothing else can tell page 7
+    /// what page 1 concluded.
+    #[serde(default)]
+    pub doc_type: Option<DocType>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

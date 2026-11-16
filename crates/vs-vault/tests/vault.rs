@@ -24,6 +24,7 @@ fn spec() -> JobSpec {
         dag_list_version: None,
         source_uri: "originals/t1/abc".into(),
         external_ref: Some("ext-1".into()),
+            doc_type: None,
     }
 }
 

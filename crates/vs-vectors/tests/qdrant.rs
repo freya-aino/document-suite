@@ -66,6 +66,7 @@ fn run_info(tenant: &str, run: RunId, doc: &str) -> RunInfo {
         language: "en".into(),
         page_count: 1,
         doc_types: vec!["scientific_paper".into()],
+            doc_type: None,
         new_entities: HashSet::from([format!("{doc}-e-bert")]),
     }
 }

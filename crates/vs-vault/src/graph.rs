@@ -17,6 +17,7 @@ use serde_json::json;
 use sqlx::PgPool;
 
 use vs_core::HashKey;
+use vs_core::DocTypeSource;
 use vs_graph::{DocGraph, EdgeKind, GraphStore, NodeKind, RunInfo, StoreError, Vectors};
 use vs_vectors::VectorStore;
 
@@ -25,6 +26,15 @@ use crate::{hash_diff, latest_differs, record_source};
 pub struct PgGraphStore {
     pub pool: PgPool,
     pub vectors: Arc<dyn VectorStore>,
+}
+
+/// Stored as the serde name, so the column matches what a `DocTypeSource` deserialises.
+fn source_name(s: DocTypeSource) -> &'static str {
+    match s {
+        DocTypeSource::Caller => "caller",
+        DocTypeSource::Model => "model",
+        DocTypeSource::PageVote => "page_vote",
+    }
 }
 
 fn unavailable(e: sqlx::Error) -> StoreError {
@@ -269,6 +279,32 @@ impl PgGraphStore {
             .map_err(unavailable)?;
         }
 
+        if let Some(dt) = &run.doc_type {
+            let sat = concat!(
+                "INSERT INTO vault.sat_document_type (document_hk, load_dts, hash_diff, record_source, run_id, doc_type, confidence, source)
+                 SELECT $1, $2, $3, $4, $5, $6, $7, $8
+                 WHERE NOT EXISTS (
+                     SELECT 1 FROM (SELECT s.hash_diff FROM vault.sat_document_type s
+                                    WHERE s.document_hk = $1 ORDER BY s.load_dts DESC LIMIT 1) l
+                     WHERE l.hash_diff = $3
+                 )"
+            );
+            let type_name = crate::enum_name(&dt.doc_type);
+            let source_name = source_name(dt.source);
+            sqlx::query(&sat)
+                .bind(document_hk)
+                .bind(now)
+                .bind(hash_diff(&json!({ "doc_type": type_name, "confidence": dt.confidence, "source": source_name })))
+                .bind(&src)
+                .bind(run_uuid)
+                .bind(&type_name)
+                .bind(dt.confidence)
+                .bind(source_name)
+                .execute(&mut *tx)
+                .await
+                .map_err(unavailable)?;
+        }
+
         tx.commit().await.map_err(unavailable)?;
         tracing::debug!(
             sections = c.section_hk.len(),
@@ -276,6 +312,7 @@ impl PgGraphStore {
             members = c.member_lnk_hk.len(),
             related = c.related_lnk_hk.len(),
             cites = c.cites_lnk_hk.len(),
+            doc_type = ?run.doc_type.map(|d| d.doc_type),
             "graph layer written"
         );
         Ok(())

@@ -270,10 +270,20 @@ Common params: `model` (registry id, required), `prompt` (prompt id or literal t
 override), `max_tokens`, `kinds` (block kind names), `crop_padding_px`, `crop_dpi` (re-render
 region at higher DPI from the original — post-v1, uses the page image in v1).
 
-## Tier 1 page classifier
+## Classifiers
 
-`VlmPageClassifier` implements `vs_classify::VisionClassifier` with the
-`page_classify` prompt and a JSON schema matching `VisionSignals`.
+`VlmPageClassifier` implements `vs_classify::VisionClassifier` with the `page_classify`
+prompt and a JSON schema matching `VisionSignals`: one thumbnail, one page's verdict.
+
+`VlmDocumentClassifier` implements `vs_classify::DocumentClassifier` with the
+`document_classify` prompt: the opening thumbnails (3 by default) in **one** call,
+answering `{doc_type, confidence}`.
+
+They are separate models and separate calls because they answer different questions, and
+the document one cannot be derived from the page one. A signature page judged on its own
+genuinely *is* a `handwritten_note`; judged as page 12 of a contract it is a `contract`.
+A vote over per-page verdicts can discount that page but never reinterpret it, which is
+why the document classifier is worth its own call rather than more post-processing.
 
 ## Metrics
 

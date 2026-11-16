@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 
 use async_trait::async_trait;
 
-use vs_core::{RunId, TenantId};
+use vs_core::{DocumentType, RunId, TenantId};
 use vs_extract::resolve::Resolution;
 
 use crate::DocGraph;
@@ -53,7 +53,11 @@ pub struct RunInfo {
     pub run_id: RunId,
     pub language: String,
     pub page_count: u32,
+    /// Every per-page type seen, for the record.
     pub doc_types: Vec<String>,
+    /// The document's one type, once Stage 2 has settled it. `None` when there were no
+    /// pages to judge from.
+    pub doc_type: Option<DocumentType>,
     /// Entities that corpus resolution created in this run (`Resolution::New`).
     ///
     /// Only these need their name vector written: a `Link` resolved to an entity that is
@@ -101,6 +105,7 @@ mod tests {
             language: "en".into(),
             page_count: 0,
             doc_types: vec![],
+            doc_type: None,
             new_entities: HashSet::new(),
         };
         let new = HashKey::entity(&run.tenant, "method|bert");

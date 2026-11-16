@@ -155,6 +155,20 @@ async fn run_worker() -> anyhow::Result<()> {
             // once points are written.
             vectors.ensure_ready(embedder.dimensions()).await?;
 
+            let doc_classifier: Option<Arc<dyn vs_classify::DocumentClassifier>> = match &s2.doc_classifier_model {
+                Some(model) => {
+                    models.client.spec(model)?; // fail at startup, not per document
+                    Some(Arc::new(vs_models::classifier::VlmDocumentClassifier {
+                        client: models.client.clone(),
+                        model: model.clone(),
+                        max_pages: 3,
+                    }))
+                }
+                None => {
+                    tracing::info!("no doc_classifier_model: document type comes from the weighted page vote");
+                    None
+                }
+            };
             let mut resolver = PgCorpusResolver::new(ops.pool.clone(), vectors.clone(), embedder.clone())
                 .with_thresholds(s2.link_threshold, s2.judge_band);
             if let Some(judge) = &s2.judge_model {
@@ -169,6 +183,7 @@ async fn run_worker() -> anyhow::Result<()> {
                 client: models.client,
                 embedder,
                 resolver: Arc::new(resolver),
+                doc_classifier,
                 stage2: s2.clone(),
                 max_failed_page_fraction: cfg.worker.max_failed_page_fraction,
             })

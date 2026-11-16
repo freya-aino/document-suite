@@ -134,11 +134,17 @@ impl PageHandler {
         self.maybe_enqueue_doc_spec(t.job_id, t.run_id, t.document_hk, t.spec, progress).await
     }
 
-    /// Tier 0 rules, then the vision classifier when configured and needed. No
-    /// doc-level smoothing: pages are independent in v1 (`known_doc_type = None`).
+    /// Tier 0 rules, then the vision classifier when configured and needed.
+    ///
+    /// `known_doc_type` comes from the caller's hint and nowhere else. There is no
+    /// cross-page smoothing, and it is not an oversight: pages fan out as independent
+    /// tasks across workers with no shared per-document state, so page 7 cannot learn
+    /// what page 1 concluded without a round trip that would serialise the fan-out. The
+    /// document-level type is settled in Stage 2, where every page is in hand — too late
+    /// to affect this page's routing, which is exactly why the caller hint matters.
     async fn classify(&self, t: &PageTask<'_>, signals: &PageSignals) -> Result<PageProfile, TaskError> {
         let t0 = tier0(signals, &self.classify);
-        let known: Option<DocType> = None;
+        let known: Option<DocType> = t.spec.doc_type;
         let vision = match (&self.vision, t0.needs_vision) {
             (Some(v), true) => {
                 let bytes = self.blob.get(&keys::thumbnail(t.document_hk.as_str(), t.page_no)).await.map_err(page_data)?;

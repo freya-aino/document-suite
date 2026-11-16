@@ -6,21 +6,24 @@ System spec: [`docs/SPEC.md`](../../docs/SPEC.md).
 
 ## Status
 
-Implemented: tier 0 rules, the tier 1 `VisionClassifier` trait (implemented in
-`vs-models` as `VlmPageClassifier`), and `combine()`. 3 unit tests pass. Pure functions,
-no I/O — the worker calls `tier0` and `combine` directly.
+Implemented: tier 0 rules, the tier 1 `VisionClassifier` trait (`VlmPageClassifier` in
+`vs-models`), `combine()`, and **document-level classification** — the weighted page-vote
+aggregation in `document`, the `DocumentClassifier` trait (`VlmDocumentClassifier` in
+`vs-models`, one call over the opening thumbnails), and `resolve()`, which prefers the
+most trustworthy source available. 15 unit tests. Pure functions, no I/O.
 
 Remaining:
-- [ ] **Document-level classification does not exist.** The only aggregation is
-      `dominant_doc_type` in `vs-worker/src/doc.rs`, a plurality vote (ties go to the type
-      seen first) whose result feeds only the extraction prompt profile and **is never
-      persisted**. It should be a confidence-weighted, first-page-weighted function here,
-      and the result should be stored.
-- [ ] **`known_doc_type` is dead code.** `combine()` takes it, and "Two tiers" below
-      promises document-level type inheritance, but `vs-worker/src/page.rs` passes a
-      literal `None` with the comment "pages are independent in v1". Nothing ever supplies
-      a value, so cross-page smoothing never happens and text-only born-digital pages get
-      `DocType::Other` forever.
+- [ ] **No automatic cross-page smoothing, and it is not a small omission to fill.**
+      `known_doc_type` now comes from the caller's hint, which is the only source that
+      exists before a page is routed. Pages fan out as independent tasks across workers
+      with no shared per-document state, so page 7 cannot learn what page 1 concluded
+      without a round trip that would serialise the fan-out — the thing Stage 1 exists to
+      do in parallel. The document type is therefore settled in Stage 2, too late to
+      affect routing. Closing this properly means either a per-document cache the `page`
+      role writes and reads (racy, and only helps later pages) or a cheap first-page pass
+      during ingest (which calls no model today).
+- [ ] The document classifier's accuracy is unmeasured; `vs-adapt` scores DAG output, not
+      classifier verdicts.
 - [ ] Tier 0's only measured signal for a scan is `ink_coverage`, which is enough to skip
       a blank page but not to tell a photograph from a form. Everything else about a
       raster page still comes from the tier-1 thumbnail.

@@ -12,7 +12,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde::Serialize;
 
+use vs_classify::{DocumentClassifier, PageVote};
 use vs_core::{DocType, HashKey, JobSpec, JobState, PageResult, RunId, Task, TenantId};
+use vs_dag::PageImage;
 use vs_extract::{CorpusResolver, DocProfile, EmbeddingTypeNormalizer, ExtractConfig, ExtractError, ExtractionOutput, Extractor, LlmExtractor};
 use vs_graph::{DocGraph, EmbedTarget, GraphStore, RunInfo, Vectors};
 
@@ -27,6 +29,9 @@ use crate::runtime::{Handler, TaskError};
 
 /// Concurrent corpus-resolution calls per document.
 const RESOLVE_CONCURRENCY: usize = 8;
+/// Opening pages shown to the document classifier. The pages that identify a document
+/// are at the front; more pages cost tokens without adding evidence.
+const DOC_CLASSIFY_PAGES: usize = 3;
 const DOC_RESULT_SCHEMA_VERSION: u32 = 1;
 
 pub struct DocHandler {
@@ -38,6 +43,8 @@ pub struct DocHandler {
     pub ontology: Arc<PgOntologyStore>,
     pub embedder: Arc<dyn Embedder>,
     pub resolver: Arc<dyn CorpusResolver>,
+    /// Optional: when unset, the document type is the weighted page vote alone.
+    pub doc_classifier: Option<Arc<dyn DocumentClassifier>>,
     pub stage2: Stage2Config,
     pub max_failed_page_fraction: f32,
 }
@@ -74,7 +81,9 @@ impl DocHandler {
                 self.max_failed_page_fraction * 100.0
             )));
         }
-        let doc_profile = dominant_doc_type(&pages).map(doc_profile_for).unwrap_or_default();
+        // Settle the document's type before stitching: it chooses the extraction profile.
+        let doc_type = self.document_type(spec, &pages).await;
+        let doc_profile = doc_type.map(|d| doc_profile_for(d.doc_type)).unwrap_or_default();
         let doc_types: BTreeSet<String> = pages.iter().map(|p| vs_vault::enum_name(&p.profile.doc_type)).collect();
         let stitched = vs_stitch::stitch(pages, pages_total).map_err(stitch_error)?;
         tracing::info!(blocks = stitched.blocks.len(), sections = stitched.sections.len(), pages_failed, ?doc_profile, "stitched");
@@ -93,6 +102,7 @@ impl DocHandler {
             language: spec.language.as_str().to_string(),
             page_count: pages_total,
             doc_types: doc_types.into_iter().collect(),
+            doc_type,
             new_entities: HashSet::new(),
         };
         let out = stage2(&stitched, spec, run_info, &extractor, self.resolver.as_ref(), self.embedder.as_ref(), self.embed_batch()).await?;
@@ -114,6 +124,56 @@ impl DocHandler {
         self.ops.set_state(job_id, final_state, None).await?;
         tracing::info!(%job_id, entities = out.ext.entities.len(), assertions = out.ext.assertions.len(), state = ?final_state, "document done");
         Ok(())
+    }
+
+    /// The document's one type, from the most trustworthy source available.
+    ///
+    /// A classifier failure is not a job failure: the page vote is always available as a
+    /// fallback, and a worse extraction profile is a far better outcome than refusing a
+    /// document because one optional model call timed out.
+    async fn document_type(&self, spec: &JobSpec, pages: &[PageResult]) -> Option<vs_core::DocumentType> {
+        let votes: Vec<PageVote> = pages
+            .iter()
+            .map(|p| PageVote { page_no: p.page_no, doc_type: p.profile.doc_type, confidence: p.profile.confidence })
+            .collect();
+        // Skipped entirely when the caller already told us, or when no classifier is
+        // configured — there is no point paying for a call whose answer is outranked.
+        let model = match (&self.doc_classifier, spec.doc_type) {
+            (Some(c), None) => match self.opening_thumbnails(pages).await {
+                Ok(thumbs) if !thumbs.is_empty() => match c.classify(&thumbs, &spec.language).await {
+                    Ok(dt) => Some(dt),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "document classifier failed; falling back to the page vote");
+                        None
+                    }
+                },
+                Ok(_) => None,
+                Err(e) => {
+                    tracing::warn!(error = %e, "could not load thumbnails; falling back to the page vote");
+                    None
+                }
+            },
+            _ => None,
+        };
+        let resolved = vs_classify::resolve_doc_type(spec.doc_type, model, &votes);
+        if let Some(d) = &resolved {
+            tracing::info!(doc_type = ?d.doc_type, confidence = d.confidence, source = ?d.source, "document type");
+        }
+        resolved
+    }
+
+    /// Thumbnails of the opening pages, in page order, for the document classifier.
+    async fn opening_thumbnails(&self, pages: &[PageResult]) -> Result<Vec<PageImage>, String> {
+        let mut ordered: Vec<&PageResult> = pages.iter().collect();
+        ordered.sort_by_key(|p| p.page_no);
+        let mut out = Vec::new();
+        for p in ordered.into_iter().take(DOC_CLASSIFY_PAGES) {
+            let key = keys::thumbnail(p.document_hk.as_str(), p.page_no);
+            let bytes = self.blob.get(&key).await.map_err(|e| format!("{key}: {e}"))?;
+            let (width_px, height_px) = crate::page::image_dimensions(&bytes).map_err(|e| format!("{key}: {e}"))?;
+            out.push(PageImage { uri: key, bytes: Arc::from(bytes.as_ref()), width_px, height_px, dpi: 0 });
+        }
+        Ok(out)
     }
 
     fn embed_batch(&self) -> usize {
@@ -235,25 +295,6 @@ pub fn too_many_failed(failed: u32, total: u32, max_fraction: f32) -> bool {
     total == 0 || failed as f32 / total as f32 > max_fraction
 }
 
-/// Most frequent page doc type; ties go to the type seen first.
-pub fn dominant_doc_type(pages: &[PageResult]) -> Option<DocType> {
-    let mut counts: Vec<(DocType, usize)> = Vec::new();
-    for p in pages {
-        match counts.iter_mut().find(|(t, _)| *t == p.profile.doc_type) {
-            Some((_, n)) => *n += 1,
-            None => counts.push((p.profile.doc_type, 1)),
-        }
-    }
-    // Strictly greater keeps the earliest type on ties.
-    counts
-        .into_iter()
-        .fold(None, |best: Option<(DocType, usize)>, c| match best {
-            Some(b) if b.1 >= c.1 => Some(b),
-            _ => Some(c),
-        })
-        .map(|(t, _)| t)
-}
-
 pub fn doc_profile_for(t: DocType) -> DocProfile {
     match t {
         DocType::ScientificPaper => DocProfile::Scientific,
@@ -273,6 +314,8 @@ pub struct DocResult<'a> {
     pub pages_total: u32,
     pub pages_failed: u32,
     pub missing_pages: &'a [u32],
+    /// The document's one type and where it came from; `None` if there were no pages.
+    pub doc_type: Option<vs_core::DocumentType>,
     pub stitched: &'a StitchedDocument,
     pub extraction: ExtractionSummary,
 }
@@ -303,6 +346,7 @@ pub fn doc_result<'a>(stitched: &'a StitchedDocument, out: &'a Stage2Output, pag
         pages_total,
         pages_failed,
         missing_pages: &stitched.missing_pages,
+        doc_type: out.run_info.doc_type,
         stitched,
         extraction: ExtractionSummary {
             mentions: ext.mentions.len(),
@@ -416,18 +460,28 @@ mod tests {
     }
 
     #[test]
-    fn dominant_type_and_profile() {
-        let doc = HashKey::of(&["d"]);
-        let run = RunId::new();
-        assert_eq!(dominant_doc_type(&[]), None);
-        let pages = vec![page(&doc, run, 1, DocType::Report), page(&doc, run, 2, DocType::Invoice), page(&doc, run, 3, DocType::Invoice)];
-        assert_eq!(dominant_doc_type(&pages), Some(DocType::Invoice));
-        let tie = vec![page(&doc, run, 1, DocType::Contract), page(&doc, run, 2, DocType::Report)];
-        assert_eq!(dominant_doc_type(&tie), Some(DocType::Contract), "tie goes to the first seen");
+    fn doc_type_selects_the_extraction_profile() {
         assert_eq!(doc_profile_for(DocType::ScientificPaper), DocProfile::Scientific);
         assert_eq!(doc_profile_for(DocType::Contract), DocProfile::Legal);
         assert_eq!(doc_profile_for(DocType::Receipt), DocProfile::Financial);
         assert_eq!(doc_profile_for(DocType::Slide), DocProfile::Generic);
+    }
+
+    /// The weighted aggregation itself is tested in vs-classify; this checks the votes
+    /// the doc role builds from page results are the ones it means to send.
+    #[test]
+    fn page_votes_carry_the_page_number_and_confidence() {
+        let doc = HashKey::of(&["d"]);
+        let run = RunId::new();
+        let pages = vec![page(&doc, run, 1, DocType::Report), page(&doc, run, 2, DocType::Invoice)];
+        let votes: Vec<vs_classify::PageVote> = pages
+            .iter()
+            .map(|p| vs_classify::PageVote { page_no: p.page_no, doc_type: p.profile.doc_type, confidence: p.profile.confidence })
+            .collect();
+        assert_eq!(votes.len(), 2);
+        assert_eq!((votes[0].page_no, votes[0].doc_type), (1, DocType::Report));
+        assert_eq!((votes[1].page_no, votes[1].doc_type), (2, DocType::Invoice));
+        assert!(votes.iter().all(|v| (0.0..=1.0).contains(&v.confidence)));
     }
 
     struct FakeEmbedder;
@@ -525,6 +579,7 @@ mod tests {
             language: "en".into(),
             page_count: 2,
             doc_types: vec!["scientific_paper".into()],
+            doc_type: None,
             new_entities: HashSet::new(),
         };
         let resolver = FakeResolver(Default::default());

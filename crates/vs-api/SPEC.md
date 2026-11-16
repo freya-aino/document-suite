@@ -29,6 +29,7 @@ Remaining:
 | ID | Assumption |
 |----|-----------|
 | A19 | The language hint (BCP-47) applies to all pages of a document in v1; it is never detected. |
+| — | `doc_type` is an *optional* hint with the same shape: trusted over anything inferred, and the only document-level signal that exists before a page is routed. |
 | A20 | Per-call options: `language` (required), `priority`, optional `profile` (`quality`/`balanced`/`fast`), optional DAG-list version pin. |
 
 ## Endpoints (v1)

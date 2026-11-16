@@ -85,6 +85,8 @@ struct UploadOptions {
     profile: Profile,
     dag_list_version: Option<String>,
     external_ref: Option<String>,
+    /// Optional: the caller already knows what these documents are.
+    doc_type: Option<vs_core::DocType>,
     /// JSON variant: object already in the bucket.
     source_uri: Option<String>,
 }
@@ -362,6 +364,7 @@ fn spec_from(tenant: TenantId, opts: &UploadOptions, source_uri: String) -> JobS
         dag_list_version: opts.dag_list_version.clone(),
         source_uri,
         external_ref: opts.external_ref.clone(),
+        doc_type: opts.doc_type,
     }
 }
 
@@ -607,6 +610,8 @@ async fn readyz(State(s): State<AppState>) -> (StatusCode, &'static str) {
 
 #[derive(Debug, Deserialize)]
 struct BatchOptions {
+    /// Applies to every document in the batch unless one overrides it.
+    doc_type: Option<vs_core::DocType>,
     /// Default for documents without their own `language`.
     language: Option<LanguageTag>,
     #[serde(default)]
@@ -621,6 +626,8 @@ struct BatchDocument {
     source_uri: String,
     external_ref: Option<String>,
     language: Option<LanguageTag>,
+    /// Overrides the batch's `doc_type`, for a mixed batch.
+    doc_type: Option<vs_core::DocType>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -671,6 +678,7 @@ async fn create_batch(
             dag_list_version: req.options.dag_list_version.clone(),
             source_uri: key,
             external_ref: d.external_ref.clone(),
+            doc_type: d.doc_type.or(req.options.doc_type),
         });
     }
     let keys: Vec<String> = specs.iter().map(|sp| sp.source_uri.clone()).collect();

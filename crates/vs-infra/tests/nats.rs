@@ -22,6 +22,7 @@ fn ingest_task(job_id: uuid::Uuid) -> Task {
             dag_list_version: None,
             source_uri: "s3://visual-suite/originals/it/x".into(),
             external_ref: None,
+            doc_type: None,
         },
     }
 }

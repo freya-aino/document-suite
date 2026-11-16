@@ -10,7 +10,9 @@ Writes everything the pipeline produces into PostgreSQL (assumption A5), in thre
 
 Migrations: `migrations/0001_ops_registry.sql`, `migrations/0002_vault.sql`,
 `migrations/0003_app_role_privileges.sql`, `migrations/0004_api_ops.sql` (idempotency
-keys, job state log, page-level evidence), embedded via `sqlx::migrate!`.
+keys, job state log, page-level evidence), `migrations/0005_graph.sql` (sections, the
+`related` shortcut, citations) and `migrations/0006_document_type.sql`, embedded via
+`sqlx::migrate!`.
 
 System spec: [`docs/SPEC.md`](../../docs/SPEC.md) — decisions D5 (insert-only history)
 and D6 (this is the single system of record *and* the graph projection).
