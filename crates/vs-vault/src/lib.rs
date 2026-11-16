@@ -1,9 +1,13 @@
 //! Data Vault 2.0 writer. See `SPEC.md`.
 
+pub mod graph;
 pub mod ontology;
 pub mod ops;
+pub mod resolve;
 
+pub use graph::PgGraphStore;
 pub use ontology::PgOntologyStore;
+pub use resolve::PgCorpusResolver;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -98,7 +102,7 @@ pub fn record_source(component: &str, what: &str, model: Option<&str>) -> String
 
 /// SHA-256 over a satellite's descriptive columns (passed as one JSON value; object keys
 /// serialise sorted, so the result is stable).
-fn hash_diff(descriptive: &Value) -> String {
+pub(crate) fn hash_diff(descriptive: &Value) -> String {
     HashKey::of(&[&descriptive.to_string()]).to_string()
 }
 
@@ -129,7 +133,7 @@ pub(crate) fn enum_str<T: Serialize>(v: &T) -> String {
 const LATEST_DIFFERS: &str = "NOT EXISTS (SELECT 1 FROM (SELECT s.hash_diff FROM {table} s WHERE s.{parent} = v.{parent} \
      ORDER BY s.load_dts DESC LIMIT 1) l WHERE l.hash_diff = v.hash_diff)";
 
-fn latest_differs(table: &str, parent: &str) -> String {
+pub(crate) fn latest_differs(table: &str, parent: &str) -> String {
     LATEST_DIFFERS.replace("{table}", table).replace("{parent}", parent)
 }
 
