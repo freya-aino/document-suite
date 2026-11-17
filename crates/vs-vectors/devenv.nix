@@ -1,7 +1,7 @@
 # vs-vectors: the vector store (Qdrant).
 #
 # devenv has no Qdrant module, and `pkgs.qdrant` is **not** usable: nixpkgs builds it from
-# source and 1.18.2 fails to compile with the current toolchain — an LLVM intrinsic
+# source and its 1.18.2 fails to compile with the current toolchain — an LLVM intrinsic
 # signature mismatch in its AVX-512 quantization code. Worse, naming it in `packages`
 # makes the whole dev shell unbuildable, so Postgres and NATS stop starting too.
 #
@@ -18,7 +18,11 @@ let
   # poking at collections by hand during development.
   grpcPort = 6334;
   restPort = 6333;
-  image = "qdrant/qdrant:v1.18.2";
+  # Kept in step with `qdrant-client` in Cargo.toml: the client refuses a major mismatch
+  # and warns on a minor gap wider than one, which is how a stale pin here announces
+  # itself — the end-to-end test found this one two minors behind. Running the image
+  # rather than nixpkgs is what makes keeping up cheap.
+  image = "qdrant/qdrant:v1.20.0";
   name = "vs-dev-qdrant";
   storage = "${config.env.DEVENV_STATE}/qdrant";
 in

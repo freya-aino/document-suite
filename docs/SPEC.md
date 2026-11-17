@@ -1,6 +1,6 @@
 # Visual Suite — System Specification
 
-Version: 0.4 · Status: implemented; stores verified against live services, no end-to-end run yet · Date: 2026-11-17
+Version: 0.5 · Status: implemented; one document verified end to end against live stores, with a fake model tier · Date: 2026-11-17
 
 This is the top-level spec: purpose, architecture, the component map, the cross-cutting
 contracts, and the decisions. Each component has its own `SPEC.md` next to its code

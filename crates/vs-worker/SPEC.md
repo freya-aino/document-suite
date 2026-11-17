@@ -7,10 +7,18 @@ command line or MMDS). System spec: [`docs/SPEC.md`](../../docs/SPEC.md) §5.2 a
 
 ## Status
 
-Implemented: all three roles end to end, the common pull loop over both lanes with
-heartbeats, retry with backoff, dead-lettering, the max-deliveries give-up path, graceful
-drain on SIGTERM, and the cached DAG-list provider. 16 unit tests pass, with the Stage 2
-pipeline tested over fakes for the extractor, resolver and embedder.
+Implemented: all three roles, the common pull loop over both lanes with heartbeats, retry
+with backoff, dead-lettering, the max-deliveries give-up path, graceful drain on SIGTERM,
+and the cached DAG-list provider. The roles live in `lib.rs` behind `build_handler`, so a
+test builds the same handler a deployment runs; `main.rs` is the CLI and the signals.
+
+16 unit tests pass, with Stage 2 covered over fakes for the extractor, resolver and
+embedder, plus `tests/pipeline.rs`: one document through **all three roles** into a live
+Postgres and Qdrant, asserting exact row and point counts. That test substitutes only the
+model tier (a fake OpenAI-compatible server on a real socket, answering from the prompt it
+was sent so grounding and verification actually run) and the bus (an in-process queue, so
+the stages run in a defined order rather than three `run_loop`s racing; NATS itself is
+covered by `vs-infra/tests/nats.rs`).
 
 Remaining:
 - [ ] Nothing samples traces: every task span is exported. Affordable at one span per

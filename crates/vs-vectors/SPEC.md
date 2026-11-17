@@ -27,7 +27,7 @@ This crate replaced the vector half of the HelixDB writer (decisions D6/D9).
 
 Remaining:
 - [ ] **`pkgs.qdrant` does not build**, so the devenv process runs the official Docker
-      image and needs `docker` on the host. nixpkgs builds Qdrant from source and 1.18.2
+      image and needs `docker` on the host. nixpkgs builds Qdrant from source and its 1.18.2
       fails on an LLVM intrinsic signature mismatch in its AVX-512 quantization code;
       naming it in `packages` made the entire dev shell unbuildable, taking Postgres and
       NATS down with it.

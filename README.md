@@ -42,18 +42,22 @@ config/             example models, worker, DAG list, search space, LiteLLM
 
 ## Status
 
-All 17 crates compile together and the workspace is green: **333 tests pass, none
-ignored** — the 24 integration tests run against a live Postgres, Qdrant, NATS and Garage.
+All 17 crates compile together and the workspace is green: **334 tests pass, none
+ignored** — the 25 integration tests run against a live Postgres, Qdrant, NATS and Garage,
+and one of them takes a document through the whole pipeline into both stores.
 `cargo clippy --workspace --all-targets -- -D warnings` is clean. No `todo!()` or
 `unimplemented!()` remains anywhere in the tree.
 
 Five components are done and carry a README; the rest carry a `SPEC.md` whose `## Status`
 section lists what is left. The cross-cutting gaps:
 
-- **Nothing has run end to end.** Every store is now exercised directly — all seven
-  migrations apply, and the vault's write path, `PgCorpusResolver` and `QdrantStore` are
-  tested against real services — but no run goes upload → ingest → Stage 1 → Stage 2 →
-  Postgres + Qdrant, so the handover between stages is still only covered by fakes.
+- **The models have never been real.** A document now goes upload → ingest → Stage 1 →
+  Stage 2 → Postgres + Qdrant in one test (`crates/vs-worker/tests/pipeline.rs`), against
+  real services and with the real handlers, so the handover between stages is covered.
+  What stands in for the model tier is a fake server on a real socket, answering
+  adaptively so grounding and verification are exercised rather than skipped. No VLM has
+  ever parsed a page here, so extraction quality remains entirely unmeasured — see
+  `vs-adapt`'s status.
 - **No auth.** `vs-api` takes the tenant from `X-VS-Tenant` and admin rights from
   `X-VS-Admin`, both of which any caller can set. Keep it on a trusted network.
 - **Telemetry is wired but unproven in a deployment.** One recorder per process, served
@@ -81,7 +85,7 @@ the text lines run along is measured, which end is up is a judgement with a marg
 |---|---|---|
 | `check` | `cargo clippy --workspace --all-targets -- -D warnings`, then `cargo test --workspace` | the fast gate; clippy here has already caught a use of a 1.82 API under a declared MSRV of 1.80 |
 | `msrv` | `cargo check` on exactly the toolchain `Cargo.toml` declares | so the MSRV is checked rather than asserted |
-| `integration` | brings up Postgres, Qdrant, NATS and Garage, then `cargo test --workspace -- --include-ignored` | the first time these tests ever ran they found three real defects, two of them months old |
+| `integration` | brings up Postgres, Qdrant, NATS and Garage, then `cargo test --workspace -- --include-ignored` | the first time these tests ever ran they found three real defects, two of them months old; this is also where the end-to-end pipeline test runs |
 
 `.github/scripts/services.sh` starts the three services that a GitHub `services:` block
 cannot (NATS needs an argument, Garage needs provisioning). It takes ports from the
@@ -145,7 +149,7 @@ curl 127.0.0.1:8080/v1/jobs/<job_id> -H 'x-vs-tenant: t1'
 ### Tests
 
 `cargo test --workspace` runs the 309 tests that need nothing (PDF tests need
-`PDFIUM_DYNAMIC_LIB_PATH`, set by devenv). The other 24 touch a real store and are
+`PDFIUM_DYNAMIC_LIB_PATH`, set by devenv). The other 25 touch a real store and are
 `#[ignore]`d; with `devenv up` running:
 
 ```sh

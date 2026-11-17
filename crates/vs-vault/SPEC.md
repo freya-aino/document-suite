@@ -72,9 +72,6 @@ Remaining:
       `context` column, so `PgCorpusResolver`'s judge sees only the stored name, type and
       aliases — the same blind spot the previous store had, and the one Postgres could
       actually fix. It needs the column plus the context threaded into `write_stage2`.
-- [ ] No test writes a document through the *whole* pipeline into this schema. Each write
-      path is now executed directly, but nothing covers ingest → Stage 1 → Stage 2 →
-      vault, so the handover between them is still only covered by fakes.
 - [ ] Applying the new migrations is a deploy-ordering constraint: `check_migrations`
       refuses to start a worker whose database is missing any embedded migration, so
       `vs-migrate` has to run before any binary built with 0005 to 0007.
