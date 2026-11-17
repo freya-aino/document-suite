@@ -137,6 +137,8 @@ DAG list. The five commands and their inputs and outputs are specified once, in
 | `vs-vectors` | lib | Vector store trait + Qdrant implementation (dense and sparse) | [SPEC](../crates/vs-vectors/SPEC.md) |
 | `vs-worker` | bin | Worker process with roles `ingest`, `page`, `doc` | [SPEC](../crates/vs-worker/SPEC.md) |
 | `vs-adapt` | bin | Workflow generation, scoring, selection | [SPEC](../crates/vs-adapt/SPEC.md) |
+| `deploy/` | ops | Embedding the suite in another deployment: binaries, the configuration surface, what must exist first | [README](../deploy/README.md) |
+| `deploy/keycloak` | ops | The development realm `vs-api` verifies against | [README](../deploy/keycloak/README.md) |
 | `deploy/firecracker` | ops | microVM image and fleet | [SPEC](../deploy/firecracker/SPEC.md) |
 | `deploy/gpu` | ops | Model serving tier | [SPEC](../deploy/gpu/SPEC.md) |
 | `config/` | config | Example models, worker and DAG-list files | — |
@@ -210,7 +212,8 @@ every blob key is prefixed by it, and the Qdrant collections are partitioned on 
 rest of the caller's identity — person, department, workspaces — is recorded on the job
 (`JobSpec::owner`) but is **not yet enforced**: inside one organization, every member can
 read every document. Auth, the checks each request is held to, and that gap:
-[`vs-api`](../crates/vs-api/SPEC.md). Network isolation and the no-inbound-ports rule:
+[`vs-api`](../crates/vs-api/SPEC.md); what a realm must provide and what an embedding
+deployment must configure: [`deploy/`](../deploy/README.md). Network isolation and the no-inbound-ports rule:
 [`deploy/firecracker`](../deploy/firecracker/SPEC.md). Secrets from the environment, and
 encryption at rest: [`vs-infra`](../crates/vs-infra/SPEC.md).
 

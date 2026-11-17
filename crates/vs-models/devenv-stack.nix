@@ -1,11 +1,11 @@
-# vs-models: a local OpenAI-compatible endpoint for development.
+# vs-models' model tier: a local OpenAI-compatible endpoint. Part of the `stack` profile
+# only — LiteLLM pulls a whole Python stack, which has no business in a shell whose job is
+# to build the suite.
 #
-# LiteLLM is a *script*, not a `processes.` entry, deliberately: it pulls a Python stack
-# and only matters when you are exercising Stage 1 or Stage 2 against real weights, so
-# `devenv up` should not start it for everyone. Run `vs-litellm-up` when you want it.
-#
-# The proxy itself serves nothing — it routes to whatever is behind `api_base` in
-# config/litellm.yaml (a local vLLM, Ollama, or a hosted API).
+# Still a *script* rather than a `processes.` entry, even inside the profile: it only
+# matters when you are exercising Stage 1 or Stage 2 against real weights, and it serves
+# nothing itself — it routes to whatever is behind `api_base` in config/litellm.yaml (a
+# local vLLM, Ollama, or a hosted API).
 { pkgs, ... }:
 
 {

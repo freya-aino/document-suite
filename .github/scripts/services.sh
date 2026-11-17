@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Starts the services the `--ignored` tests need: Qdrant, NATS and an S3 server.
+# Starts the services the `--ignored` tests need: Qdrant, NATS, an S3 server and Keycloak.
 #
 # Postgres is a workflow service container instead, because it is the one of the four
 # with a usable health check and no provisioning beyond a role. These three need either
@@ -9,7 +9,11 @@
 # Ports and the container name prefix come from the environment so this can be run on a
 # developer machine that already has something on 6334 or 3900:
 #
-#   PREFIX=vs-ci QDRANT_GRPC=56334 NATS_PORT=54222 S3_PORT=53900 .github/scripts/services.sh
+#   PREFIX=vs-ci QDRANT_GRPC=56334 NATS_PORT=54222 S3_PORT=53900 KEYCLOAK_PORT=58081 \
+#     .github/scripts/services.sh
+#
+# With a non-default KEYCLOAK_PORT, also export VS_KEYCLOAK_ISSUER: the test that asks the
+# realm for a token defaults to :8081.
 #
 # It is idempotent: an existing container of the same name is replaced.
 set -euo pipefail
@@ -19,6 +23,11 @@ QDRANT_REST="${QDRANT_REST:-6333}"
 QDRANT_GRPC="${QDRANT_GRPC:-6334}"
 NATS_PORT="${NATS_PORT:-4222}"
 S3_PORT="${S3_PORT:-3900}"
+KEYCLOAK_PORT="${KEYCLOAK_PORT:-8081}" # 8080 is vs-api's own default
+
+# Resolved from this script rather than the working directory: the realm file is mounted
+# into the container, so a relative path would depend on where this was run from.
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 # The same fixed dev credentials `crates/vs-infra/devenv.nix` imports into Garage, so a
 # local run and CI read the same AWS_* values. Garage's format is GK + 24 hex, 64 hex.
@@ -31,6 +40,7 @@ S3_SECRET_KEY="${AWS_SECRET_ACCESS_KEY:-0123456789abcdef0123456789abcdef01234567
 QDRANT_IMAGE="qdrant/qdrant:v1.20.0"
 NATS_IMAGE="nats:2-alpine"
 GARAGE_IMAGE="dxflrs/garage:v1.0.1"
+KEYCLOAK_IMAGE="quay.io/keycloak/keycloak:26.4"
 
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
@@ -54,6 +64,29 @@ wait_port() {
   done
   echo "$name did not come up on port $port" >&2
   docker logs "$PREFIX-${name}" 2>&1 | tail -30 >&2 || true
+  return 1
+}
+
+# Keycloak is ready when the *realm* answers, not when the port opens: the import runs
+# after the server starts listening, and a token request in between fails with a 404 that
+# reads like a misconfigured realm.
+wait_realm() {
+  local url="http://127.0.0.1:$KEYCLOAK_PORT/realms/koki/.well-known/openid-configuration"
+  if ! command -v curl >/dev/null; then
+    echo "curl not found: waiting on the port, then on the clock, for the realm import" >&2
+    wait_port "$KEYCLOAK_PORT" keycloak
+    sleep 20
+    return 0
+  fi
+  for _ in $(seq 1 120); do
+    if [ "$(curl -s -o /dev/null -w '%{http_code}' "$url")" = "200" ]; then
+      echo "keycloak realm koki is up on $KEYCLOAK_PORT"
+      return 0
+    fi
+    sleep 1
+  done
+  echo "the koki realm never answered on $KEYCLOAK_PORT" >&2
+  docker logs "$PREFIX-keycloak" 2>&1 | tail -40 >&2 || true
   return 1
 }
 
@@ -109,4 +142,18 @@ garage layout apply --version 1
 garage key import --yes -n "$S3_KEY_NAME" "$S3_ACCESS_KEY" "$S3_SECRET_KEY"
 garage bucket create "$S3_BUCKET"
 garage bucket allow --read --write --owner "$S3_BUCKET" --key "$S3_KEY_NAME"
+echo "::endgroup::"
+
+echo "::group::Keycloak"
+# `vs-api` verifies every request against a realm and refuses to start without one, so
+# this is not optional for the integration tests. The realm is the development one in
+# deploy/keycloak (a client with an audience mapper, the organization claim and the
+# vs-admin role); `start-dev` keeps it in memory, which is all a one-job realm needs.
+run "$PREFIX-keycloak" \
+  -p "127.0.0.1:$KEYCLOAK_PORT:8080" \
+  -e KC_BOOTSTRAP_ADMIN_USERNAME=admin \
+  -e KC_BOOTSTRAP_ADMIN_PASSWORD=admin \
+  -v "$ROOT/deploy/keycloak/realm-dev.json:/opt/keycloak/data/import/realm-dev.json:ro" \
+  "$KEYCLOAK_IMAGE" start-dev --import-realm
+wait_realm
 echo "::endgroup::"

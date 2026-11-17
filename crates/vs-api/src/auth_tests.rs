@@ -523,6 +523,52 @@ async fn a_discovery_document_for_a_different_issuer_fails_startup() {
     assert!(err.to_string().contains("does not match"), "{err}");
 }
 
+/// The development realm and this verifier agree.
+///
+/// Everything above signs its own tokens, which proves the verifier self-consistent and
+/// nothing about whether a *Keycloak* token passes it. This one asks the realm in
+/// `deploy/keycloak/realm-dev.json` for a token and verifies that: the audience mapper
+/// is really there, the organization claim really arrives, the service account really
+/// holds the admin role, and a second organization's token really is a different tenant.
+/// A realm file and a verifier can drift apart silently, and this is what notices.
+#[tokio::test]
+#[ignore = "needs Keycloak from `devenv --profile stack up`"]
+async fn a_token_from_the_development_realm_verifies() {
+    let issuer = std::env::var("VS_KEYCLOAK_ISSUER").unwrap_or_else(|_| "http://127.0.0.1:8081/realms/koki".into());
+    let auth = Auth::discover(AuthConfig { issuer: issuer.clone(), ..auth_config() }).await.expect("discover the dev realm");
+
+    let admin = dev_realm_token(&issuer, "vs-api", "vs-api-dev-secret").await;
+    let p = auth.verify(&admin).await.expect("the dev realm's own token was refused");
+    assert_eq!(p.tenant.as_str(), "t1", "the organization claim did not arrive as the tenant");
+    assert_eq!(p.department.as_deref(), Some("dept-a"));
+    assert_eq!(p.workspaces, vec!["ws-red", "ws-blue"], "the multi-valued claim did not arrive as a list");
+    assert!(p.admin, "the vs-api service account is missing the {ADMIN_ROLE} realm role");
+
+    // The second client is the same realm and the same key, and must come out as another
+    // tenant with no administrative rights.
+    let other = dev_realm_token(&issuer, "vs-api-t2", "vs-api-t2-dev-secret").await;
+    let p2 = auth.verify(&other).await.expect("the second organization's token was refused");
+    assert_eq!(p2.tenant.as_str(), "t2");
+    assert!(!p2.admin, "a client with no role mapping came out as an admin");
+    assert_ne!(p.subject, p2.subject);
+}
+
+/// A client-credentials token from a running Keycloak.
+async fn dev_realm_token(issuer: &str, client_id: &str, secret: &str) -> String {
+    let res = reqwest::Client::new()
+        .post(format!("{issuer}/protocol/openid-connect/token"))
+        .form(&[("grant_type", "client_credentials"), ("client_id", client_id), ("client_secret", secret)])
+        .send()
+        .await
+        .unwrap_or_else(|e| panic!("asking {issuer} for a {client_id} token: {e}"));
+    let status = res.status();
+    let body: Value = res.json().await.expect("token response");
+    body["access_token"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no access_token for {client_id} ({status}): {body}"))
+        .to_string()
+}
+
 #[test]
 fn a_config_that_would_weaken_verification_is_refused() {
     for (field, cfg) in [

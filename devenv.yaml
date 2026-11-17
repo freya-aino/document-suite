@@ -8,14 +8,16 @@ inputs:
       nixpkgs:
         follows: nixpkgs
 
-# Each service describes its own system dependencies in a devenv.nix next to its code.
-# All of them are merged into the default shell because the cargo workspace builds
-# every crate. Opt-in extras (not needed for normal development) are profiles in
-# devenv.nix.
+# Each component describes its own dependencies in a devenv.nix next to its code, and
+# those are merged into the **default** shell: the toolchain, the native libraries and the
+# client-side configuration needed to build and unit-test the workspace.
+#
+# Nothing here starts a service. The services each component talks to are declared in a
+# devenv-stack.nix beside the same code and collected by the `stack` profile
+# (`devenv --profile stack up`); see devenv.nix.
 imports:
   - ./crates/vs-infra
   - ./crates/vs-vault
   - ./crates/vs-ingest
-  - ./crates/vs-models
   - ./crates/vs-vectors
   - ./crates/vs-worker

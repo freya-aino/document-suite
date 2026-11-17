@@ -11,11 +11,12 @@ Implemented: every endpoint below, multipart and JSON upload, `Idempotency-Key` 
 interactive back-pressure (`429` with `Retry-After`), source-URI tenant-prefix checks,
 DAG-list admin with `vs_router::Router::load` validation, `/metrics`, and
 **authentication against Keycloak** — see [Authentication](#authentication) for what it
-verifies and what it still does not. 23 tests pass (19 of them authentication's own,
-against real RSA signatures and a real JWKS over a socket), plus 5 HTTP tests
-(`src/http_tests.rs`, `#[ignore]`d; they need Postgres) driving the real router over the
-real `ops` schema with real signed tokens, an in-memory blob store and a fake bus whose
-backlog the test sets.
+verifies and what it still does not. **23 tests that need no service**, 19 of them
+authentication's own and asserted against real RSA signatures and a real JWKS served over
+a socket, plus **6 `#[ignore]`d**: the five HTTP tests (`src/http_tests.rs`) driving the
+real router over the real `ops` schema with real signed tokens, an in-memory blob store
+and a fake bus whose backlog the test sets, and one that asks a running Keycloak for a
+token and verifies it.
 
 The header placeholder is gone. There is no configuration in which this binary serves a
 request without verifying a token: `[auth]` is required, the process refuses to start
@@ -40,9 +41,11 @@ Remaining:
       if the session is ended in Keycloak; the realm's token lifetime is the window. No
       introspection call (it would put Keycloak on the path of every request) and no
       deny-list.
-- [ ] A local Keycloak is now a prerequisite for running `vs-api` in development.
-      `config/worker.dev.toml` carries the `docker run` line for one; there is no devenv
-      service for it.
+- [ ] Nothing here runs against a Keycloak *release* build. The development realm is
+      `start-dev` with an in-memory database, which is right for a test and is not how a
+      realm is deployed; the suite has never met one behind TLS with a persistent
+      database, where the issuer is an https URL and the discovery document is served by
+      a reverse proxy.
 - [ ] Test coverage: the five paths where a regression silently loses or mis-attributes
       work have tests — replay, back-pressure, the batch path, the `source_uri` prefix
       check and DAG-list activation. What is still untested is the multipart upload path
@@ -94,6 +97,19 @@ restart, which is asserted against a realm served on a real socket.
 
 **Roles.** `realm_access.roles` plus, when `auth.client_id` names one,
 `resource_access.<client_id>.roles`. Another client's roles are that client's business.
+
+**Development realm.** `deploy/keycloak/` holds the realm the `stack` profile imports
+(`devenv --profile stack up`), with `vs-token` to fetch a token from it; `vs-api` cannot
+start without a reachable realm, so it is part of the profile rather than an extra. The
+`#[ignore]`d `a_token_from_the_development_realm_verifies` asks that realm for a token and
+asserts the claims arrive as this verifier expects, which is what notices if the realm
+file and the code drift apart.
+
+**Test keys.** The rest of the authentication tests sign their own tokens with the two RSA
+keypairs in `fixtures/`, committed deliberately: they are throwaway material, trusted by
+nothing, and having them lets every test above verify a real signature instead of mocking
+the verifier out. `fixtures/README.md` says what each one is and how to regenerate it. A
+secret scanner may flag the PEMs.
 
 **What Keycloak needs configured**: an audience mapper on the `vs-api` client (otherwise
 Keycloak mints `aud: account` and every request is refused), a mapper putting the

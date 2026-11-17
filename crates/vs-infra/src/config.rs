@@ -204,6 +204,12 @@ pub struct AuthConfig {
     /// OIDC discovery (`<issuer>/.well-known/openid-configuration`).
     pub issuer: String,
     /// Accepted `aud` values. Must be non-empty.
+    ///
+    /// Accepts a list (`["vs-api"]`) or one string, because an environment override
+    /// carries only scalars: a deployment configured entirely through `VS__*` has no way
+    /// to write a TOML array, and `VS__AUTH__AUDIENCE=vs-api,other` is what it would
+    /// reach for. Separated by commas or whitespace.
+    #[serde(deserialize_with = "audience")]
     pub audience: Vec<String>,
     /// Keycloak client whose `resource_access.<client_id>.roles` are read in addition to
     /// the realm roles. `None`: realm roles only.
@@ -229,6 +235,20 @@ pub struct AuthConfig {
     /// Clock-skew allowance on `exp` and `nbf`, in seconds. Default 30.
     #[serde(default = "leeway_s")]
     pub leeway_s: u64,
+}
+
+/// A TOML array, or one comma/whitespace-separated string.
+fn audience<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum OneOrMany {
+        One(String),
+        Many(Vec<String>),
+    }
+    Ok(match OneOrMany::deserialize(d)? {
+        OneOrMany::Many(v) => v,
+        OneOrMany::One(s) => s.split([',', ' ', '\t']).map(str::trim).filter(|p| !p.is_empty()).map(str::to_string).collect(),
+    })
 }
 
 fn org_claim() -> String {
@@ -327,6 +347,24 @@ mod tests {
         let mut v: toml::Value = toml::from_str("[worker]\nmax_in_flight = 4\n").unwrap();
         apply_env_overrides(&mut v, vec![("VS__WORKER__MAX_IN_FLIGHT".into(), "64".into())].into_iter());
         assert_eq!(v["worker"]["max_in_flight"].as_integer(), Some(64));
+    }
+
+    #[test]
+    fn the_audience_can_arrive_as_a_list_or_as_one_overridable_string() {
+        let list: AuthConfig = toml::from_str("issuer = \"https://sso/realms/r\"\naudience = [\"vs-api\", \"other\"]\n").expect("list");
+        assert_eq!(list.audience, vec!["vs-api", "other"]);
+        assert!(list.validate().is_ok());
+
+        // The shape an environment override produces, since `parse_scalar` only ever
+        // makes scalars: without this the whole config would fail to load.
+        let mut v: toml::Value = toml::from_str("[auth]\nissuer = \"https://sso/realms/r\"\naudience = [\"from-toml\"]\n").expect("toml");
+        apply_env_overrides(&mut v, vec![("VS__AUTH__AUDIENCE".into(), "vs-api, other".into())].into_iter());
+        let cfg: AuthConfig = v["auth"].clone().try_into().expect("override");
+        assert_eq!(cfg.audience, vec!["vs-api", "other"]);
+
+        let blank: AuthConfig = toml::from_str("issuer = \"https://sso/realms/r\"\naudience = \"  \"\n").expect("blank");
+        assert!(blank.audience.is_empty());
+        assert!(blank.validate().is_err(), "an audience that accepts anything must not load");
     }
 
     #[test]

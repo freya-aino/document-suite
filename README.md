@@ -33,7 +33,8 @@ crates/
   vs-vectors/       vector store trait + Qdrant (dense and sparse)          SPEC
   vs-worker/  [bin] worker roles: ingest | page | doc                       SPEC
   vs-adapt/   [bin] workflow generation, scoring, selection (dev/stage)     SPEC
-deploy/
+deploy/             embedding the suite in another deployment               README
+  keycloak/         the development realm vs-api verifies against            README
   firecracker/      microVM image + fleet                                   SPEC + README
   gpu/              model serving tier                                      SPEC + README
 config/             example models, worker, DAG list, search space, LiteLLM
@@ -42,9 +43,10 @@ config/             example models, worker, DAG list, search space, LiteLLM
 
 ## Status
 
-All 17 crates compile together and the workspace is green: **361 tests pass, none
-ignored** — the 32 integration tests run against a live Postgres, Qdrant, NATS and Garage,
-and one of them takes a document through the whole pipeline into both stores.
+All 17 crates compile together and the workspace is green: **363 tests pass, none
+ignored** — the 33 integration tests run against a live Postgres, Qdrant, NATS, Garage and
+Keycloak, one of them takes a document through the whole pipeline into both stores, and
+one asks the development realm for a token and verifies it.
 `cargo clippy --workspace --all-targets -- -D warnings` is clean. No `todo!()` or
 `unimplemented!()` remains anywhere in the tree.
 
@@ -105,25 +107,42 @@ PREFIX=vs-ci QDRANT_GRPC=56334 NATS_PORT=54222 S3_PORT=53900 .github/scripts/ser
 
 ## Development environment
 
-[devenv](https://devenv.sh) describes the system dependencies. Each service declares its
-own in a `devenv.nix` next to its code; `devenv.yaml` imports them all:
+[devenv](https://devenv.sh) describes the system dependencies, in two halves. The
+**default shell builds and unit-tests the suite and starts nothing** — no database, no
+bus, no S3, no Keycloak. The **`stack` profile** adds every service the suite talks to. A
+project that only wants the binaries never needs the second half; see
+[`deploy/README.md`](deploy/README.md).
 
-| File | Provides |
+Each component declares both next to its own code: `devenv.nix` for what the build and
+the client side need, `devenv-stack.nix` for the service itself.
+
+| Default shell | Provides |
 |---|---|
 | `devenv.nix` | Rust stable toolchain (the workspace needs ≥ 1.82), cargo-nextest, `VS_CONFIG=config/worker.dev.toml` |
-| `crates/vs-infra/devenv.nix` | NATS with JetStream (:4222), Garage S3 (:3900, bucket `visual-suite`, fixed dev key), `nats` CLI |
-| `crates/vs-vault/devenv.nix` | PostgreSQL 17 (:5432, db/user/pass `visual_suite`/`vs`/`vs`), sqlx-cli, `DATABASE_URL`, `vs-migrate` |
 | `crates/vs-ingest/devenv.nix` | pdfium (`PDFIUM_DYNAMIC_LIB_PATH`) |
-| `crates/vs-models/devenv.nix` | LiteLLM; `vs-litellm-up` / `vs-litellm-check` (not started by `devenv up`) |
-| `crates/vs-vectors/devenv.nix` | Qdrant (gRPC :6334, REST :6333), `VS__QDRANT__URL` |
+| `crates/vs-vault/devenv.nix` | sqlx-cli, `DATABASE_URL`, `vs-migrate` |
+| `crates/vs-infra/devenv.nix` | `nats` CLI, and the `AWS_*` values the blob store reads |
+| `crates/vs-vectors/devenv.nix` | `VS__QDRANT__URL` |
 | `crates/vs-worker/devenv.nix` | `vs-worker-release` |
-| `deploy/firecracker/devenv.nix` | firecracker, e2fsprogs; opt-in: `devenv --profile firecracker shell` |
+
+| `stack` profile | Service |
+|---|---|
+| `devenv-stack.nix` | collects the five below; nothing else is in the profile |
+| `crates/vs-vault/devenv-stack.nix` | PostgreSQL 17 (:5432, db/user/pass `visual_suite`/`vs`/`vs`), and the `vs`/`vs_app` roles |
+| `crates/vs-infra/devenv-stack.nix` | NATS with JetStream (:4222), Garage S3 (:3900, bucket `visual-suite`, fixed dev key) |
+| `crates/vs-vectors/devenv-stack.nix` | Qdrant (gRPC :6334, REST :6333) |
+| `crates/vs-models/devenv-stack.nix` | LiteLLM; `vs-litellm-up` / `vs-litellm-check` (scripts, not processes) |
+| `deploy/keycloak/devenv.nix` | Keycloak (:8081) with the `koki` realm imported, and `vs-token` |
+
+`deploy/firecracker/devenv.nix` is its own profile (firecracker, e2fsprogs; needs
+`/dev/kvm`): `devenv --profile firecracker shell`.
 
 ```sh
-devenv up -d          # postgres, nats, garage, qdrant (layout, bucket, key and DB roles set up on start)
-devenv shell          # or direnv
-vs-migrate            # apply vs-vault migrations as the schema owner (API/workers only check)
-devenv down
+devenv shell                     # build and unit-test the workspace; starts nothing
+devenv --profile stack up -d     # postgres, nats, garage, qdrant, keycloak
+devenv --profile stack shell     # the same, plus vs-token and the model-tier scripts
+vs-migrate                       # apply vs-vault migrations as the schema owner
+devenv --profile stack down
 ```
 
 ### Running the pipeline locally
@@ -135,7 +154,7 @@ Stage 1 and Stage 2 call models, so they need reachable endpoints. `vs-litellm-u
 tier at all the `ingest` role still runs on its own.
 
 ```sh
-devenv up -d && devenv shell
+devenv --profile stack up -d && devenv --profile stack shell
 cargo build -p vs-api -p vs-worker
 cargo run -p vs-ingest --example sample_pdf -- sample.pdf
 VS_API_ADDR=127.0.0.1:8080 ./target/debug/vs-api &
@@ -145,9 +164,8 @@ VS_ROLE=doc    ./target/debug/vs-worker &   # needs model endpoints + the graph/
 curl -X PUT --upload-file sample.pdf --aws-sigv4 "aws:amz:$AWS_REGION:s3" \
   --user "$AWS_ACCESS_KEY_ID:$AWS_SECRET_ACCESS_KEY" "$AWS_ENDPOINT/visual-suite/inbox/t1/sample.pdf"
 # Every request carries a Keycloak access token; the tenant is its organization claim.
-TOKEN=$(curl -s -X POST "$KC/realms/koki/protocol/openid-connect/token" \
-  -d grant_type=client_credentials -d client_id=vs-api -d client_secret="$KC_SECRET" \
-  | python3 -c 'import json,sys; print(json.load(sys.stdin)["access_token"])')
+# `vs-token` asks the dev realm for one (organization t1, holding the admin role).
+TOKEN=$(vs-token)
 curl -X POST 127.0.0.1:8080/v1/documents -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' \
   -d '{"language":"en","source_uri":"inbox/t1/sample.pdf"}'
 # `doc_type` is optional and trusted over anything inferred:
@@ -155,19 +173,30 @@ curl -X POST 127.0.0.1:8080/v1/documents -H "authorization: Bearer $TOKEN" -H 'c
 curl 127.0.0.1:8080/v1/jobs/<job_id> -H "authorization: Bearer $TOKEN"
 ```
 
-`vs-api` needs a Keycloak to start: `config/worker.dev.toml`'s `[auth]` section carries
-the `docker run` line for a local one and the realm it expects. What each request is
-verified against is in [`crates/vs-api/SPEC.md`](crates/vs-api/SPEC.md).
+`vs-api` refuses to start without a reachable realm, which is why Keycloak is part of
+the `stack` profile rather than an extra: the profile imports
+[`deploy/keycloak/realm-dev.json`](deploy/keycloak/README.md) on every start, so
+`vs-token` works immediately and `vs-token t2` gives a second organization to check
+isolation with. What each request is verified against is in
+[`crates/vs-api/SPEC.md`](crates/vs-api/SPEC.md).
 
 ### Tests
 
-`cargo test --workspace` runs the 329 tests that need nothing (PDF tests need
-`PDFIUM_DYNAMIC_LIB_PATH`, set by devenv). The other 32 touch a real store and are
-`#[ignore]`d; with `devenv up` running:
+`cargo test --workspace` runs the 330 tests that need nothing (PDF tests need
+`PDFIUM_DYNAMIC_LIB_PATH`, set by devenv). The other 33 touch a real service and are
+`#[ignore]`d; with the stack profile running:
 
 ```sh
+devenv --profile stack up -d
 cargo test --workspace -- --include-ignored
 ```
+
+The authentication tests sign their own tokens with the keypairs in
+`crates/vs-api/fixtures/`. Those two private keys are committed deliberately — they are
+throwaway test material, trusted by nothing and read by nothing outside the test module,
+and committing them is what lets the tests verify real signatures instead of mocking the
+verifier out. A secret scanner may still flag them (GitHub push protection among them);
+`crates/vs-api/fixtures/README.md` says what they are and how to regenerate them.
 
 **If devenv's ports are taken**, every service is also addressable by environment
 variable, so the suite can be pointed at containers of your own on any ports. This is

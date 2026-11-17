@@ -44,7 +44,9 @@ interactive_max_pending = 1000     # 429 for interactive requests above this lan
 # matched against the token's `iss` exactly and used for OIDC discovery.
 issuer = "https://sso.example.org/realms/koki"
 # Accepted `aud` values. Needs an audience mapper on the vs-api client in Keycloak —
-# without one, Keycloak mints `aud: account` and every request is refused.
+# without one, Keycloak mints `aud: account` and every request is refused. A plain string
+# works too, comma-separated, so a deployment configured only through the environment can
+# use VS__AUTH__AUDIENCE (overrides carry scalars, never arrays).
 audience = ["vs-api"]
 # Client whose `resource_access.<client_id>.roles` are read as well as the realm roles.
 client_id = "vs-api"

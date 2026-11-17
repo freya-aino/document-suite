@@ -37,11 +37,9 @@ interactive_max_pending = 1000     # 429 for interactive requests above this lan
 # scratch_dir = "/scratch"         # upload spool while hashing; default: system temp dir
 
 [auth]
-# vs-api refuses to start without this. Point it at a local Keycloak:
-#   docker run -p 8081:8080 -e KC_BOOTSTRAP_ADMIN_USERNAME=admin \
-#     -e KC_BOOTSTRAP_ADMIN_PASSWORD=admin quay.io/keycloak/keycloak:26.0 start-dev
-# Then create a `koki` realm, a `vs-api` client with an audience mapper, a `vs-admin`
-# realm role, and a user mapper putting the organization in `organization`.
+# vs-api refuses to start without this. `devenv --profile stack up` starts a Keycloak
+# here and imports the realm these values describe (deploy/keycloak/README.md);
+# `vs-token` fetches a token from it.
 issuer = "http://127.0.0.1:8081/realms/koki"
 audience = ["vs-api"]
 client_id = "vs-api"

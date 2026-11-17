@@ -50,7 +50,7 @@ jobs:
       - run: cargo check --workspace --all-targets
 
   integration:
-    name: tests that need Postgres, Qdrant, NATS and S3
+    name: tests that need Postgres, Qdrant, NATS, S3 and Keycloak
     runs-on: ubuntu-latest
     services:
       # The one service with a health check and nothing to provision beyond a role.
@@ -83,11 +83,14 @@ jobs:
       # and this job read the same values. Not secrets: this Garage lasts one job.
       AWS_ACCESS_KEY_ID: GK0123456789abcdef01234567
       AWS_SECRET_ACCESS_KEY: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+      # The realm `deploy/keycloak/realm-dev.json` describes, imported by the script
+      # below. `vs-api` cannot start without one, and the auth test asks it for a token.
+      VS_KEYCLOAK_ISSUER: http://127.0.0.1:8081/realms/koki
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Start Qdrant, NATS and Garage
+      - name: Start Qdrant, NATS, Garage and Keycloak
         run: .github/scripts/services.sh
       - name: Create the runtime role
         # Migration 0003 refuses to run without it, by design: the grants it makes are
@@ -99,4 +102,4 @@ jobs:
       - run: cargo test --workspace -- --include-ignored
       - name: Service logs
         if: failure()
-        run: for c in vs-ci-qdrant vs-ci-nats vs-ci-garage; do echo "== $c"; docker logs "$c" 2>&1 | tail -40; done
+        run: for c in vs-ci-qdrant vs-ci-nats vs-ci-garage vs-ci-keycloak; do echo "== $c"; docker logs "$c" 2>&1 | tail -40; done
