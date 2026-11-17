@@ -42,7 +42,7 @@ config/             example models, worker, DAG list, search space, LiteLLM
 
 ## Status
 
-All 17 crates compile together and the workspace is green: **321 tests pass, none
+All 17 crates compile together and the workspace is green: **326 tests pass, none
 ignored** — the 24 integration tests run against a live Postgres, Qdrant, NATS and Garage.
 `cargo clippy --workspace --all-targets -- -D warnings` is clean. No `todo!()` or
 `unimplemented!()` remains anywhere in the tree.
@@ -63,7 +63,6 @@ section lists what is left. The cross-cutting gaps:
   content-aware routing (goal G2) and the pre-processing steps are unvalidated: whether
   deskewing or binarising helps any page class is exactly the open question. Stage 2
   extraction quality and worker sizing are likewise unmeasured.
-- `blocks.verify` appears in the `vs-dag` step catalogue and is not implemented.
 
 Deliberately not built, each recorded with its reasoning in the owning component's docs:
 dewarping (`vs-ingest` — a page-curl warp needs the page boundary, not ink statistics)
@@ -143,7 +142,7 @@ curl 127.0.0.1:8080/v1/jobs/<job_id> -H 'x-vs-tenant: t1'
 
 ### Tests
 
-`cargo test --workspace` runs the 297 tests that need nothing (PDF tests need
+`cargo test --workspace` runs the 302 tests that need nothing (PDF tests need
 `PDFIUM_DYNAMIC_LIB_PATH`, set by devenv). The other 24 touch a real store and are
 `#[ignore]`d; with `devenv up` running:
 

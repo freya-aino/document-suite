@@ -14,6 +14,7 @@ pub fn production_registry(client: Arc<OpenAiClient>) -> StepRegistry {
     let mut reg = StepRegistry::new();
     reg.register(Arc::new(vs_ingest::steps::MergeNative))
         .register(Arc::new(vs_ingest::steps::MergeBlocks))
+        .register(Arc::new(vs_ingest::steps::VerifyBlocks))
         .register(Arc::new(vs_ingest::steps::FigureCrop))
         // Pre-processing. Steps rather than a fixed pass so `vs-adapt` can measure
         // whether each one helps a given page class instead of assuming it does.

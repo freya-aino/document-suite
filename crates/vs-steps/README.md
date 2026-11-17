@@ -8,17 +8,14 @@ The production step catalogue: one place that names every step a `page` worker c
 
 ## What it does
 
-`production_registry(client)` returns the 15 steps a worker knows: 3 CPU steps and 5
+`production_registry(client)` returns the 17 steps a worker knows: 4 CPU steps and 6
 pre-processing steps from `vs-ingest`, and 7 model-backed steps from `vs-models`. Tests
-assert the registry covers the documented catalogue, that the shipped example DAG list
-loads against it, and that every template in the example search space generates
-candidates it accepts.
+assert the registry holds **exactly** the documented catalogue — neither more nor fewer
+kinds — that the shipped example DAG list loads against it, and that every template in
+the example search space generates candidates it accepts.
 
 ## Known limitations
 
-- `blocks.verify` is in the `vs-dag` catalogue but has no implementation to register,
-  so the registry covers 16 of 17 documented kinds. See [`vs-dag`](../vs-dag/README.md)'s
-  known limitations for what is actually missing.
 - `page.dewarp` is not implemented; see `vs-ingest`'s status for why a page-curl warp
   needs the page boundary rather than ink statistics. `page.orient` *is* registered, and
   its own documentation separates the half that is measured from the half that is

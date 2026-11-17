@@ -13,13 +13,10 @@ kinds steps exchange, and the `NodeTrace` that records what each node did.
 
 ## Known limitations
 
-- `blocks.verify` is listed in the step catalogue below but **is not implemented and
-  not registered anywhere** — the only gap in the catalogue (16 of 17 kinds exist).
-  It is kept in the catalogue rather than dropped because the shape is settled (two
-  block sets in, confidence from agreement out) and `vs-stitch` names it as the
-  intended home for VLM-assisted link judgement; what is missing is a definition of
-  agreement between two block sets with different segmentations, which is the same
-  problem `vs-adapt`'s layout F1 solves and should share code with.
+- Every kind in the catalogue below is implemented and registered, but `blocks.verify`
+  is the CPU half only: it compares two parsers' readings arithmetically. The `CPU/GPU`
+  tier the catalogue once claimed for it anticipated a VLM adjudicating a disagreement,
+  which is not built — see `vs-stitch`'s post-v1 note for why that stays out of v1.
 - No artefact kind carries region relationships; `LayoutRegion` has no id and no
   parent, so a step cannot express that one region contains another.
 
@@ -126,7 +123,7 @@ earlier levels). Nodes in one level run concurrently.
 | `chart.to_table` | GPU | chart crops → data table HTML |
 | `blocks.merge_native` | CPU | native text layer + layout (+ recognised tables/formulas) → blocks |
 | `blocks.merge` | CPU | merge several block sets (union by IoU, keeps highest-confidence) |
-| `blocks.verify` | CPU/GPU | compares two block sets; sets confidence from agreement — **not implemented** |
+| `blocks.verify` | CPU | re-scores one block set by how far a second reading corroborates it; adds and drops nothing |
 | `page.orient` | CPU | turns a sideways or upside-down page (quarter turns are measured, the flip is a gated judgement) |
 | `page.deskew` | CPU | straightens a crooked scan (projection profile) |
 | `page.denoise` | CPU | median filter for speckled scans and photos |

@@ -27,6 +27,66 @@
       }
     },
     {
+      "id": "e2e-cross-checked",
+      "description": "Two end-to-end parsers on the same page; the merged set is re-scored by how far the second reading corroborates it. Doubles the per-page model cost, which is exactly why it is scored rather than assumed.",
+      "slots": {
+        "primary": [
+          "paddleocr-vl-1.5"
+        ],
+        "second": [
+          "mineru-2.5"
+        ],
+        "weight": [
+          0.25,
+          0.5
+        ]
+      },
+      "dag": {
+        "output": "verify",
+        "nodes": [
+          {
+            "id": "primary",
+            "step": "page.parse_e2e",
+            "inputs": [
+              "$page_image"
+            ],
+            "params": {
+              "model": "{primary}"
+            }
+          },
+          {
+            "id": "second",
+            "step": "page.parse_e2e",
+            "inputs": [
+              "$page_image"
+            ],
+            "params": {
+              "model": "{second}"
+            }
+          },
+          {
+            "id": "merge",
+            "step": "blocks.merge",
+            "inputs": [
+              "primary",
+              "second"
+            ]
+          },
+          {
+            "id": "verify",
+            "step": "blocks.verify",
+            "inputs": [
+              "merge",
+              "second"
+            ],
+            "params": {
+              "weight": "{weight}"
+            }
+          }
+        ]
+      }
+    },
+    {
       "id": "native-layout-tables",
       "description": "Born-digital pages: native text layer + layout model; tables via a doc VLM, no OCR.",
       "slots": {

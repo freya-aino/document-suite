@@ -50,10 +50,43 @@ fn production_registry_step_signatures() {
     expect("chart.to_table", &[FigureCrops], Blocks);
     expect("blocks.merge", &[Blocks, Blocks], Blocks);
     expect("blocks.merge_native", &[TextLayer, Layout, Blocks], Blocks);
+    expect("blocks.verify", &[Blocks, Blocks], Blocks);
     // Pre-processing is page_image -> page_image, which is what lets it compose and lets
     // a DAG apply none, one or several operations.
-    for kind in ["page.deskew", "page.denoise", "page.normalize", "page.binarize", "page.crop_margins"] {
+    for kind in ["page.orient", "page.deskew", "page.denoise", "page.normalize", "page.binarize", "page.crop_margins"] {
         expect(kind, &[PageImage], PageImage);
     }
+
+    // Exhaustive, not just present: `blocks.verify` sat in the documented catalogue
+    // unimplemented across four revisions because this test only ever asked whether the
+    // steps it listed existed, never whether the registry held anything else — or, as it
+    // turned out, whether the list had kept up (`page.orient` was missing from it too).
+    // Adding a step now means editing this list, which means editing the catalogue in
+    // `vs-dag/README.md` that it mirrors.
+    let mut kinds: Vec<&str> = steps.kinds().copied().collect();
+    kinds.sort_unstable();
+    assert_eq!(
+        kinds,
+        vec![
+            "blocks.merge",
+            "blocks.merge_native",
+            "blocks.verify",
+            "chart.to_table",
+            "figure.crop",
+            "figure.describe",
+            "formula.recognize",
+            "layout.detect",
+            "page.binarize",
+            "page.crop_margins",
+            "page.denoise",
+            "page.deskew",
+            "page.normalize",
+            "page.orient",
+            "page.parse_e2e",
+            "region.ocr",
+            "table.recognize",
+        ],
+        "the production registry and the step catalogue have diverged"
+    );
 }
 

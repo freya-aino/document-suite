@@ -26,9 +26,11 @@ Remaining:
       there is nothing to point it at.
 - [ ] Classifier accuracy is specified as part of adaptation ("a wrong class costs quality
       or speed") but is not actually scored — only DAG outputs are.
-- [ ] The conditioning templates in `search-space.example.json` are validated but have
-      never been scored on a real dataset, so whether deskewing or binarising helps any
-      page class is still unmeasured — the question they exist to answer.
+- [ ] The conditioning and cross-check templates in `search-space.example.json` are
+      validated but have never been scored on a real dataset, so whether deskewing or
+      binarising helps any page class — or whether a second parser's corroboration
+      (`e2e-cross-checked`) is worth its doubled per-page cost — is still unmeasured,
+      which is the question they exist to answer.
 - [ ] `promote` uploads as a candidate; activation stays a manual API call by design.
 
 ## Assumptions this component rests on

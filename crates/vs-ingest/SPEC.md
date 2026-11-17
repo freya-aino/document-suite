@@ -9,7 +9,7 @@ Implemented: magic-byte format detection, the pdfium PDF rasterizer with a crash
 render-child pool (hangs killed on timeout, crashes retried once on a fresh child), the
 PNG/JPEG/TIFF rasterizer with bit-depth normalisation and WhiteIsZero inversion, EXIF
 orientation, native text-layer extraction, tier-0 page signals, classifier thumbnails, and
-3 CPU DAG steps. 12 unit tests pass, plus pool, raster and pre-processing integration
+4 CPU DAG steps. 17 unit tests pass, plus pool, raster and pre-processing integration
 tests (21 in all).
 
 Also implemented: **pre-processing as DAG steps** (`preprocess`) — `page.orient`,
@@ -144,6 +144,34 @@ rendered page per child is held before upload.
 | `figure.crop` | `page_image, layout → figure_crops` | Crops `figure`/`chart` regions with `padding` (default 2 %), returns crops (see below). |
 | `blocks.merge_native` | `text_layer, layout, blocks → blocks` | Assigns native text spans to layout regions (span centre inside region); text regions get native text; regions already covered by recognised blocks (tables, formulas) take those. Spans outside every region become `other` blocks. Confidence: 0.99 for native text. |
 | `blocks.merge` | `blocks, blocks → blocks` | Union of two block sets; overlapping blocks (IoU ≥ 0.5, same kind family) keep the higher-confidence one. |
+| `blocks.verify` | `blocks, blocks → blocks` | Re-scores the first set by how far the second corroborates it. Membership is unchanged (see below). |
+
+### `blocks.verify`
+
+- Params: `{"iou": f32, "weight": f32, "kind_mismatch": f32}`, defaults `0.5`/`0.5`/`0.5`,
+  each within `0..=1` (else `InvalidParams`). `null` params → defaults.
+- Pairs each block with at most one counterpart in the second set, greedily from the best
+  overlap down, and requires IoU ≥ `iou` — the same threshold `blocks.merge` uses, so a
+  pair that merges is a pair that verifies. One counterpart cannot vouch for two blocks,
+  which is what stops a parser's spurious split coming out corroborated twice.
+- New confidence = `(1 - weight)·own + weight·(agreement · counterpart's confidence)`,
+  where `agreement` is the token-overlap (Dice) similarity of the two readings' text,
+  halved (`kind_mismatch`) when they disagree about the block kind and zero when there is
+  no counterpart at all. So a middling block a confident second reading agrees with is
+  pulled up, and a block nothing else saw loses `weight` of its confidence. `weight = 0`
+  is the identity, which makes the step safe to put in a DAG before it is tuned.
+- Token overlap rather than edit distance because the disagreements that matter are
+  dropped or hallucinated words, not spelling; two readings of the same words in a
+  different order agree. Two empty readings agree completely — both parsers found a block
+  with no text, which is a real outcome for a figure or a rule.
+- **Membership is never changed**: a block only the second parser saw is not added and one
+  it missed is not dropped. That is `blocks.merge`'s job, and keeping them apart is what
+  makes the output readable — after a merge you cannot tell which parser vouched for a
+  block, after a verify the confidence says so. `blocks.merge` then `blocks.verify` against
+  either input both unions and scores, which is what `e2e-cross-checked` in
+  `config/search-space.example.json` does.
+- The comparison is arithmetic. A VLM adjudicating a disagreement — the `GPU` half the
+  `vs-dag` catalogue once claimed for this kind — is not implemented.
 
 ### `figure.crop`
 

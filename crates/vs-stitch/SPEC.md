@@ -148,6 +148,8 @@ would pair every heading with the paragraph under it.
 
 ## Post-v1
 
-VLM-assisted judgement for low-confidence links (`blocks.verify`-style) — which would make
-this crate non-deterministic, so it stays a deliberate v1 exclusion. Footnote anchoring and
+VLM-assisted judgement for low-confidence links — which would make this crate
+non-deterministic, so it stays a deliberate v1 exclusion. `blocks.verify` now scores
+agreement between two parsers arithmetically, which is the deterministic half of the same
+idea and runs a step earlier, on blocks rather than links. Footnote anchoring and
 multi-column flow repair are now scheduled; see `## Status`.
