@@ -17,6 +17,7 @@ pub fn production_registry(client: Arc<OpenAiClient>) -> StepRegistry {
         .register(Arc::new(vs_ingest::steps::FigureCrop))
         // Pre-processing. Steps rather than a fixed pass so `vs-adapt` can measure
         // whether each one helps a given page class instead of assuming it does.
+        .register(Arc::new(vs_ingest::preprocess::Orient))
         .register(Arc::new(vs_ingest::preprocess::Deskew))
         .register(Arc::new(vs_ingest::preprocess::Denoise))
         .register(Arc::new(vs_ingest::preprocess::Normalize))

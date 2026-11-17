@@ -15,11 +15,11 @@
 //!   describe a black-and-white figure. Put conditioning on the recognition branch of a
 //!   DAG, not ahead of the figure branch.
 //!
-//! Not here, deliberately: orientation detection and dewarping. Both need more than
-//! pixel statistics — distinguishing 90° from 270°, or 0° from 180°, requires knowing
-//! which way the glyphs face, and estimating a page-curl warp requires finding the page
-//! boundary. A wrong guess at either is worse than leaving the page alone, so they are
-//! recorded as open items in SPEC.md rather than approximated here.
+//! `page.orient` is the one step here whose two halves differ in how much they can be
+//! trusted, and the difference is stated in its own documentation rather than hidden:
+//! which *axis* the text lines run along is a strong measurement, which *end* is up is a
+//! weak one. Dewarping is still absent — estimating a page-curl warp needs the page
+//! boundary, not ink statistics — and remains an open item in SPEC.md.
 
 use async_trait::async_trait;
 use image::{DynamicImage, GrayImage, RgbImage};
@@ -194,6 +194,174 @@ pub fn skew_angle(gray: &GrayImage, max_deg: f32, step_deg: f32) -> f32 {
     best.0
 }
 
+/// Fraction of dark pixels per row, and per column.
+fn ink_profiles(gray: &GrayImage, level: u8) -> (Vec<f32>, Vec<f32>) {
+    let (w, h) = (gray.width() as usize, gray.height() as usize);
+    let mut rows = vec![0f32; h];
+    let mut cols = vec![0f32; w];
+    for (x, y, p) in gray.enumerate_pixels() {
+        if p.0[0] <= level {
+            rows[y as usize] += 1.0;
+            cols[x as usize] += 1.0;
+        }
+    }
+    for r in rows.iter_mut() {
+        *r /= w.max(1) as f32;
+    }
+    for c in cols.iter_mut() {
+        *c /= h.max(1) as f32;
+    }
+    (rows, cols)
+}
+
+/// How strongly a profile alternates between ink and space, relative to its own mean.
+///
+/// Text lines make the profile across them spiky and the profile along them flat, so this
+/// is larger on the axis that crosses the lines. Normalising by the mean is what makes
+/// the two axes of one page comparable: a page has the same total ink whichever way it is
+/// held, but not the same number of bins.
+fn line_score(profile: &[f32]) -> f32 {
+    let n = profile.len() as f32;
+    if n == 0.0 {
+        return 0.0;
+    }
+    let mean = profile.iter().sum::<f32>() / n;
+    if mean <= f32::EPSILON {
+        return 0.0;
+    }
+    let var = profile.iter().map(|v| (v - mean) * (v - mean)).sum::<f32>() / n;
+    var / (mean * mean)
+}
+
+/// Contiguous runs of rows carrying more than `cutoff` ink: the text lines.
+fn bands(profile: &[f32], cutoff: f32) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    let mut start = None;
+    for (i, v) in profile.iter().enumerate() {
+        match (*v > cutoff, start) {
+            (true, None) => start = Some(i),
+            (false, Some(s)) => {
+                out.push((s, i));
+                start = None;
+            }
+            _ => {}
+        }
+    }
+    if let Some(s) = start {
+        out.push((s, profile.len()));
+    }
+    out
+}
+
+/// Where the ink sits inside its text lines: positive when it is below the middle of the
+/// line, negative when above. Zero when there are no lines to measure.
+///
+/// Upright text is positive, and the reason is typographic rather than statistical. Most
+/// of a line's ink is its x-height band, which sits **against the baseline** — at the
+/// bottom of the line. Above it there is only the sparse ascender zone; below it only
+/// descenders, which are rare enough that the band this finds usually runs from the
+/// ascender line down to the baseline. So the centre of mass of an upright line of text
+/// sits below the middle of its own extent.
+///
+/// **It is still the weaker of the two measurements.** The effect is a few percent of
+/// the line height and it assumes a script with an x-height: a page of all-caps text or
+/// of bare figures has little asymmetry to find, and a script without ascenders and
+/// descenders may show none. That is why a 180° turn is applied only when this clears a
+/// margin, and the page is otherwise left as it came.
+///
+/// (An earlier version of this had the sign the other way round, reasoning from
+/// ascenders being more frequent than descenders. They are, but the x-height block
+/// dominates both, so the conclusion was simply backwards — and every page would have
+/// been flipped. The round-trip test in `tests/preprocess.rs` is what pins the
+/// direction.)
+fn baseline_heaviness(profile: &[f32]) -> f32 {
+    let n = profile.len();
+    if n == 0 {
+        return 0.0;
+    }
+    let mean = profile.iter().sum::<f32>() / n as f32;
+    if mean <= f32::EPSILON {
+        return 0.0;
+    }
+    let mut weighted = 0.0;
+    let mut total = 0.0;
+    for (from, to) in bands(profile, mean * 0.5) {
+        let height = (to - from) as f32;
+        // One- and two-row bands are noise, not lines, and have no inside to speak of.
+        if height < 3.0 {
+            continue;
+        }
+        let ink: f32 = profile[from..to].iter().sum();
+        if ink <= f32::EPSILON {
+            continue;
+        }
+        let centroid: f32 = profile[from..to].iter().enumerate().map(|(i, v)| (i as f32 + 0.5) * v).sum::<f32>() / ink;
+        // Fraction of the line height by which the ink's centre of mass sits below the
+        // line's geometric centre. Rows run downwards, so "below" is the larger index.
+        weighted += (centroid - height / 2.0) / height * ink;
+        total += ink;
+    }
+    if total <= f32::EPSILON {
+        0.0
+    } else {
+        weighted / total
+    }
+}
+
+/// The rotation in degrees (0, 90, 180 or 270) that would stand the page upright, where
+/// 90 means a quarter turn clockwise.
+///
+/// Two separate decisions, with very different confidence:
+///
+/// 1. **Which axis the text lines run along** — strong. A page of text has a spiky ink
+///    profile across its lines and a flat one along them, so comparing the two axes says
+///    whether the page is sideways. `axis_margin` is how much spikier the other axis must
+///    be before the page is turned.
+/// 2. **Which end is up** — weak; see [`baseline_heaviness`]. Applied only when the
+///    measurement clears `min_asymmetry`. A sideways page is turned either way, because
+///    it is unreadable either way and clockwise is as good a guess as any when the
+///    measurement is not convincing — that guess is logged. An upright page, by
+///    contrast, is left alone unless the measurement is convincing: it is already
+///    readable, so a wrong flip would be a loss rather than a coin toss.
+///
+/// Returns 0 for a page with too little ink to measure, which is the honest answer: an
+/// unrotated page and an unmeasurable one are treated the same.
+pub fn orientation(gray: &GrayImage, axis_margin: f32, min_asymmetry: f32) -> u16 {
+    let (w, h) = (gray.width(), gray.height());
+    if w == 0 || h == 0 {
+        return 0;
+    }
+    let level = imageproc::contrast::otsu_level(gray);
+    let dark = gray.pixels().filter(|p| p.0[0] <= level).count();
+    if dark < 200 {
+        return 0;
+    }
+    let (rows, cols) = ink_profiles(gray, level);
+    let (row_score, col_score) = (line_score(&rows), line_score(&cols));
+
+    // Reversing a profile reflects every band about its own centre, so it negates the
+    // asymmetry exactly. One measurement therefore decides both of the remaining cases:
+    // its sign is which end is up, and its size is how much that is worth believing.
+    let min_asymmetry = min_asymmetry.max(0.0);
+
+    if col_score > row_score * axis_margin.max(1.0) {
+        // Sideways. A clockwise quarter turn takes the left edge to the top, so the
+        // turned page's rows are the columns in the order they already are.
+        let a = baseline_heaviness(&cols);
+        if a.abs() < min_asymmetry {
+            tracing::debug!(asymmetry = a, "page is sideways; which way up is a guess");
+            return 90;
+        }
+        return if a > 0.0 { 90 } else { 270 };
+    }
+
+    // Upright axis: only the flip is left.
+    if baseline_heaviness(&rows) < -min_asymmetry {
+        return 180;
+    }
+    0
+}
+
 /// Ink bounding box in fractions of the page, or `None` when there is no ink to bound.
 pub fn ink_bounds(gray: &GrayImage, min_ink_per_line: f32) -> Option<(f32, f32, f32, f32)> {
     let (w, h) = (gray.width(), gray.height());
@@ -248,6 +416,63 @@ fn luma_percentiles(gray: &GrayImage, low: f32, high: f32) -> (u8, u8) {
 // ---------------------------------------------------------------------------------------
 // Steps
 // ---------------------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+pub struct OrientParams {
+    /// How much spikier the other axis's ink profile must be before the page is treated
+    /// as sideways. 1.0 would turn a page on the slightest difference.
+    pub axis_margin: f32,
+    /// Smallest ink asymmetry that is allowed to decide which end is up. Below it the
+    /// page keeps the orientation it came with (or, when sideways, takes the documented
+    /// guess), because the measurement is weak — see `baseline_heaviness`.
+    pub min_asymmetry: f32,
+}
+
+impl Default for OrientParams {
+    fn default() -> Self {
+        Self { axis_margin: 1.3, min_asymmetry: 0.02 }
+    }
+}
+
+/// Turns a page that was scanned or photographed sideways or upside down.
+///
+/// A quarter turn is lossless and the measurement behind it is strong. Which *end* is up
+/// is a weaker judgement, and deliberately conservative: see [`orientation`].
+pub struct Orient;
+
+#[async_trait]
+impl Step for Orient {
+    fn kind(&self) -> &'static str {
+        "page.orient"
+    }
+    fn signature(&self) -> Signature {
+        page_signature()
+    }
+    fn default_timeout_ms(&self) -> u64 {
+        30_000
+    }
+    async fn run(&self, _ctx: &StepContext, inputs: &[&Artifact], params: &serde_json::Value) -> Result<StepOutput, StepError> {
+        let page = page_input(inputs)?;
+        let p: OrientParams = params_of(params)?;
+        map_page(&page, "page.orient", move |img| {
+            let gray = analysis_gray(&img, ANALYSIS_LONG_SIDE);
+            let deg = orientation(&gray, p.axis_margin, p.min_asymmetry);
+            if deg == 0 {
+                return None;
+            }
+            tracing::debug!(deg, "turning page upright");
+            // Quarter turns and flips move whole pixels, so unlike deskew this costs no
+            // resampling and no detail.
+            Some(match deg {
+                90 => img.rotate90(),
+                180 => img.rotate180(),
+                _ => img.rotate270(),
+            })
+        })
+        .await
+    }
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(default)]

@@ -167,6 +167,57 @@
       }
     },
     {
+      "id": "oriented-e2e",
+      "description": "Scans and photographs that may be sideways or upside down: stand the page up, straighten it, then one end-to-end call. page.orient's quarter turn rests on a strong measurement and its 180 flip on a weak one, so min_asymmetry is a slot \u2014 a high value disables the flip, which is how scoring decides whether it earns its place on a given page class.",
+      "slots": {
+        "model": [
+          "paddleocr-vl-1.5",
+          "mineru-2.5"
+        ],
+        "min_asymmetry": [
+          0.02,
+          1.0
+        ]
+      },
+      "dag": {
+        "output": "parse",
+        "nodes": [
+          {
+            "id": "upright",
+            "step": "page.orient",
+            "inputs": [
+              "$page_image"
+            ],
+            "params": {
+              "axis_margin": 1.3,
+              "min_asymmetry": "{min_asymmetry}"
+            }
+          },
+          {
+            "id": "straight",
+            "step": "page.deskew",
+            "inputs": [
+              "upright"
+            ],
+            "params": {
+              "max_deg": 5.0,
+              "min_apply_deg": 0.2
+            }
+          },
+          {
+            "id": "parse",
+            "step": "page.parse_e2e",
+            "inputs": [
+              "straight"
+            ],
+            "params": {
+              "model": "{model}"
+            }
+          }
+        ]
+      }
+    },
+    {
       "id": "conditioned-e2e",
       "description": "Photographed or poor-quality scans: normalise contrast, optionally denoise, then one end-to-end call. Binarisation is NOT combined with the figure branch anywhere, because page.binarize outputs greyscale.",
       "slots": {

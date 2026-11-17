@@ -98,21 +98,27 @@ impl Rasterizer for ImageRasterizer {
 /// A raster page is one full-page image without a text layer.
 ///
 /// The zeroes are honest rather than lazy: a scan genuinely has no text layer and no
-/// embedded image objects, it *is* one image. `ink_coverage` is the one thing that can
-/// actually be measured here, and it is measured on a downscaled copy — distinguishing a
-/// blank page from a dense one does not need full resolution.
+/// embedded image objects, it *is* one image. Ink coverage and orientation are the two
+/// things that can actually be measured, and both are measured on a downscaled copy —
+/// telling a blank page from a dense one, or a portrait page from a sideways one, does
+/// not need full resolution.
 fn image_signals(img: &DynamicImage) -> PageSignals {
     const INK_ANALYSIS_LONG_SIDE: u32 = 600;
     let gray = img.thumbnail(INK_ANALYSIS_LONG_SIDE, INK_ANALYSIS_LONG_SIDE).to_luma8();
+    // EXIF orientation is applied by the decoder, so anything left is a genuinely
+    // mis-oriented scan. This used to report a hard-coded 0, which meant every scan and
+    // photo told the classifier it was upright whether it was or not.
+    //
+    // `orientation` returns the turn that would straighten the page; the signal is the
+    // page's own rotation, which is the opposite turn. Defaults are the step's.
+    let correction = crate::preprocess::orientation(&gray, 1.3, 0.02);
     PageSignals {
         text_chars: 0,
         text_layer_coverage: 0.0,
         ocr_text_layer: false,
         image_count: 1,
         image_area_ratio: 1.0,
-        // EXIF orientation is already applied by the decoder, so what remains is a
-        // genuinely mis-oriented scan, which pixels alone cannot resolve.
-        rotation_deg: 0,
+        rotation_deg: (360 - correction) % 360,
         ink_coverage: crate::preprocess::ink_coverage(&gray),
     }
 }

@@ -19,6 +19,12 @@ pub struct PageSignals {
     pub ocr_text_layer: bool,
     pub image_count: u32,
     pub image_area_ratio: f32,
+    /// How far the source page is rotated from upright, clockwise: 0, 90, 180 or 270.
+    ///
+    /// **Not a correction to apply.** For a PDF it is the page's own `/Rotate`, which
+    /// pdfium has already applied to the rendered bitmap; for a raster it is measured
+    /// from the ink and the bitmap has *not* been turned. In both cases the page image a
+    /// step receives may still be sideways — `page.orient` is what turns it.
     pub rotation_deg: u16,
     /// Fraction of the page darker than its Otsu threshold: how much ink is on it.
     ///

@@ -6,7 +6,7 @@ use serde_json::json;
 
 use vs_core::{ClassifierTier, DocType, HashKey, LanguageTag, PageProfile, RunId};
 use vs_dag::{Artifact, ArtifactKind, PageImage, Step, StepContext};
-use vs_ingest::preprocess::{Binarize, CropMargins, Denoise, Deskew, Normalize};
+use vs_ingest::preprocess::{orientation, Binarize, CropMargins, Denoise, Deskew, Normalize, Orient};
 
 fn ctx() -> StepContext {
     StepContext {
@@ -65,6 +65,7 @@ async fn run(step: &dyn Step, page: &PageImage, params: serde_json::Value) -> Pa
 fn every_step_is_page_image_to_page_image() {
     // The shape that lets these compose, and lets a DAG apply none or several.
     for step in [
+        &Orient as &dyn Step,
         &Deskew as &dyn Step,
         &Denoise as &dyn Step,
         &Normalize as &dyn Step,
@@ -82,6 +83,7 @@ fn every_step_is_page_image_to_page_image() {
 async fn each_step_returns_a_decodable_page() {
     let page = page_png(300, 400);
     for step in [
+        &Orient as &dyn Step,
         &Deskew as &dyn Step,
         &Denoise as &dyn Step,
         &Normalize as &dyn Step,
@@ -166,4 +168,94 @@ async fn bad_params_are_rejected_rather_than_ignored() {
     let art = Artifact::PageImage(page);
     let err = Deskew.run(&ctx(), &[&art], &json!({ "max_deg": "five" })).await;
     assert!(err.is_err(), "a malformed param must not be silently defaulted");
+}
+
+/// A page of text-shaped bands with the asymmetry real text has: a solid x-height block,
+/// sparse ascenders above it and sparser descenders below.
+///
+/// The asymmetry is put in deliberately, so this fixture tests that `orientation` reads
+/// the signal it claims to read and in the direction it claims — not that real scans
+/// carry it. That second question needs labelled pages, which is exactly why the step
+/// applies a flip only when the measurement is decisive.
+fn text_like_page(w: u32, h: u32) -> image::GrayImage {
+    const LINE: u32 = 24;
+    image::GrayImage::from_fn(w, h, |x, y| {
+        let margin = x < w / 10 || x >= w * 9 / 10 || y < h / 10 || y >= h * 9 / 10;
+        let within = y % LINE;
+        let dark = match within {
+            // Ascenders: a third of the columns carry ink.
+            2..=7 => x % 3 == 0,
+            // x-height: the body of the line.
+            8..=18 => true,
+            // Descenders: rarer than ascenders, which is the whole signal.
+            19..=21 => x % 8 == 0,
+            _ => false,
+        };
+        image::Luma([if dark && !margin { 40 } else { 235 }])
+    })
+}
+
+fn png_of(img: &image::GrayImage) -> PageImage {
+    let mut bytes = Vec::new();
+    image::DynamicImage::ImageLuma8(img.clone())
+        .write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png)
+        .unwrap();
+    PageImage {
+        uri: "mem://page".into(),
+        bytes: Arc::from(bytes),
+        width_px: img.width(),
+        height_px: img.height(),
+        dpi: 200,
+    }
+}
+
+#[test]
+fn orientation_recovers_every_quarter_turn() {
+    let upright = text_like_page(400, 600);
+    let (margin, asym) = (1.3, 0.02);
+    assert_eq!(orientation(&upright, margin, asym), 0, "an upright page must be left alone");
+
+    let dyn_of = |g: &image::GrayImage| image::DynamicImage::ImageLuma8(g.clone());
+    // Each case asks: what turn would undo this one?
+    assert_eq!(orientation(&dyn_of(&upright).rotate90().to_luma8(), margin, asym), 270);
+    assert_eq!(orientation(&dyn_of(&upright).rotate270().to_luma8(), margin, asym), 90);
+    assert_eq!(orientation(&dyn_of(&upright).rotate180().to_luma8(), margin, asym), 180);
+}
+
+#[test]
+fn orientation_declines_to_guess_without_evidence() {
+    // A blank page has nothing to measure.
+    let blank = image::GrayImage::from_pixel(200, 200, image::Luma([255]));
+    assert_eq!(orientation(&blank, 1.3, 0.02), 0);
+
+    // Lines with no top-to-bottom asymmetry: the axis is clear, the end is not. An
+    // upright page like this keeps its orientation rather than being flipped on noise.
+    let symmetric = image::GrayImage::from_fn(400, 600, |_, y| {
+        image::Luma([if (8..=18).contains(&(y % 24)) { 40 } else { 235 }])
+    });
+    assert_eq!(orientation(&symmetric, 1.3, 0.02), 0);
+    // Sideways, the same page must still be turned: it is unreadable as it stands, so a
+    // documented guess beats leaving it.
+    let sideways = image::DynamicImage::ImageLuma8(symmetric).rotate90().to_luma8();
+    assert_eq!(orientation(&sideways, 1.3, 0.02), 90);
+}
+
+#[tokio::test]
+async fn orient_turns_the_page_and_keeps_its_pixels() {
+    let upright = text_like_page(400, 600);
+    let sideways = png_of(&image::DynamicImage::ImageLuma8(upright.clone()).rotate90().to_luma8());
+    assert_eq!((sideways.width_px, sideways.height_px), (600, 400));
+
+    let out = run(&Orient, &sideways, serde_json::Value::Null).await;
+    // Turned back to portrait, and the step says so in the URI.
+    assert_eq!((out.width_px, out.height_px), (400, 600));
+    assert!(out.uri.ends_with("#page.orient"), "{}", out.uri);
+    // A quarter turn moves whole pixels, so the page that comes back is the original.
+    let back = image::load_from_memory(&out.bytes).unwrap().to_luma8();
+    assert_eq!(back.dimensions(), upright.dimensions());
+    assert_eq!(back.as_raw(), upright.as_raw(), "a quarter turn must not resample");
+
+    // An upright page costs nothing and is returned untouched.
+    let same = run(&Orient, &png_of(&upright), serde_json::Value::Null).await;
+    assert_eq!(same.uri, "mem://page");
 }
