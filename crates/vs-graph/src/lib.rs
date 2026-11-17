@@ -216,7 +216,7 @@ pub fn build(doc: &StitchedDocument, ext: &ExtractionOutput, title: Option<&str>
         // than the whole table.
         page::add_table_cells(&mut g, bk, &b.block.content);
         if doc.is_body(i) {
-            body_text.push((bk.to_string(), b.block.text.to_lowercase()));
+            body_text.push((bk.to_string(), b.block.text.clone()));
             if page::is_image_kind(b.block.kind) {
                 image_blocks.push((bk.to_string(), b.block.content.clone()));
             }
@@ -365,13 +365,12 @@ pub fn build(doc: &StitchedDocument, ext: &ExtractionOutput, title: Option<&str>
     }
 
     // In-image text last: matching needs every body block and entity already in hand.
-    let entity_names: Vec<(String, String)> = ext
-        .entities
-        .iter()
-        .map(|e| (entity_key[e.local_id.as_str()].clone(), e.name.to_lowercase()))
-        .collect();
+    // The index folds and tokenises them once for the whole document.
+    let entity_names: Vec<(String, String)> =
+        ext.entities.iter().map(|e| (entity_key[e.local_id.as_str()].clone(), e.name.clone())).collect();
+    let index = page::MatchIndex::build(body_text, entity_names);
     for (bk, content) in &image_blocks {
-        page::add_image_text(&mut g, bk, content, &body_text, &entity_names);
+        page::add_image_text(&mut g, bk, content, &index);
     }
     g
 }

@@ -6,6 +6,8 @@
 //! table", and a label inside a chart was unreachable even when the same term appeared
 //! in the body text.
 
+use std::collections::HashMap;
+
 use serde_json::{json, Value};
 
 use vs_core::{BlockContent, BlockKind};
@@ -28,8 +30,14 @@ const MIN_FRAGMENT_CHARS: usize = 3;
 /// identifiers worth finding — a part number or an invoice reference printed on a figure.
 const MIN_NUMERIC_TOKEN_CHARS: usize = 4;
 
-/// Whether a fragment carries enough to be worth matching against body text.
-fn is_matchable(f: &str) -> bool {
+/// Whether a string carries enough to be worth matching.
+///
+/// Applied to both sides of a match, not just the fragment. An entity named "IT" or "AI"
+/// is below this bar, which is the point: before the entity side was checked, the entity
+/// "IT" matched every fragment containing those two letters in that order — "Monitoring"
+/// among them — and an entity with an empty name matched *every* fragment, because every
+/// string contains the empty string.
+pub fn is_matchable(f: &str) -> bool {
     if f.chars().count() < MIN_FRAGMENT_CHARS {
         return false;
     }
@@ -75,7 +83,7 @@ pub fn text_in_image(content: &BlockContent) -> Option<String> {
     };
     let v: Value = serde_json::from_str(description.trim()).ok()?;
     let text = v.get("text_in_image")?.as_str()?.trim();
-    if text.is_empty() || text.len() > MAX_IMAGE_TEXT {
+    if text.is_empty() || text.chars().count() > MAX_IMAGE_TEXT {
         return None;
     }
     Some(text.to_string())
@@ -124,20 +132,126 @@ pub fn add_table_cells(g: &mut DocGraph, block_hk: &str, content: &BlockContent)
     added
 }
 
+/// Alphanumeric runs of a folded string. Everything else is a boundary.
+fn tokens(folded: &str) -> impl Iterator<Item = &str> {
+    folded.split(|c: char| !c.is_alphanumeric()).filter(|t| !t.is_empty())
+}
+
+/// Whether `needle` occurs in `haystack` with a word boundary at both ends.
+///
+/// Plain `str::contains` is what let the entity "IT" be found inside "monitoring". A
+/// match is only a match when neither end of it runs into more of a word; "roberta" in
+/// "we compare roberta against" is one, "roberta" in "robertazzi" is not.
+fn contains_phrase(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() || needle.len() > haystack.len() {
+        return false;
+    }
+    let mut from = 0;
+    while let Some(rel) = haystack[from..].find(needle) {
+        let start = from + rel;
+        let end = start + needle.len();
+        let open = haystack[..start].chars().next_back().is_none_or(|c| !c.is_alphanumeric());
+        let close = haystack[end..].chars().next().is_none_or(|c| !c.is_alphanumeric());
+        if open && close {
+            return true;
+        }
+        // Step one character past this occurrence and keep looking: the same needle can
+        // appear again, on a boundary this time.
+        from = start + haystack[start..].chars().next().map_or(1, char::len_utf8);
+        if from >= haystack.len() {
+            break;
+        }
+    }
+    false
+}
+
+/// What a fragment of in-image text can match: every body block's text and every
+/// entity's name, folded once per document.
+///
+/// Folding lives in here rather than in the caller on purpose. The matcher used to
+/// lowercase only the needle and trust callers to hand it lowercased haystacks, which
+/// the one caller happened to do and the tests baked in — so a second caller would have
+/// got silently case-sensitive matching with nothing failing.
+///
+/// The token index is the other reason this type exists. Matching used to be a full scan
+/// of every body block for every fragment: on a 500-page document that is tens of
+/// millions of substring searches over the whole document's text. A block can only
+/// contain a fragment if it contains the fragment's rarest token, so the posting list of
+/// that token is an exact candidate set, not an approximation.
+#[derive(Default)]
+pub struct MatchIndex {
+    /// `(node key, folded text)` per body block.
+    blocks: Vec<(String, String)>,
+    /// Token → indices into `blocks`.
+    by_token: HashMap<String, Vec<u32>>,
+    /// `(node key, folded name)` per entity whose name clears `is_matchable`.
+    entities: Vec<(String, String)>,
+}
+
+impl MatchIndex {
+    /// Folds and indexes the match targets. `blocks` is `(block_hk, text)`, `entities`
+    /// is `(entity key, name)`.
+    pub fn build(
+        blocks: impl IntoIterator<Item = (String, String)>,
+        entities: impl IntoIterator<Item = (String, String)>,
+    ) -> Self {
+        let mut idx = MatchIndex::default();
+        for (key, text) in blocks {
+            let folded = text.to_lowercase();
+            let at = idx.blocks.len() as u32;
+            for token in tokens(&folded) {
+                let postings = idx.by_token.entry(token.to_string()).or_default();
+                // One posting per block per token, however often the token occurs.
+                if postings.last() != Some(&at) {
+                    postings.push(at);
+                }
+            }
+            idx.blocks.push((key, folded));
+        }
+        idx.entities = entities
+            .into_iter()
+            .map(|(key, name)| (key, name.to_lowercase()))
+            .filter(|(_, name)| is_matchable(name))
+            .collect();
+        idx
+    }
+
+    /// Every target `fragment` matches, as `(node key, via)`. `exclude` is the figure's
+    /// own block, whose text is the description plus this very string.
+    fn matches(&self, fragment: &str, exclude: &str) -> Vec<(&str, &'static str)> {
+        let folded = fragment.to_lowercase();
+        let mut out = Vec::new();
+        // The rarest token's postings: a block containing the whole fragment contains
+        // every one of its tokens, so nothing outside that list can match.
+        let rarest = tokens(&folded)
+            .filter_map(|t| self.by_token.get(t))
+            .min_by_key(|postings| postings.len());
+        for &i in rarest.map(Vec::as_slice).unwrap_or_default() {
+            let (key, text) = &self.blocks[i as usize];
+            if key != exclude && contains_phrase(text, &folded) {
+                out.push((key.as_str(), "block_text"));
+            }
+        }
+        // Entities are few enough per document to scan, and need both directions: a
+        // fragment can be an entity's name or contain it.
+        for (key, name) in &self.entities {
+            if contains_phrase(name, &folded) || contains_phrase(&folded, name) {
+                out.push((key.as_str(), "entity_name"));
+            }
+        }
+        out
+    }
+}
+
 /// Adds in-image text nodes for a figure or chart, and links each fragment to body
 /// blocks and entities whose text contains it.
 ///
-/// Matching is case-insensitive containment on fragments of at least three characters.
+/// Matching is case-insensitive containment on word boundaries, over fragments of at
+/// least three characters, and both sides of a match must clear `is_matchable`.
 /// Deliberately conservative: a looser match (stemming, fuzzy) on three-character
 /// fragments would connect a chart's "AUC" label to every occurrence of "auction", and a
 /// wrong edge in a provenance graph is worse than a missing one.
-pub fn add_image_text(
-    g: &mut DocGraph,
-    block_hk: &str,
-    content: &BlockContent,
-    body: &[(String, String)],
-    entities: &[(String, String)],
-) -> usize {
+pub fn add_image_text(g: &mut DocGraph, block_hk: &str, content: &BlockContent, index: &MatchIndex) -> usize {
     let Some(text) = text_in_image(content) else { return 0 };
     let mut added = 0;
     for (i, fragment) in fragments(&text).into_iter().enumerate() {
@@ -146,18 +260,8 @@ pub fn add_image_text(
         g.push_edge(EdgeKind::TextInImage, block_hk, &key, Value::Null);
         added += 1;
 
-        let needle = fragment.to_lowercase();
-        // The figure's own block is excluded: its `text` is the description plus this
-        // very string, so every fragment would match it.
-        for (target, haystack) in body.iter().filter(|(k, _)| k != block_hk) {
-            if haystack.contains(&needle) {
-                g.push_edge(EdgeKind::MatchesText, &key, target, json!({ "via": "block_text" }));
-            }
-        }
-        for (target, name) in entities {
-            if name.contains(&needle) || needle.contains(name.as_str()) {
-                g.push_edge(EdgeKind::MatchesText, &key, target, json!({ "via": "entity_name" }));
-            }
+        for (target, via) in index.matches(&fragment, block_hk) {
+            g.push_edge(EdgeKind::MatchesText, &key, target, json!({ "via": via }));
         }
     }
     added
@@ -250,6 +354,21 @@ mod tests {
     }
 
     #[test]
+    fn phrase_matching_respects_word_boundaries() {
+        assert!(contains_phrase("we compare roberta against", "roberta"));
+        assert!(contains_phrase("roberta", "roberta"));
+        assert!(contains_phrase("(roberta)", "roberta"));
+        // The bug this pins: "it" is in "monitoring", but not as a word.
+        assert!(!contains_phrase("monitoring", "it"));
+        assert!(!contains_phrase("robertazzi scores", "roberta"));
+        assert!(!contains_phrase("anything", ""));
+        // An earlier non-boundary occurrence must not hide a later real one.
+        assert!(contains_phrase("robertazzi and roberta", "roberta"));
+        // Multi-byte characters either side of the match.
+        assert!(contains_phrase("über roberta — see", "roberta"));
+    }
+
+    #[test]
     fn fragments_link_to_matching_blocks_and_entities() {
         let mut g = graph();
         let content = BlockContent::Chart {
@@ -257,14 +376,17 @@ mod tests {
             data_html: None,
             description: Some(json!({ "text_in_image": "RoBERTa\nGLUE score" }).to_string()),
         };
-        let body = vec![
-            ("b1".to_string(), "we compare roberta against the baseline".to_string()),
-            ("b2".to_string(), "unrelated prose about something else".to_string()),
-            // The figure's own block: its text always contains the fragment.
-            ("fig".to_string(), "roberta glue score".to_string()),
-        ];
-        let entities = vec![("e-roberta".to_string(), "roberta".to_string())];
-        assert_eq!(add_image_text(&mut g, "fig", &content, &body, &entities), 2);
+        // Deliberately mixed case: folding is the index's job, not the caller's.
+        let index = MatchIndex::build(
+            vec![
+                ("b1".to_string(), "We compare RoBERTa against the baseline".to_string()),
+                ("b2".to_string(), "Unrelated prose about something else".to_string()),
+                // The figure's own block: its text always contains the fragment.
+                ("fig".to_string(), "RoBERTa GLUE score".to_string()),
+            ],
+            vec![("e-roberta".to_string(), "RoBERTa".to_string())],
+        );
+        assert_eq!(add_image_text(&mut g, "fig", &content, &index), 2);
 
         let frag = image_text_key("fig", 0);
         let matches: Vec<&str> = g
@@ -279,6 +401,41 @@ mod tests {
         assert!(!matches.contains(&"fig"), "a figure must not match its own description");
         // Each fragment hangs off the image block.
         assert_eq!(g.edges.iter().filter(|e| e.kind == EdgeKind::TextInImage).count(), 2);
+    }
+
+    /// The three ways the old matcher produced edges that were simply wrong.
+    #[test]
+    fn short_and_empty_entity_names_match_nothing() {
+        let index = MatchIndex::build(
+            vec![("b1".to_string(), "Monitoring the queue".to_string())],
+            vec![
+                ("e-it".to_string(), "IT".to_string()),
+                ("e-empty".to_string(), String::new()),
+                ("e-ok".to_string(), "queue".to_string()),
+            ],
+        );
+        // "IT" is inside "monitoring" and an empty name is inside everything; neither is
+        // an entity worth matching, so neither is indexed at all.
+        let hits = index.matches("Monitoring", "fig");
+        assert_eq!(hits, vec![("b1", "block_text")], "{hits:?}");
+        // A name that clears the bar still matches, in both directions: the fragment
+        // can contain the name, or be contained by it.
+        assert_eq!(index.matches("queue depth", "fig"), vec![("e-ok", "entity_name")]);
+        assert_eq!(index.matches("queue", "fig"), vec![("b1", "block_text"), ("e-ok", "entity_name")]);
+    }
+
+    #[test]
+    fn the_rarest_token_candidate_set_loses_no_match() {
+        // "the" is in every block, "roberta" in one. Whichever token the fragment is
+        // reduced to, the block containing the whole phrase must still be found.
+        let blocks: Vec<(String, String)> = (0..50)
+            .map(|i| (format!("b{i}"), format!("the block number {i} of the document")))
+            .chain(std::iter::once(("hit".to_string(), "the roberta model".to_string())))
+            .collect();
+        let index = MatchIndex::build(blocks, vec![]);
+        assert_eq!(index.matches("the roberta", "fig"), vec![("hit", "block_text")]);
+        // A fragment whose tokens appear in no block matches nothing.
+        assert!(index.matches("nonexistent phrase", "fig").is_empty());
     }
 
     #[test]
