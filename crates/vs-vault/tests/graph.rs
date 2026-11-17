@@ -1,4 +1,4 @@
-//! `PgGraphStore` and `PgCorpusResolver` against Postgres from `devenv up`.
+//! The vault's graph layer and `PgCorpusResolver` against Postgres from `devenv up`.
 //!
 //! Everything added with the storage rewrite had unit tests of its *column projection*
 //! only — "do we build the right arrays" — so no statement in migrations 0005 to 0007 had
@@ -19,9 +19,11 @@ use vs_core::{
     content_sha256, DocType, DocTypeSource, DocumentType, HashKey, JobSpec, LanguageTag, Priority, Profile, RunId,
     TenantId,
 };
-use vs_graph::{DocGraph, EdgeKind, GEdge, GNode, GraphStore, NodeKind, RunInfo, Vectors};
+use vs_extract::ExtractionOutput;
+use vs_graph::{DocGraph, EdgeKind, GEdge, GNode, NodeKind, RunInfo, Vectors};
 use vs_models::{Embedder, ModelError};
-use vs_vault::{DocumentMeta, PgCorpusResolver, PgGraphStore, PgVault, RunMeta, VaultWriter};
+use vs_stitch::StitchedDocument;
+use vs_vault::{DocumentMeta, PgCorpusResolver, PgVault, RunMeta, VaultWriter};
 use vs_vectors::{EntityHit, VectorError, VectorStore};
 
 const TENANT: &str = "t1";
@@ -57,25 +59,6 @@ fn meta() -> DocumentMeta {
 
 fn run_meta() -> RunMeta {
     RunMeta { run_id: RunId::new(), dag_list_version: "dl-1".into(), started_at: Utc::now() }
-}
-
-/// A `VectorStore` that records nothing: these tests are about the SQL half.
-struct NoVectors;
-
-#[async_trait]
-impl VectorStore for NoVectors {
-    async fn ensure_ready(&self, _: usize) -> Result<(), VectorError> {
-        Ok(())
-    }
-    async fn write_run(&self, _: &RunInfo, _: &DocGraph, _: &Vectors) -> Result<(), VectorError> {
-        Ok(())
-    }
-    async fn drop_run(&self, _: &TenantId, _: &str, _: &str) -> Result<(), VectorError> {
-        Ok(())
-    }
-    async fn search_entities(&self, _: &TenantId, _: &[f32], _: usize) -> Result<Vec<EntityHit>, VectorError> {
-        Ok(vec![])
-    }
 }
 
 /// Returns one fixed hit, so the resolver's Postgres lookup is what is under test.
@@ -129,7 +112,7 @@ fn edge(kind: EdgeKind, from: &str, to: &str, props: Value) -> GEdge {
 }
 
 fn hex(c: char) -> String {
-    std::iter::repeat(c).take(64).collect()
+    std::iter::repeat_n(c, 64).collect()
 }
 
 struct Fixture {
@@ -198,6 +181,30 @@ fn fixture(document_hk: &HashKey, run_id: RunId) -> Fixture {
     Fixture { graph, run, document_hk: dk, heading, table, figure, entity_a }
 }
 
+/// Writes the fixture's graph the way production does: through the one transaction that
+/// writes the Data Vault rows and the graph layer together.
+///
+/// The Data Vault half is empty here on purpose. These tests are about migrations 0005
+/// to 0007, and an empty `StitchedDocument` is the smallest input that still reaches the
+/// graph layer through the real entry point. Nothing in the vault has foreign keys, so
+/// graph rows referring to blocks that were never written are inserted as given — which
+/// is what lets the fixture use readable synthetic keys.
+async fn write_graph(pool: &PgPool, r: &RunMeta, m: &DocumentMeta, f: &Fixture) {
+    let doc = StitchedDocument {
+        document_hk: m.document_hk.clone(),
+        run_id: r.run_id,
+        blocks: vec![],
+        furniture: Default::default(),
+        sections: vec![],
+        links: vec![],
+        missing_pages: vec![],
+    };
+    PgVault { pool: pool.clone() }
+        .write_stage2(r, &spec(), &doc, &ExtractionOutput::default(), &f.graph, f.run.doc_type.as_ref())
+        .await
+        .unwrap();
+}
+
 async fn count(pool: &PgPool, table: &str) -> i64 {
     sqlx::query_scalar(&format!("SELECT count(*) FROM {table}")).fetch_one(pool).await.unwrap()
 }
@@ -210,10 +217,9 @@ async fn write_run_populates_every_graph_table_and_is_idempotent(pool: PgPool) {
     PgVault { pool: pool.clone() }.write_document(&r, &spec(), &m).await.unwrap();
 
     let f = fixture(&m.document_hk, r.run_id);
-    let store = PgGraphStore { pool: pool.clone(), vectors: Arc::new(NoVectors) };
-    store.write_run(&f.run, &f.graph, &Vectors { model_ref: "e@1".into(), dimensions: 4, by_key: Default::default() }).await.unwrap();
+    write_graph(&pool, &r, &m, &f).await;
     // A redelivered task writes the identical run again; nothing may double.
-    store.write_run(&f.run, &f.graph, &Vectors { model_ref: "e@1".into(), dimensions: 4, by_key: Default::default() }).await.unwrap();
+    write_graph(&pool, &r, &m, &f).await;
 
     assert_eq!(count(&pool, "vault.hub_section").await, 2);
     assert_eq!(count(&pool, "vault.sat_section").await, 2);
@@ -239,10 +245,7 @@ async fn the_section_tree_keeps_its_shape(pool: PgPool) {
     let r = run_meta();
     PgVault { pool: pool.clone() }.write_document(&r, &spec(), &m).await.unwrap();
     let f = fixture(&m.document_hk, r.run_id);
-    PgGraphStore { pool: pool.clone(), vectors: Arc::new(NoVectors) }
-        .write_run(&f.run, &f.graph, &Vectors { model_ref: "e@1".into(), dimensions: 4, by_key: Default::default() })
-        .await
-        .unwrap();
+    write_graph(&pool, &r, &m, &f).await;
 
     let top: i64 = sqlx::query_scalar("SELECT count(*) FROM vault.lnk_section_section WHERE parent_section_hk IS NULL")
         .fetch_one(&pool)
@@ -283,10 +286,7 @@ async fn a_cell_carries_its_position_and_column_header(pool: PgPool) {
     f.graph.nodes.push(node(NodeKind::Cell, &bare, json!({ "row": 2, "col": 0, "header": false, "text": "RoBERTa" })));
     f.graph.edges.push(edge(EdgeKind::HasCell, &f.table, &bare, Value::Null));
 
-    PgGraphStore { pool: pool.clone(), vectors: Arc::new(NoVectors) }
-        .write_run(&f.run, &f.graph, &Vectors { model_ref: "e@1".into(), dimensions: 4, by_key: Default::default() })
-        .await
-        .unwrap();
+    write_graph(&pool, &r, &m, &f).await;
 
     let (text, header, column_header): (String, bool, Option<String>) = sqlx::query_as(
         "SELECT s.text, s.header, s.column_header FROM vault.sat_cell s
@@ -320,10 +320,7 @@ async fn an_image_text_match_targets_exactly_one_thing(pool: PgPool) {
     let r = run_meta();
     PgVault { pool: pool.clone() }.write_document(&r, &spec(), &m).await.unwrap();
     let f = fixture(&m.document_hk, r.run_id);
-    PgGraphStore { pool: pool.clone(), vectors: Arc::new(NoVectors) }
-        .write_run(&f.run, &f.graph, &Vectors { model_ref: "e@1".into(), dimensions: 4, by_key: Default::default() })
-        .await
-        .unwrap();
+    write_graph(&pool, &r, &m, &f).await;
 
     let rows: Vec<(Option<String>, Option<String>, String)> =
         sqlx::query_as("SELECT block_hk, entity_hk, via FROM vault.lnk_image_text_match ORDER BY via")
@@ -352,12 +349,9 @@ async fn the_document_type_versions_only_when_it_changes(pool: PgPool) {
     let m = meta();
     let r = run_meta();
     PgVault { pool: pool.clone() }.write_document(&r, &spec(), &m).await.unwrap();
-    let store = PgGraphStore { pool: pool.clone(), vectors: Arc::new(NoVectors) };
-    let vectors = || Vectors { model_ref: "e@1".into(), dimensions: 4, by_key: Default::default() };
-
     let mut f = fixture(&m.document_hk, r.run_id);
-    store.write_run(&f.run, &f.graph, &vectors()).await.unwrap();
-    store.write_run(&f.run, &f.graph, &vectors()).await.unwrap();
+    write_graph(&pool, &r, &m, &f).await;
+    write_graph(&pool, &r, &m, &f).await;
     assert_eq!(count(&pool, "vault.sat_document_type").await, 1, "the same verdict must not version");
 
     let (doc_type, confidence, source): (String, f32, String) =
@@ -367,7 +361,7 @@ async fn the_document_type_versions_only_when_it_changes(pool: PgPool) {
 
     // A caller overriding the type is a different fact about the same document.
     f.run.doc_type = Some(DocumentType { doc_type: DocType::Report, confidence: 1.0, source: DocTypeSource::Caller });
-    store.write_run(&f.run, &f.graph, &vectors()).await.unwrap();
+    write_graph(&pool, &r, &m, &f).await;
     assert_eq!(count(&pool, "vault.sat_document_type").await, 2);
     let latest: String =
         sqlx::query_scalar("SELECT doc_type FROM vault.sat_document_type ORDER BY load_dts DESC LIMIT 1")

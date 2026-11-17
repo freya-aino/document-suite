@@ -1,35 +1,18 @@
-//! What a store needs in order to persist one document run, and the trait it implements.
+//! What a store needs in order to persist one document run, beyond the graph itself.
 //!
 //! These live here, in the crate that owns `DocGraph`, so that no store's error type or
-//! wire format leaks into the pipeline. `vs-worker` holds an `Arc<dyn GraphStore>` and
-//! never names a backend.
+//! wire format leaks into the pipeline.
+//!
+//! There was a `GraphStore` trait here too, with one implementation that wrote the graph
+//! tables of the vault and then the vectors. It is gone: the graph layer is written in
+//! the vault's own Stage 2 transaction (`vs_vault::VaultWriter::write_stage2`) and the
+//! vectors through `vs_vectors::VectorStore`, which is the seam that actually has two
+//! possible backends.
 
 use std::collections::{HashMap, HashSet};
 
-use async_trait::async_trait;
-
 use vs_core::{DocumentType, RunId, TenantId};
 use vs_extract::resolve::Resolution;
-
-use crate::DocGraph;
-
-/// A store write failed. The distinction is the only thing the caller needs: a
-/// transient failure is retried with the whole task, a rejection never will be.
-#[derive(Debug, thiserror::Error)]
-pub enum StoreError {
-    /// The store could not be reached, or failed in a way that may succeed later.
-    #[error("graph store unavailable: {0}")]
-    Unavailable(String),
-    /// The store rejected the data. Retrying sends the same bytes, so it will fail again.
-    #[error("graph store rejected the write: {0}")]
-    Rejected(String),
-}
-
-impl StoreError {
-    pub fn is_retryable(&self) -> bool {
-        matches!(self, StoreError::Unavailable(_))
-    }
-}
 
 /// Embeddings for the graph's `EmbedTarget`s, keyed by `EmbedTarget::node_key` — which is
 /// a `block_hk`, a `section_key` or an `entity_hk`, so a vector always resolves back to a
@@ -77,18 +60,6 @@ impl RunInfo {
     }
 }
 
-#[async_trait]
-pub trait GraphStore: Send + Sync {
-    /// Writes one document run and makes it the current one.
-    ///
-    /// Must be **idempotent**: delivery is at-least-once (system spec §5.4), so this is
-    /// called again after any failure downstream of it, with identical input. Writing the
-    /// same run twice must leave the store as if it had been written once, and must not
-    /// disturb rows shared with other runs or documents — the document itself, and any
-    /// entity other documents also link to.
-    async fn write_run(&self, run: &RunInfo, graph: &DocGraph, vectors: &Vectors) -> Result<(), StoreError>;
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -112,11 +83,5 @@ mod tests {
         run.note_resolution(&Resolution::New { entity_hk: new.clone() });
         run.note_resolution(&Resolution::Link { entity_hk: HashKey::entity(&run.tenant, "x"), score: 0.9 });
         assert_eq!(run.new_entities, HashSet::from([new.as_str().to_string()]));
-    }
-
-    #[test]
-    fn store_error_retryability() {
-        assert!(StoreError::Unavailable("timeout".into()).is_retryable());
-        assert!(!StoreError::Rejected("bad bbox".into()).is_retryable());
     }
 }

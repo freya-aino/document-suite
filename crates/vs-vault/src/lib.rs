@@ -1,11 +1,11 @@
 //! Data Vault 2.0 writer. See `SPEC.md`.
 
-pub mod graph;
+mod graph;
 pub mod ontology;
 pub mod ops;
 pub mod resolve;
 
-pub use graph::PgGraphStore;
+pub use graph::READING_ORDER_QUERY;
 pub use ontology::PgOntologyStore;
 pub use resolve::PgCorpusResolver;
 
@@ -17,8 +17,9 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use sqlx::PgPool;
 
-use vs_core::{split_ref, Evidence, HashKey, JobSpec, JobState, PageResult, RunId};
+use vs_core::{split_ref, DocumentType, Evidence, HashKey, JobSpec, JobState, PageResult, RunId};
 use vs_extract::{ArgValue, ExtractionOutput};
+use vs_graph::DocGraph;
 use vs_stitch::StitchedDocument;
 
 /// `dag_ref` recorded for Stage 2 outputs (`record_source`, `hub_dag` is not used).
@@ -79,17 +80,32 @@ pub struct RunMeta {
 pub trait VaultWriter: Send + Sync {
     async fn write_document(&self, run: &RunMeta, spec: &JobSpec, meta: &DocumentMeta) -> Result<(), VaultError>;
     async fn write_page(&self, page: &PageResult, rule_id: Option<&str>) -> Result<(), VaultError>;
-    /// Stage 2 output of one run, plus the final `sat_run` row (`final_state` is `Done`
-    /// or `Partial`). The tenant comes from `spec`; `run` must be the one used for
-    /// `write_document` (same `started_at`).
+    /// Everything one Stage 2 run produces, in **one transaction**: the Data Vault rows
+    /// projected from `doc` and `ext`, and the graph layer projected from `graph` (the
+    /// section tree, table cells, in-image text, `related`, citations, document type).
+    ///
+    /// The tenant comes from `spec`; `run` must be the one used for `write_document`
+    /// (same `started_at`). The `sat_run` row this writes is `Writing`: the run is only
+    /// recorded as finished by [`Self::finish_run`], after the vectors are in.
     async fn write_stage2(
         &self,
         run: &RunMeta,
         spec: &JobSpec,
         doc: &StitchedDocument,
         ext: &ExtractionOutput,
-        final_state: JobState,
+        graph: &DocGraph,
+        doc_type: Option<&DocumentType>,
     ) -> Result<(), VaultError>;
+
+    /// Records the run's outcome (`Done` or `Partial`), once everything it produced has
+    /// been written to every store.
+    ///
+    /// Separate from `write_stage2` so the vault never claims a finished run that only
+    /// half exists. Writing the final state in the same transaction as the rows meant a
+    /// failure in the vector store — or a worker killed between the two — left `sat_run`
+    /// saying `Done` over a document with no vectors. A reader cannot tell that apart
+    /// from a complete run, and nothing else in the vault contradicts it.
+    async fn finish_run(&self, run: &RunMeta, spec: &JobSpec, final_state: JobState) -> Result<(), VaultError>;
 }
 
 pub struct PgVault {
@@ -387,12 +403,13 @@ impl VaultWriter for PgVault {
         spec: &JobSpec,
         doc: &StitchedDocument,
         ext: &ExtractionOutput,
-        final_state: JobState,
+        graph: &DocGraph,
+        doc_type: Option<&DocumentType>,
     ) -> Result<(), VaultError> {
         let now = Utc::now();
         let src = record_source("doc", STAGE2_REF, None);
         let run_id = doc.run_id;
-        let s2 = Stage2Columns::of(spec, doc, ext, &src);
+        let s2 = Stage2Columns::of(doc, ext, &src);
         let mut tx = self.pool.begin().await?;
 
         // Stitch links.
@@ -584,7 +601,13 @@ impl VaultWriter for PgVault {
         .execute(&mut *tx)
         .await?;
 
-        // Final run state.
+        // The graph layer, in this same transaction. The run's sections, cells and
+        // in-image text become visible with its blocks and assertions, or not at all.
+        let graph_src = record_source("doc", "graph", None);
+        crate::graph::write_graph_layer(&mut tx, run.run_id, doc.document_hk.as_str(), graph, doc_type, now, &graph_src)
+            .await?;
+
+        // The run is in progress until every store has it; `finish_run` closes it.
         let run_hk = HashKey::run(&run.run_id);
         sqlx::query("INSERT INTO vault.hub_run (run_hk, run_id, load_dts, record_source) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING")
             .bind(run_hk.as_str())
@@ -593,8 +616,30 @@ impl VaultWriter for PgVault {
             .bind(&src)
             .execute(&mut *tx)
             .await?;
-        insert_sat_run(&mut tx, &run_hk, now, &src, &run.dag_list_version, spec, &enum_str(&final_state), Some(run.started_at), Some(now)).await?;
+        let state = enum_str(&JobState::Writing);
+        insert_sat_run(&mut tx, &run_hk, now, &src, &run.dag_list_version, spec, &state, Some(run.started_at), None).await?;
 
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn finish_run(&self, run: &RunMeta, spec: &JobSpec, final_state: JobState) -> Result<(), VaultError> {
+        let now = Utc::now();
+        let src = record_source("doc", STAGE2_REF, None);
+        let run_hk = HashKey::run(&run.run_id);
+        let mut tx = self.pool.begin().await?;
+        // `hub_run` is already there from `write_stage2`; insert it anyway so this is
+        // callable on its own, and harmless when it is not.
+        sqlx::query("INSERT INTO vault.hub_run (run_hk, run_id, load_dts, record_source) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING")
+            .bind(run_hk.as_str())
+            .bind(run.run_id.0)
+            .bind(now)
+            .bind(&src)
+            .execute(&mut *tx)
+            .await?;
+        let state = enum_str(&final_state);
+        insert_sat_run(&mut tx, &run_hk, now, &src, &run.dag_list_version, spec, &state, Some(run.started_at), Some(now))
+            .await?;
         tx.commit().await?;
         Ok(())
     }
@@ -666,9 +711,8 @@ struct Stage2Columns {
 }
 
 impl Stage2Columns {
-    fn of(spec: &JobSpec, doc: &StitchedDocument, ext: &ExtractionOutput, src: &str) -> Self {
+    fn of(doc: &StitchedDocument, ext: &ExtractionOutput, src: &str) -> Self {
         let mut c = Stage2Columns::default();
-        let tenant = &spec.tenant;
 
         // Stitch links (deduplicated by key; the same pair may be linked twice with the same kind).
         let mut seen = BTreeSet::new();
@@ -689,10 +733,16 @@ impl Stage2Columns {
         // Entities: canonical key if resolved, else a document-local key.
         let mut entity_key: HashMap<&str, HashKey> = HashMap::new();
         for e in &ext.entities {
-            let local_key = local_entity_key(&doc.document_hk, &e.local_id);
             let (hk, canonical_key) = match &e.entity_hk {
                 Some(hk) => (hk.clone(), e.name.trim().to_lowercase()),
-                None => (HashKey::of(&[tenant.as_str(), doc.document_hk.as_str(), &e.local_id]), local_key),
+                // The key comes from `vs_core`, which is also where the graph builder
+                // gets it: one formula, or the two write paths disagree about which
+                // entity a row is about. The readable form stays as the canonical key,
+                // which is a `TEXT` column and the useful thing to see in a dump.
+                None => (
+                    HashKey::doc_local_entity(&doc.document_hk, &e.local_id),
+                    local_entity_key(&doc.document_hk, &e.local_id),
+                ),
             };
             entity_key.insert(e.local_id.as_str(), hk.clone());
             if c.entity_hk.contains(&hk.to_string()) {

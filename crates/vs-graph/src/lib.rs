@@ -2,7 +2,7 @@
 
 pub mod page;
 mod store;
-pub use store::{GraphStore, RunInfo, StoreError, Vectors};
+pub use store::{RunInfo, Vectors};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -283,7 +283,18 @@ pub fn build(doc: &StitchedDocument, ext: &ExtractionOutput, title: Option<&str>
     let entity_key: HashMap<&str, String> = ext
         .entities
         .iter()
-        .map(|e| (e.local_id.as_str(), e.entity_hk.as_ref().map(|h| h.to_string()).unwrap_or_else(|| format!("local:{dk}:{}", e.local_id))))
+        .map(|e| {
+            // An entity corpus resolution did not canonicalise still needs a key, and it
+            // has to be the *same* key the vault derives, in the same shape as every
+            // other: `HashKey::doc_local_entity` is that one formula. This used to emit
+            // `local:<dk>:<id>`, which no `CHAR(64)` key column could even hold.
+            let key = e
+                .entity_hk
+                .as_ref()
+                .map(|h| h.to_string())
+                .unwrap_or_else(|| HashKey::doc_local_entity(&doc.document_hk, &e.local_id).to_string());
+            (e.local_id.as_str(), key)
+        })
         .collect();
     let mention_entity: HashMap<&str, &str> =
         ext.entities.iter().flat_map(|e| e.mentions.iter().map(move |m| (m.as_str(), e.local_id.as_str()))).collect();

@@ -11,6 +11,7 @@ use vs_core::*;
 use vs_extract::{
     Arg, ArgValue, Assertion, AssertionKind, DocEntity, ExtractionOutput, Mention, Qualifiers,
 };
+use vs_graph::DocGraph;
 use vs_stitch::{DocBlock, Link, LinkKind, StitchedDocument};
 use vs_vault::ops::{NewJob, Ops, PageOutcome};
 use vs_vault::{DocumentMeta, PgVault, RunMeta, VaultWriter};
@@ -490,12 +491,15 @@ async fn write_stage2_is_idempotent_and_versions_satellites(pool: PgPool) {
         .unwrap();
 
     let (doc, mut ext) = stage2_fixture(&m, &r);
-    v.write_stage2(&r, &spec(), &doc, &ext, JobState::Done)
+    let graph = DocGraph::default();
+    v.write_stage2(&r, &spec(), &doc, &ext, &graph, None)
         .await
         .unwrap();
-    v.write_stage2(&r, &spec(), &doc, &ext, JobState::Done)
+    v.write_stage2(&r, &spec(), &doc, &ext, &graph, None)
         .await
         .unwrap(); // retry
+    v.finish_run(&r, &spec(), JobState::Done).await.unwrap();
+    v.finish_run(&r, &spec(), JobState::Done).await.unwrap(); // retry
 
     assert_eq!(count(&pool, "vault.lnk_block_block").await, 1);
     assert_eq!(count(&pool, "vault.sat_stitch_link").await, 1);
@@ -508,14 +512,18 @@ async fn write_stage2_is_idempotent_and_versions_satellites(pool: PgPool) {
     assert_eq!(count(&pool, "vault.lnk_assertion_arg").await, 2);
     assert_eq!(count(&pool, "vault.lnk_assertion_evidence").await, 3); // b0, b1, page
     assert_eq!(count(&pool, "vault.sat_evidence").await, 3);
-    // sat_run: processing (ingest) + done (stage 2).
-    assert_eq!(count(&pool, "vault.sat_run").await, 2);
-    let state: String =
-        sqlx::query_scalar("SELECT state FROM vault.sat_run ORDER BY load_dts DESC LIMIT 1")
-            .fetch_one(&pool)
+    // sat_run: processing (ingest), writing (stage 2 rows in), done (every store in).
+    // The middle row is the point: the vault must not record a finished run before
+    // everything that run produced has been written, so `write_stage2` leaves it
+    // `writing` and `finish_run` closes it. Both are idempotent, hence three rows from
+    // two calls each.
+    assert_eq!(count(&pool, "vault.sat_run").await, 3);
+    let states: Vec<String> =
+        sqlx::query_scalar("SELECT state FROM vault.sat_run ORDER BY load_dts")
+            .fetch_all(&pool)
             .await
             .unwrap();
-    assert_eq!(state, "done");
+    assert_eq!(states, vec!["processing", "writing", "done"]);
 
     let resolved: String =
         sqlx::query_scalar("SELECT entity_hk FROM vault.hub_entity WHERE canonical_key = 'block'")
@@ -533,6 +541,26 @@ async fn write_stage2_is_idempotent_and_versions_satellites(pool: PgPool) {
     .await
     .unwrap();
     assert_eq!(local, vs_vault::local_entity_key(&m.document_hk, "e2"));
+    // An entity corpus resolution left alone gets a key both write paths derive
+    // independently — `vs-graph` for the node, this crate for the hub row — so they have
+    // to agree. They used to not: the builder emitted the readable `local:…` string,
+    // which no CHAR(64) column could even hold, while this one hashed the tenant in.
+    let expected = HashKey::doc_local_entity(&m.document_hk, "e2");
+    let local_hk: String = sqlx::query_scalar(
+        "SELECT entity_hk FROM vault.hub_entity WHERE canonical_key LIKE 'local:%'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(local_hk.trim(), expected.as_str());
+    let built = vs_graph::build(&doc, &ext, None);
+    assert!(
+        built
+            .nodes
+            .iter()
+            .any(|n| n.kind == vs_graph::NodeKind::Entity && n.key == expected.as_str()),
+        "the graph builder must use the same key as the vault"
+    );
     let region: i64 = sqlx::query_scalar("SELECT count(*) FROM vault.lnk_assertion_evidence WHERE block_hk IS NULL AND page_hk IS NOT NULL")
         .fetch_one(&pool)
         .await
@@ -548,9 +576,10 @@ async fn write_stage2_is_idempotent_and_versions_satellites(pool: PgPool) {
     // A changed confidence adds a satellite row; hubs and links stay.
     ext.assertions[0].confidence = 0.95;
     ext.mentions[0].confidence = 0.95;
-    v.write_stage2(&r, &spec(), &doc, &ext, JobState::Done)
+    v.write_stage2(&r, &spec(), &doc, &ext, &graph, None)
         .await
         .unwrap();
+    v.finish_run(&r, &spec(), JobState::Done).await.unwrap();
     assert_eq!(count(&pool, "vault.hub_assertion").await, 1);
     assert_eq!(count(&pool, "vault.sat_assertion_detail").await, 2);
     assert_eq!(count(&pool, "vault.sat_mention").await, 5); // the (b0,e1) group re-inserted as a whole

@@ -2,9 +2,9 @@
 //!
 //! `stage2` is the pure pipeline over trait objects (extractor, corpus resolver,
 //! embedder) so it can be tested with fakes; `DocHandler` wraps it with the job row,
-//! blob, vault and vector-store writes. Every step is idempotent on retry: page results are
-//! read-only, the vault writer upserts, `GraphStore::write_run` drops a partial earlier
-//! attempt of the same run first, and `doc.json` is overwritten.
+//! blob, vault and vector-store writes. Every step is idempotent on retry: page results
+//! are read-only, the vault writer upserts, `VectorStore::write_run` drops a partial
+//! earlier attempt of the same run first, and `doc.json` is overwritten.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
@@ -16,7 +16,7 @@ use vs_classify::{DocumentClassifier, PageVote};
 use vs_core::{DocType, HashKey, JobSpec, JobState, PageResult, RunId, Task, TenantId};
 use vs_dag::PageImage;
 use vs_extract::{CorpusResolver, DocProfile, EmbeddingTypeNormalizer, ExtractConfig, ExtractError, ExtractionOutput, Extractor, LlmExtractor};
-use vs_graph::{DocGraph, EmbedTarget, GraphStore, RunInfo, Vectors};
+use vs_graph::{DocGraph, EmbedTarget, RunInfo, Vectors};
 
 use vs_infra::blob::{keys, BlobError, BlobStore};
 use vs_infra::config::Stage2Config;
@@ -24,6 +24,7 @@ use vs_models::{Embedder, ModelError, OpenAiClient};
 use vs_stitch::{StitchError, StitchedDocument};
 use vs_vault::ops::Ops;
 use vs_vault::{PgOntologyStore, RunMeta, VaultWriter};
+use vs_vectors::VectorStore;
 
 use crate::runtime::{Handler, TaskError};
 
@@ -38,7 +39,7 @@ pub struct DocHandler {
     pub blob: Arc<dyn BlobStore>,
     pub vault: Arc<dyn VaultWriter>,
     pub ops: Arc<Ops>,
-    pub graph: Arc<dyn GraphStore>,
+    pub vectors: Arc<dyn VectorStore>,
     pub client: Arc<OpenAiClient>,
     pub ontology: Arc<PgOntologyStore>,
     pub embedder: Arc<dyn Embedder>,
@@ -114,9 +115,17 @@ impl DocHandler {
             None => self.ops.active_dag_list_version(&spec.tenant).await?.unwrap_or_else(|| "none".into()),
         };
         let run_meta = RunMeta { run_id, dag_list_version, started_at: job.created_at };
-        // Vault first: it is the system of record; a graph-store failure retries the task.
-        self.vault.write_stage2(&run_meta, spec, &stitched, &out.ext, final_state).await?;
-        self.graph.write_run(&out.run_info, &out.graph, &out.vectors).await?;
+        // Vault first: it is the system of record, and one transaction now carries both
+        // the Data Vault rows and the graph layer. A vector-store failure retries the
+        // whole task; every step here is idempotent, so the retry converges.
+        self.vault
+            .write_stage2(&run_meta, spec, &stitched, &out.ext, &out.graph, out.run_info.doc_type.as_ref())
+            .await?;
+        self.vectors.write_run(&out.run_info, &out.graph, &out.vectors).await?;
+        // Only now is the run finished. Recording it before the vectors were in meant a
+        // crash in between left `sat_run` claiming a complete run over a document with
+        // nothing to search.
+        self.vault.finish_run(&run_meta, spec, final_state).await?;
 
         let result = doc_result(&stitched, &out, pages_total, pages_failed, final_state);
         let body = serde_json::to_vec(&result)?;
@@ -473,7 +482,7 @@ mod tests {
     fn page_votes_carry_the_page_number_and_confidence() {
         let doc = HashKey::of(&["d"]);
         let run = RunId::new();
-        let pages = vec![page(&doc, run, 1, DocType::Report), page(&doc, run, 2, DocType::Invoice)];
+        let pages = [page(&doc, run, 1, DocType::Report), page(&doc, run, 2, DocType::Invoice)];
         let votes: Vec<vs_classify::PageVote> = pages
             .iter()
             .map(|p| vs_classify::PageVote { page_no: p.page_no, doc_type: p.profile.doc_type, confidence: p.profile.confidence })

@@ -18,7 +18,7 @@ use tokio::sync::watch;
 use vs_infra::queue::{NatsBus, Role, TaskBus};
 use vs_infra::{Config, ObjectBlobStore};
 use vs_models::{Embedder, ModelRegistry, OpenAiClient, OpenAiEmbedder};
-use vs_vault::{ops::Ops, PgCorpusResolver, PgGraphStore, PgOntologyStore, PgVault};
+use vs_vault::{ops::Ops, PgCorpusResolver, PgOntologyStore, PgVault};
 use vs_vectors::{QdrantConfig, QdrantStore, VectorStore};
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -178,7 +178,7 @@ async fn run_worker() -> anyhow::Result<()> {
                 blob,
                 vault,
                 ontology: Arc::new(PgOntologyStore::new(ops.pool.clone())),
-                graph: Arc::new(PgGraphStore { pool: ops.pool.clone(), vectors }),
+                vectors,
                 ops,
                 client: models.client,
                 embedder,

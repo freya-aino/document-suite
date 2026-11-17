@@ -40,6 +40,19 @@ impl HashKey {
         Self::of(&[tenant.as_str(), canonical_key])
     }
 
+    /// `H(document_hk | local_id)` — an entity corpus resolution did not canonicalise.
+    ///
+    /// The tenant is not a part because `document_hk` already contains one, and leaving
+    /// it out is what lets every crate compute this key: the graph builder has the
+    /// stitched document and no tenant, the vault has both. They used to disagree —
+    /// the builder emitted the readable string `local:<document_hk>:<local_id>`, which
+    /// is neither a hash nor short enough for the `CHAR(64)` columns that store entity
+    /// keys, while the vault hashed `tenant | document_hk | local_id`. One formula,
+    /// here, is the only way those stay the same key.
+    pub fn doc_local_entity(document: &HashKey, local_id: &str) -> Self {
+        Self::of(&[document.as_str(), local_id])
+    }
+
     /// `H(heading_block_hk)` — a section is identified by the heading that opens it.
     ///
     /// No `run_id` part is needed: `block_hk` already contains one, so a section key is
@@ -186,6 +199,20 @@ mod tests {
     #[test]
     fn empty_parts_are_not_skipped() {
         assert_ne!(HashKey::of(&["a", "", "b"]), HashKey::of(&["a", "b"]));
+    }
+
+    /// The key two crates derive independently; `vs-graph`'s builder and the vault's
+    /// Stage 2 projection must land on the same one for an entity resolution left alone.
+    #[test]
+    fn doc_local_entity_key_is_derived_from_the_document_alone() {
+        let doc = HashKey::document(&TenantId("t1".into()), "abc");
+        let k = HashKey::doc_local_entity(&doc, "e2");
+        assert_eq!(k, HashKey::of(&[doc.as_str(), "e2"]));
+        assert_eq!(k.as_str().len(), 64, "must fit the CHAR(64) key columns");
+        // Different documents of the same tenant never collide, and the tenant is
+        // already inside `document_hk` so it is not a part.
+        let other = HashKey::document(&TenantId("t1".into()), "def");
+        assert_ne!(k, HashKey::doc_local_entity(&other, "e2"));
     }
 
     #[test]

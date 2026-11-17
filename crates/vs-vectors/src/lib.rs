@@ -13,7 +13,7 @@ pub use sparse::Sparse;
 use async_trait::async_trait;
 
 use vs_core::TenantId;
-use vs_graph::{DocGraph, RunInfo, StoreError, Vectors};
+use vs_graph::{DocGraph, RunInfo, Vectors};
 
 #[derive(Debug, thiserror::Error)]
 pub enum VectorError {
@@ -31,17 +31,6 @@ impl VectorError {
     }
 }
 
-/// A vector write failure is a store failure as far as the pipeline is concerned.
-/// A misconfiguration is deliberately mapped to `Rejected`: retrying a task cannot fix a
-/// wrong dimension or a missing collection, so it should dead-letter rather than spin.
-impl From<VectorError> for StoreError {
-    fn from(e: VectorError) -> Self {
-        match &e {
-            VectorError::Unavailable(_) => StoreError::Unavailable(e.to_string()),
-            VectorError::Rejected(_) | VectorError::Config(_) => StoreError::Rejected(e.to_string()),
-        }
-    }
-}
 
 /// One candidate from an entity-name search.
 ///
@@ -63,7 +52,9 @@ pub trait VectorStore: Send + Sync {
     async fn ensure_ready(&self, dimensions: usize) -> Result<(), VectorError>;
 
     /// Replaces this run's block and section vectors and adds vectors for the entities
-    /// this run created. Must be idempotent — see `GraphStore::write_run`.
+    /// this run created. Must be idempotent: delivery is at-least-once (system spec
+    /// §5.4), so this is called again after any failure downstream of it with identical
+    /// input, and writing the same run twice must leave the store as if written once.
     async fn write_run(&self, run: &RunInfo, graph: &DocGraph, vectors: &Vectors) -> Result<(), VectorError>;
 
     /// Removes one run's block and section vectors. Entity vectors are **not** touched:

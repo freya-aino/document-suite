@@ -1,32 +1,28 @@
-//! `GraphStore` over Postgres (graph) and a vector store (embeddings).
+//! The graph layer of the vault: the tables the Data Vault proper does not cover.
 //!
 //! Decision D6/D9: the vault holds the graph next to its provenance, and vectors live in
-//! a dedicated store. This type is the seam — it is the only place that knows both.
+//! a dedicated store.
 //!
-//! What it writes here is the graph layer that the Data Vault did not already cover:
-//! the section tree, section membership, the entity-to-entity `related` shortcut and
-//! citations. Entities, assertions, mentions, evidence and stitch links are written by
-//! [`crate::VaultWriter::write_stage2`] with full Data Vault history semantics, from the
-//! same run.
+//! What is written here is the section tree, section membership, table cells, in-image
+//! text, the entity-to-entity `related` shortcut, citations and the document type.
+//! Documents, pages, blocks, entities, assertions, mentions, evidence and stitch links
+//! are written by [`crate::VaultWriter::write_stage2`] with full Data Vault history
+//! semantics — and this runs **inside that same transaction**, from the same run.
+//!
+//! It used to be a separate `GraphStore` implementation with its own transaction, called
+//! by the worker after `write_stage2` had already committed. Two writers for one graph
+//! meant two projections that could drift (a defect fixed in one had no counterpart in
+//! the other) and, worse, two commits: a crash between them left a run recorded as
+//! finished with no sections, cells or in-image text under it.
 
-use std::sync::Arc;
-
-use async_trait::async_trait;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use serde_json::json;
-use sqlx::PgPool;
+use sqlx::{Postgres, Transaction};
 
-use vs_core::HashKey;
-use vs_core::DocTypeSource;
-use vs_graph::{DocGraph, EdgeKind, GraphStore, NodeKind, RunInfo, StoreError, Vectors};
-use vs_vectors::VectorStore;
+use vs_core::{DocTypeSource, DocumentType, HashKey, RunId};
+use vs_graph::{DocGraph, EdgeKind, NodeKind};
 
-use crate::{hash_diff, latest_differs, record_source};
-
-pub struct PgGraphStore {
-    pub pool: PgPool,
-    pub vectors: Arc<dyn VectorStore>,
-}
+use crate::{hash_diff, latest_differs};
 
 /// Stored as the serde name, so the column matches what a `DocTypeSource` deserialises.
 fn source_name(s: DocTypeSource) -> &'static str {
@@ -35,10 +31,6 @@ fn source_name(s: DocTypeSource) -> &'static str {
         DocTypeSource::Model => "model",
         DocTypeSource::PageVote => "page_vote",
     }
-}
-
-fn unavailable(e: sqlx::Error) -> StoreError {
-    StoreError::Unavailable(format!("postgres: {e}"))
 }
 
 /// Columns for one batch insert, built as parallel arrays so each table is one statement
@@ -220,296 +212,265 @@ impl Columns {
     }
 }
 
-impl PgGraphStore {
-    async fn write_graph(&self, run: &RunInfo, document_hk: &str, graph: &DocGraph) -> Result<(), StoreError> {
-        let c = Columns::of(graph);
-        let now = Utc::now();
-        let src = record_source("doc", "graph", None);
-        let run_uuid = run.run_id.0;
-        let mut tx = self.pool.begin().await.map_err(unavailable)?;
+/// Writes the graph layer into `tx`, which the caller commits.
+///
+/// Taking the transaction rather than a pool is the whole point: these rows and the Data
+/// Vault rows of the same run become visible together or not at all.
+pub(crate) async fn write_graph_layer(
+    tx: &mut Transaction<'_, Postgres>,
+    run_id: RunId,
+    document_hk: &str,
+    graph: &DocGraph,
+    doc_type: Option<&DocumentType>,
+    now: DateTime<Utc>,
+    src: &str,
+) -> sqlx::Result<()> {
+    let c = Columns::of(graph);
+    let run_uuid = run_id.0;
+    // Every statement below runs on the caller's transaction.
+    let tx: &mut sqlx::PgConnection = tx;
 
-        if !c.section_hk.is_empty() {
-            sqlx::query(
-                "INSERT INTO vault.hub_section (section_hk, document_hk, run_id, heading_block_hk, load_dts, record_source)
-                 SELECT v.section_hk, $3, $4, v.heading, $5, $6
-                 FROM UNNEST($1::text[], $2::text[]) AS v(section_hk, heading)
-                 ON CONFLICT (section_hk) DO NOTHING",
-            )
-            .bind(&c.section_hk)
-            .bind(&c.section_heading)
-            .bind(document_hk)
-            .bind(run_uuid)
-            .bind(now)
-            .bind(&src)
-            .execute(&mut *tx)
-            .await
-            .map_err(unavailable)?;
+    if !c.section_hk.is_empty() {
+        sqlx::query(
+            "INSERT INTO vault.hub_section (section_hk, document_hk, run_id, heading_block_hk, load_dts, record_source)
+             SELECT v.section_hk, $3, $4, v.heading, $5, $6
+             FROM UNNEST($1::text[], $2::text[]) AS v(section_hk, heading)
+             ON CONFLICT (section_hk) DO NOTHING",
+        )
+        .bind(&c.section_hk)
+        .bind(&c.section_heading)
+        .bind(document_hk)
+        .bind(run_uuid)
+        .bind(now)
+        .bind(src)
+        .execute(&mut *tx)
+        .await?;
 
-            let sat = format!(
-                "INSERT INTO vault.sat_section (section_hk, load_dts, hash_diff, record_source, title, level)
-                 SELECT v.section_hk, $1, v.hash_diff, $5, v.title, v.level
-                 FROM UNNEST($2::text[], $3::text[], $4::text[], $6::smallint[]) AS v(section_hk, hash_diff, title, level)
-                 WHERE {}",
-                latest_differs("vault.sat_section", "section_hk")
-            );
-            sqlx::query(&sat)
-                .bind(now)
-                .bind(&c.section_hk)
-                .bind(&c.section_hash_diff)
-                .bind(&c.section_title)
-                .bind(&src)
-                .bind(&c.section_level)
-                .execute(&mut *tx)
-                .await
-                .map_err(unavailable)?;
-        }
-
-        if !c.tree_lnk_hk.is_empty() {
-            sqlx::query(
-                "INSERT INTO vault.lnk_section_section (lnk_hk, parent_section_hk, child_section_hk, document_hk, run_id, load_dts, record_source)
-                 SELECT v.lnk_hk, v.parent, v.child, $4, $5, $6, $7
-                 FROM UNNEST($1::text[], $2::text[], $3::text[]) AS v(lnk_hk, parent, child)
-                 ON CONFLICT (lnk_hk) DO NOTHING",
-            )
-            .bind(&c.tree_lnk_hk)
-            .bind(&c.tree_parent as &Vec<Option<String>>)
-            .bind(&c.tree_child)
-            .bind(document_hk)
-            .bind(run_uuid)
-            .bind(now)
-            .bind(&src)
-            .execute(&mut *tx)
-            .await
-            .map_err(unavailable)?;
-        }
-
-        if !c.member_lnk_hk.is_empty() {
-            sqlx::query(
-                "INSERT INTO vault.lnk_section_block (lnk_hk, section_hk, block_hk, load_dts, record_source)
-                 SELECT v.lnk_hk, v.section_hk, v.block_hk, $4, $5
-                 FROM UNNEST($1::text[], $2::text[], $3::text[]) AS v(lnk_hk, section_hk, block_hk)
-                 ON CONFLICT (lnk_hk) DO NOTHING",
-            )
-            .bind(&c.member_lnk_hk)
-            .bind(&c.member_section)
-            .bind(&c.member_block)
-            .bind(now)
-            .bind(&src)
-            .execute(&mut *tx)
-            .await
-            .map_err(unavailable)?;
-        }
-
-        if !c.related_lnk_hk.is_empty() {
-            sqlx::query(
-                "INSERT INTO vault.lnk_entity_entity (lnk_hk, from_entity_hk, to_entity_hk, assertion_hk, run_id, load_dts, record_source)
-                 SELECT v.lnk_hk, v.from_hk, v.to_hk, v.assertion_hk, $5, $6, $7
-                 FROM UNNEST($1::text[], $2::text[], $3::text[], $4::text[]) AS v(lnk_hk, from_hk, to_hk, assertion_hk)
-                 ON CONFLICT (lnk_hk) DO NOTHING",
-            )
-            .bind(&c.related_lnk_hk)
-            .bind(&c.related_from)
-            .bind(&c.related_to)
-            .bind(&c.related_assertion)
-            .bind(run_uuid)
-            .bind(now)
-            .bind(&src)
-            .execute(&mut *tx)
-            .await
-            .map_err(unavailable)?;
-
-            let sat = format!(
-                "INSERT INTO vault.sat_related (lnk_hk, load_dts, hash_diff, record_source, predicate_id, confidence)
-                 SELECT v.lnk_hk, $1, v.hash_diff, $5, v.predicate_id, v.confidence
-                 FROM UNNEST($2::text[], $3::text[], $4::text[], $6::real[]) AS v(lnk_hk, hash_diff, predicate_id, confidence)
-                 WHERE {}",
-                latest_differs("vault.sat_related", "lnk_hk")
-            );
-            sqlx::query(&sat)
-                .bind(now)
-                .bind(&c.related_lnk_hk)
-                .bind(&c.related_hash_diff)
-                .bind(&c.related_predicate)
-                .bind(&src)
-                .bind(&c.related_confidence)
-                .execute(&mut *tx)
-                .await
-                .map_err(unavailable)?;
-        }
-
-        if !c.cites_lnk_hk.is_empty() {
-            sqlx::query(
-                "INSERT INTO vault.lnk_block_entity_cites (lnk_hk, block_hk, entity_hk, load_dts, record_source)
-                 SELECT v.lnk_hk, v.block_hk, v.entity_hk, $4, $5
-                 FROM UNNEST($1::text[], $2::text[], $3::text[]) AS v(lnk_hk, block_hk, entity_hk)
-                 ON CONFLICT (lnk_hk) DO NOTHING",
-            )
-            .bind(&c.cites_lnk_hk)
-            .bind(&c.cites_block)
-            .bind(&c.cites_entity)
-            .bind(now)
-            .bind(&src)
-            .execute(&mut *tx)
-            .await
-            .map_err(unavailable)?;
-        }
-
-        if !c.cell_hk.is_empty() {
-            sqlx::query(
-                "INSERT INTO vault.hub_cell (cell_hk, block_hk, run_id, row_idx, col_idx, load_dts, record_source)
-                 SELECT v.cell_hk, v.block_hk, $5, v.row_idx, v.col_idx, $6, $7
-                 FROM UNNEST($1::text[], $2::text[], $3::int[], $4::int[]) AS v(cell_hk, block_hk, row_idx, col_idx)
-                 ON CONFLICT (cell_hk) DO NOTHING",
-            )
-            .bind(&c.cell_hk)
-            .bind(&c.cell_block)
-            .bind(&c.cell_row)
-            .bind(&c.cell_col)
-            .bind(run_uuid)
-            .bind(now)
-            .bind(&src)
-            .execute(&mut *tx)
-            .await
-            .map_err(unavailable)?;
-
-            let sat = format!(
-                "INSERT INTO vault.sat_cell (cell_hk, load_dts, hash_diff, record_source, text, header, column_header)
-                 SELECT v.cell_hk, $1, v.hash_diff, $5, v.text, v.header, v.column_header
-                 FROM UNNEST($2::text[], $3::text[], $4::text[], $6::bool[], $7::text[])
-                      AS v(cell_hk, hash_diff, text, header, column_header)
-                 WHERE {}",
-                latest_differs("vault.sat_cell", "cell_hk")
-            );
-            sqlx::query(&sat)
-                .bind(now)
-                .bind(&c.cell_hk)
-                .bind(&c.cell_hash_diff)
-                .bind(&c.cell_text)
-                .bind(&src)
-                .bind(&c.cell_header)
-                .bind(&c.cell_column_header as &Vec<Option<String>>)
-                .execute(&mut *tx)
-                .await
-                .map_err(unavailable)?;
-        }
-
-        if !c.img_hk.is_empty() {
-            sqlx::query(
-                "INSERT INTO vault.hub_image_text (image_text_hk, block_hk, run_id, seq, load_dts, record_source)
-                 SELECT v.hk, v.block_hk, $4, v.seq, $5, $6
-                 FROM UNNEST($1::text[], $2::text[], $3::int[]) AS v(hk, block_hk, seq)
-                 ON CONFLICT (image_text_hk) DO NOTHING",
-            )
-            .bind(&c.img_hk)
-            .bind(&c.img_block)
-            .bind(&c.img_seq)
-            .bind(run_uuid)
-            .bind(now)
-            .bind(&src)
-            .execute(&mut *tx)
-            .await
-            .map_err(unavailable)?;
-
-            let sat = format!(
-                // The alias column must be named `image_text_hk`: `latest_differs`
-                // generates `s.<parent> = v.<parent>`, so a shorter alias makes the
-                // generated predicate reference a column that does not exist.
-                "INSERT INTO vault.sat_image_text (image_text_hk, load_dts, hash_diff, record_source, text)
-                 SELECT v.image_text_hk, $1, v.hash_diff, $4, v.text
-                 FROM UNNEST($2::text[], $3::text[], $5::text[]) AS v(image_text_hk, hash_diff, text)
-                 WHERE {}",
-                latest_differs("vault.sat_image_text", "image_text_hk")
-            );
-            sqlx::query(&sat)
-                .bind(now)
-                .bind(&c.img_hk)
-                .bind(&c.img_hash_diff)
-                .bind(&src)
-                .bind(&c.img_text)
-                .execute(&mut *tx)
-                .await
-                .map_err(unavailable)?;
-        }
-
-        if !c.match_lnk_hk.is_empty() {
-            sqlx::query(
-                "INSERT INTO vault.lnk_image_text_match (lnk_hk, image_text_hk, block_hk, entity_hk, via, load_dts, record_source)
-                 SELECT v.lnk_hk, v.source, v.block_hk, v.entity_hk, v.via, $6, $7
-                 FROM UNNEST($1::text[], $2::text[], $3::text[], $4::text[], $5::text[])
-                      AS v(lnk_hk, source, block_hk, entity_hk, via)
-                 ON CONFLICT (lnk_hk) DO NOTHING",
-            )
-            .bind(&c.match_lnk_hk)
-            .bind(&c.match_source)
-            .bind(&c.match_block as &Vec<Option<String>>)
-            .bind(&c.match_entity as &Vec<Option<String>>)
-            .bind(&c.match_via)
-            .bind(now)
-            .bind(&src)
-            .execute(&mut *tx)
-            .await
-            .map_err(unavailable)?;
-        }
-
-        if let Some(dt) = &run.doc_type {
-            let sat = concat!(
-                "INSERT INTO vault.sat_document_type (document_hk, load_dts, hash_diff, record_source, run_id, doc_type, confidence, source)
-                 SELECT $1, $2, $3, $4, $5, $6, $7, $8
-                 WHERE NOT EXISTS (
-                     SELECT 1 FROM (SELECT s.hash_diff FROM vault.sat_document_type s
-                                    WHERE s.document_hk = $1 ORDER BY s.load_dts DESC LIMIT 1) l
-                     WHERE l.hash_diff = $3
-                 )"
-            );
-            let type_name = crate::enum_name(&dt.doc_type);
-            let source_name = source_name(dt.source);
-            sqlx::query(&sat)
-                .bind(document_hk)
-                .bind(now)
-                .bind(hash_diff(&json!({ "doc_type": type_name, "confidence": dt.confidence, "source": source_name })))
-                .bind(&src)
-                .bind(run_uuid)
-                .bind(&type_name)
-                .bind(dt.confidence)
-                .bind(source_name)
-                .execute(&mut *tx)
-                .await
-                .map_err(unavailable)?;
-        }
-
-        tx.commit().await.map_err(unavailable)?;
-        tracing::debug!(
-            sections = c.section_hk.len(),
-            section_links = c.tree_lnk_hk.len(),
-            members = c.member_lnk_hk.len(),
-            related = c.related_lnk_hk.len(),
-            cites = c.cites_lnk_hk.len(),
-            cells = c.cell_hk.len(),
-            image_text = c.img_hk.len(),
-            text_matches = c.match_lnk_hk.len(),
-            doc_type = ?run.doc_type.map(|d| d.doc_type),
-            "graph layer written"
+        let sat = format!(
+            "INSERT INTO vault.sat_section (section_hk, load_dts, hash_diff, record_source, title, level)
+             SELECT v.section_hk, $1, v.hash_diff, $5, v.title, v.level
+             FROM UNNEST($2::text[], $3::text[], $4::text[], $6::smallint[]) AS v(section_hk, hash_diff, title, level)
+             WHERE {}",
+            latest_differs("vault.sat_section", "section_hk")
         );
-        Ok(())
+        sqlx::query(&sat)
+            .bind(now)
+            .bind(&c.section_hk)
+            .bind(&c.section_hash_diff)
+            .bind(&c.section_title)
+            .bind(src)
+            .bind(&c.section_level)
+            .execute(&mut *tx)
+            .await?;
     }
-}
 
-#[async_trait]
-impl GraphStore for PgGraphStore {
-    async fn write_run(&self, run: &RunInfo, graph: &DocGraph, vectors: &Vectors) -> Result<(), StoreError> {
-        let document_hk = graph
-            .nodes
-            .iter()
-            .find(|n| n.kind == NodeKind::Document)
-            .map(|n| n.key.as_str())
-            .ok_or_else(|| StoreError::Rejected("graph has no document node".into()))?;
-
-        // Postgres first: it is the system of record. A vector-store failure retries the
-        // whole task, and both halves are idempotent, so the retry converges.
-        self.write_graph(run, document_hk, graph).await?;
-        self.vectors.write_run(run, graph, vectors).await?;
-        Ok(())
+    if !c.tree_lnk_hk.is_empty() {
+        sqlx::query(
+            "INSERT INTO vault.lnk_section_section (lnk_hk, parent_section_hk, child_section_hk, document_hk, run_id, load_dts, record_source)
+             SELECT v.lnk_hk, v.parent, v.child, $4, $5, $6, $7
+             FROM UNNEST($1::text[], $2::text[], $3::text[]) AS v(lnk_hk, parent, child)
+             ON CONFLICT (lnk_hk) DO NOTHING",
+        )
+        .bind(&c.tree_lnk_hk)
+        .bind(&c.tree_parent as &Vec<Option<String>>)
+        .bind(&c.tree_child)
+        .bind(document_hk)
+        .bind(run_uuid)
+        .bind(now)
+        .bind(src)
+        .execute(&mut *tx)
+        .await?;
     }
+
+    if !c.member_lnk_hk.is_empty() {
+        sqlx::query(
+            "INSERT INTO vault.lnk_section_block (lnk_hk, section_hk, block_hk, load_dts, record_source)
+             SELECT v.lnk_hk, v.section_hk, v.block_hk, $4, $5
+             FROM UNNEST($1::text[], $2::text[], $3::text[]) AS v(lnk_hk, section_hk, block_hk)
+             ON CONFLICT (lnk_hk) DO NOTHING",
+        )
+        .bind(&c.member_lnk_hk)
+        .bind(&c.member_section)
+        .bind(&c.member_block)
+        .bind(now)
+        .bind(src)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    if !c.related_lnk_hk.is_empty() {
+        sqlx::query(
+            "INSERT INTO vault.lnk_entity_entity (lnk_hk, from_entity_hk, to_entity_hk, assertion_hk, run_id, load_dts, record_source)
+             SELECT v.lnk_hk, v.from_hk, v.to_hk, v.assertion_hk, $5, $6, $7
+             FROM UNNEST($1::text[], $2::text[], $3::text[], $4::text[]) AS v(lnk_hk, from_hk, to_hk, assertion_hk)
+             ON CONFLICT (lnk_hk) DO NOTHING",
+        )
+        .bind(&c.related_lnk_hk)
+        .bind(&c.related_from)
+        .bind(&c.related_to)
+        .bind(&c.related_assertion)
+        .bind(run_uuid)
+        .bind(now)
+        .bind(src)
+        .execute(&mut *tx)
+        .await?;
+
+        let sat = format!(
+            "INSERT INTO vault.sat_related (lnk_hk, load_dts, hash_diff, record_source, predicate_id, confidence)
+             SELECT v.lnk_hk, $1, v.hash_diff, $5, v.predicate_id, v.confidence
+             FROM UNNEST($2::text[], $3::text[], $4::text[], $6::real[]) AS v(lnk_hk, hash_diff, predicate_id, confidence)
+             WHERE {}",
+            latest_differs("vault.sat_related", "lnk_hk")
+        );
+        sqlx::query(&sat)
+            .bind(now)
+            .bind(&c.related_lnk_hk)
+            .bind(&c.related_hash_diff)
+            .bind(&c.related_predicate)
+            .bind(src)
+            .bind(&c.related_confidence)
+            .execute(&mut *tx)
+            .await?;
+    }
+
+    if !c.cites_lnk_hk.is_empty() {
+        sqlx::query(
+            "INSERT INTO vault.lnk_block_entity_cites (lnk_hk, block_hk, entity_hk, load_dts, record_source)
+             SELECT v.lnk_hk, v.block_hk, v.entity_hk, $4, $5
+             FROM UNNEST($1::text[], $2::text[], $3::text[]) AS v(lnk_hk, block_hk, entity_hk)
+             ON CONFLICT (lnk_hk) DO NOTHING",
+        )
+        .bind(&c.cites_lnk_hk)
+        .bind(&c.cites_block)
+        .bind(&c.cites_entity)
+        .bind(now)
+        .bind(src)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    if !c.cell_hk.is_empty() {
+        sqlx::query(
+            "INSERT INTO vault.hub_cell (cell_hk, block_hk, run_id, row_idx, col_idx, load_dts, record_source)
+             SELECT v.cell_hk, v.block_hk, $5, v.row_idx, v.col_idx, $6, $7
+             FROM UNNEST($1::text[], $2::text[], $3::int[], $4::int[]) AS v(cell_hk, block_hk, row_idx, col_idx)
+             ON CONFLICT (cell_hk) DO NOTHING",
+        )
+        .bind(&c.cell_hk)
+        .bind(&c.cell_block)
+        .bind(&c.cell_row)
+        .bind(&c.cell_col)
+        .bind(run_uuid)
+        .bind(now)
+        .bind(src)
+        .execute(&mut *tx)
+        .await?;
+
+        let sat = format!(
+            "INSERT INTO vault.sat_cell (cell_hk, load_dts, hash_diff, record_source, text, header, column_header)
+             SELECT v.cell_hk, $1, v.hash_diff, $5, v.text, v.header, v.column_header
+             FROM UNNEST($2::text[], $3::text[], $4::text[], $6::bool[], $7::text[])
+                  AS v(cell_hk, hash_diff, text, header, column_header)
+             WHERE {}",
+            latest_differs("vault.sat_cell", "cell_hk")
+        );
+        sqlx::query(&sat)
+            .bind(now)
+            .bind(&c.cell_hk)
+            .bind(&c.cell_hash_diff)
+            .bind(&c.cell_text)
+            .bind(src)
+            .bind(&c.cell_header)
+            .bind(&c.cell_column_header as &Vec<Option<String>>)
+            .execute(&mut *tx)
+            .await?;
+    }
+
+    if !c.img_hk.is_empty() {
+        sqlx::query(
+            "INSERT INTO vault.hub_image_text (image_text_hk, block_hk, run_id, seq, load_dts, record_source)
+             SELECT v.hk, v.block_hk, $4, v.seq, $5, $6
+             FROM UNNEST($1::text[], $2::text[], $3::int[]) AS v(hk, block_hk, seq)
+             ON CONFLICT (image_text_hk) DO NOTHING",
+        )
+        .bind(&c.img_hk)
+        .bind(&c.img_block)
+        .bind(&c.img_seq)
+        .bind(run_uuid)
+        .bind(now)
+        .bind(src)
+        .execute(&mut *tx)
+        .await?;
+
+        let sat = format!(
+            // The alias column must be named `image_text_hk`: `latest_differs`
+            // generates `s.<parent> = v.<parent>`, so a shorter alias makes the
+            // generated predicate reference a column that does not exist.
+            "INSERT INTO vault.sat_image_text (image_text_hk, load_dts, hash_diff, record_source, text)
+             SELECT v.image_text_hk, $1, v.hash_diff, $4, v.text
+             FROM UNNEST($2::text[], $3::text[], $5::text[]) AS v(image_text_hk, hash_diff, text)
+             WHERE {}",
+            latest_differs("vault.sat_image_text", "image_text_hk")
+        );
+        sqlx::query(&sat)
+            .bind(now)
+            .bind(&c.img_hk)
+            .bind(&c.img_hash_diff)
+            .bind(src)
+            .bind(&c.img_text)
+            .execute(&mut *tx)
+            .await?;
+    }
+
+    if !c.match_lnk_hk.is_empty() {
+        sqlx::query(
+            "INSERT INTO vault.lnk_image_text_match (lnk_hk, image_text_hk, block_hk, entity_hk, via, load_dts, record_source)
+             SELECT v.lnk_hk, v.source, v.block_hk, v.entity_hk, v.via, $6, $7
+             FROM UNNEST($1::text[], $2::text[], $3::text[], $4::text[], $5::text[])
+                  AS v(lnk_hk, source, block_hk, entity_hk, via)
+             ON CONFLICT (lnk_hk) DO NOTHING",
+        )
+        .bind(&c.match_lnk_hk)
+        .bind(&c.match_source)
+        .bind(&c.match_block as &Vec<Option<String>>)
+        .bind(&c.match_entity as &Vec<Option<String>>)
+        .bind(&c.match_via)
+        .bind(now)
+        .bind(src)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    if let Some(dt) = doc_type {
+        let sat = "INSERT INTO vault.sat_document_type (document_hk, load_dts, hash_diff, record_source, run_id, doc_type, confidence, source)\n                 SELECT $1, $2, $3, $4, $5, $6, $7, $8\n                 WHERE NOT EXISTS (\n                     SELECT 1 FROM (SELECT s.hash_diff FROM vault.sat_document_type s\n                                    WHERE s.document_hk = $1 ORDER BY s.load_dts DESC LIMIT 1) l\n                     WHERE l.hash_diff = $3\n                 )";
+        let type_name = crate::enum_name(&dt.doc_type);
+        let source_name = source_name(dt.source);
+        sqlx::query(sat)
+            .bind(document_hk)
+            .bind(now)
+            .bind(hash_diff(&json!({ "doc_type": type_name, "confidence": dt.confidence, "source": source_name })))
+            .bind(src)
+            .bind(run_uuid)
+            .bind(&type_name)
+            .bind(dt.confidence)
+            .bind(source_name)
+            .execute(&mut *tx)
+            .await?;
+    }
+
+    tracing::debug!(
+        sections = c.section_hk.len(),
+        section_links = c.tree_lnk_hk.len(),
+        members = c.member_lnk_hk.len(),
+        related = c.related_lnk_hk.len(),
+        cites = c.cites_lnk_hk.len(),
+        cells = c.cell_hk.len(),
+        image_text = c.img_hk.len(),
+        text_matches = c.match_lnk_hk.len(),
+        doc_type = ?doc_type.map(|d| d.doc_type),
+        "graph layer written"
+    );
+    Ok(())
 }
 
 /// Unused today, kept because it documents the one piece of the graph that is answered by
@@ -532,7 +493,7 @@ mod tests {
     }
 
     fn hex(c: char) -> String {
-        std::iter::repeat(c).take(64).collect()
+        std::iter::repeat_n(c, 64).collect()
     }
 
     #[test]
@@ -616,7 +577,7 @@ mod tests {
         };
         let c = Columns::of(&graph);
 
-        assert_eq!(c.cell_block, [tbl.clone()], "the cell's table comes out of its key");
+        assert_eq!(c.cell_block, [tbl], "the cell's table comes out of its key");
         assert_eq!((c.cell_row[0], c.cell_col[0]), (1, 2));
         assert_eq!(c.cell_text, ["88.5"]);
         assert_eq!(c.cell_column_header, [Some("F1".to_string())]);
