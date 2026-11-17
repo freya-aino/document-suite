@@ -9,7 +9,7 @@ command line or MMDS). System spec: [`docs/SPEC.md`](../../docs/SPEC.md) §5.2 a
 
 Implemented: all three roles end to end, the common pull loop over both lanes with
 heartbeats, retry with backoff, dead-lettering, the max-deliveries give-up path, graceful
-drain on SIGTERM, and the cached DAG-list provider. 14 unit tests pass, with the Stage 2
+drain on SIGTERM, and the cached DAG-list provider. 16 unit tests pass, with the Stage 2
 pipeline tested over fakes for the extractor, resolver and embedder.
 
 Remaining:
@@ -21,10 +21,10 @@ Remaining:
       unverified.
 - [ ] `THUMBNAIL_PX` is hard-coded here while `vs-classify` and `vs-adapt` each have their
       own source for the same number.
-- [ ] The `page` role passes `known_doc_type = None` unconditionally, so the document-level
-      type smoothing `vs-classify` provides for never happens.
-- [ ] Figure and chart crops produced during Stage 1 are never uploaded, so the
-      `crop://…` URIs written into page results do not resolve for a reviewer.
+- [ ] The `page` role takes `known_doc_type` from the caller's `JobSpec` and nowhere
+      else, so the cross-page smoothing `vs-classify` provides for happens only when the
+      caller already knew the type. Deliberate, and argued at `PageHandler::classify`:
+      pages fan out with no shared per-document state.
 
 ## Common loop
 
@@ -54,7 +54,7 @@ Startup per role (`src/main.rs`): all roles connect bus, blob and Postgres. `pag
 startup error for these roles only — `ingest` calls no model), build the
 `OpenAiClient` and check at startup that every configured `[stage2]` model exists in
 the registry. `page` builds `vs_steps::production_registry`; `doc` builds the
-the `QdrantStore`, the `OpenAiEmbedder`, the `PgGraphStore` and the `PgCorpusResolver`.
+`QdrantStore`, the `OpenAiEmbedder` and the `PgCorpusResolver`.
 
 `max_in_flight` concurrent tasks per process (default 32 for `page`; most of the time
 is spent waiting on model calls, so this is much larger than the vCPU count).
@@ -158,8 +158,11 @@ graph    = vs_graph::build(stitched, ext, title); graph.validate()
 vectors  = embedder over graph.embed_targets in batches of stage2.embed_batch_size → Vectors
                                                              state Writing
 final    = Partial if any page failed else Done
-VaultWriter::write_stage2(RunMeta{run_id, dag_list_version, started_at = job.created_at}, spec, stitched, ext, final)
-GraphStore::write_run(RunInfo, graph, vectors)
+VaultWriter::write_stage2(RunMeta{run_id, dag_list_version, started_at = job.created_at},
+            spec, stitched, ext, graph, run_info.doc_type)   -- one transaction: Data Vault
+            rows and the graph layer together; sat_run = writing
+VectorStore::write_run(RunInfo, graph, vectors)
+VaultWriter::finish_run(RunMeta, spec, final)                -- sat_run = done | partial
 write doc.json → blob results/<doc>/<run>/doc.json;  ops.set_state(final)
 ```
 
@@ -172,10 +175,18 @@ counts, graph node/edge counts, vectors).
 version at doc time, else `none` (the same rule ingest applies; the two can differ only
 if a list was activated between ingest and doc, which the `sat_run` history then shows).
 
-Postgres before the vector store: the vault is the system of record; if the vector write fails the
-task is retried. Every step is idempotent on retry: page results are read-only, the
-vault writer upserts, `write_run` drops a partial earlier attempt of the same run
-first, and `doc.json` is overwritten.
+Postgres before the vector store: the vault is the system of record; if the vector write
+fails the task is retried. Every step is idempotent on retry: page results are read-only,
+the vault writer upserts, `VectorStore::write_run` drops a partial earlier attempt of the
+same run first, and `doc.json` is overwritten.
+
+**Why the run's final state is a third call.** Nothing can span two stores, so there is
+always a window in which Postgres has the run and Qdrant does not. Writing `done` in the
+same transaction as the rows put the lie inside the system of record: a vector-store
+failure, or a worker killed in between, left `sat_run` claiming a complete run over a
+document with nothing to search, indistinguishable from a real one. `write_stage2` now
+leaves the run `writing` and `finish_run` closes it, so the vault's own record is true at
+every point and a reader can tell "SQL in, vectors pending" from "complete".
 
 Error classes: too many failed pages, unparseable page results, stitch errors (no
 pages / mixed runs), extraction schema violations and graph invariant violations are

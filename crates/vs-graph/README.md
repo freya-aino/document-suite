@@ -3,7 +3,10 @@
 Builds the **document graph**: one in-memory, store-independent graph per document run,
 combining the structure layer (from stitching) and the semantic layer (from extraction).
 Every store writes from this one structure, so no two stores can disagree about what was
-extracted. This crate also owns the `GraphStore` trait, and depends on no store itself.
+extracted. It depends on no store itself: `RunInfo` and `Vectors` — what a store needs
+about a run beyond the graph — live here, and the store traits live with their backends
+(`vs_vectors::VectorStore`; the vault writes the graph layer in its own Stage 2
+transaction).
 System spec: [`docs/SPEC.md`](../../docs/SPEC.md).
 
 ## What it does
@@ -12,11 +15,11 @@ Builds the graph: the node and edge model, `build()` over a `StitchedDocument` p
 `ExtractionOutput`, embed-target emission, and `validate()`. Every store is written from
 this one structure, so no two stores can disagree about what was extracted.
 
-This crate is load-bearing — it is the single structure both stores are written from — and
-it is the least tested crate in the workspace. Fix that before extending it.
+This crate is load-bearing — it is the single structure both stores are written from — so
+it is tested before it is extended.
 
 Also implemented: **table cells and in-image text as nodes** (`page`), the `Cites` edge,
-and the intra-page relations `vs-stitch` derives (`EnclosesRegion`, `ValueOf`). 21 tests,
+and the intra-page relations `vs-stitch` derives (`EnclosesRegion`, `ValueOf`). 23 tests,
 12 of them against a whole built document — the builder had none before.
 
 ## Known limitations
@@ -25,9 +28,13 @@ and the intra-page relations `vs-stitch` derives (`EnclosesRegion`, `ValueOf`). 
   records the *corrected* reading order but not that a page had columns, nor which
   block sat in which column. A reader cannot tell a repaired two-column page from a
   single-column one.
-- In-image text is matched to body text by case-insensitive containment on fragments
-  of three characters or more. Deliberately conservative — a looser match would link a
-  chart's "AUC" label to every "auction" — but it therefore misses inflections and
+- In-image text is matched to body text by case-insensitive containment **on word
+  boundaries**, over fragments of three characters or more, and the same floor applies to
+  the entity side: an entity named "IT" or "AI" is never matched. Both rules exist because
+  plain containment produced edges that were simply wrong — "IT" was found inside
+  "monitoring", and an entity with an empty name matched every fragment. Deliberately
+  conservative — a looser match would link a chart's "AUC" label to every "auction" — but
+  it therefore misses inflections and
   any term the model transcribed differently from the body text.
 - `validate()` leaves `Evidence`, `MatchesText` and `HasSection` endpoint-kind
   unconstrained, because each legitimately has two shapes. Those three could take a

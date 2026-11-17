@@ -24,14 +24,18 @@ Remaining:
       during ingest (which calls no model today).
 - [ ] The document classifier's accuracy is unmeasured; `vs-adapt` scores DAG output, not
       classifier verdicts.
-- [ ] Tier 0's only measured signal for a scan is `ink_coverage`, which is enough to skip
-      a blank page but not to tell a photograph from a form. Everything else about a
-      raster page still comes from the tier-1 thumbnail.
+- [ ] Tier 0's measured signals for a scan are `ink_coverage` and `rotation_deg`, which
+      are enough to skip a blank page and to notice a sideways one, but not to tell a
+      photograph from a form. Everything else about a raster page still comes from the
+      tier-1 thumbnail.
 - [ ] `confidence` is never calibrated against the labelled datasets `vs-adapt` runs, so
       `min_classifier_confidence` in the routing table is tuned blind.
 - [ ] Language/script detection: the caller's hint is always trusted (assumption A19).
-- [ ] Rotation is recorded (`rotation_deg`) and still never acted on. See `vs-ingest`'s
-      status for why orientation correction is not a pixel-statistics problem.
+- [ ] Nothing *routes* on `rotation_deg`. The signal is now real for rasters as well as
+      PDFs, and `page.orient` turns the page when a DAG includes it, but no routing rule
+      selects a DAG with that step because a page arrived sideways. Note what the field
+      means: how far the source page is rotated, not a correction to apply — see
+      `PageSignals::rotation_deg`.
 
 ## Assumptions this component rests on
 

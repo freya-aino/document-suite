@@ -17,10 +17,12 @@ candidates it accepts.
 ## Known limitations
 
 - `blocks.verify` is in the `vs-dag` catalogue but has no implementation to register,
-  so the registry covers 15 of 16 documented kinds. See [`vs-dag`](../vs-dag/README.md)'s
+  so the registry covers 16 of 17 documented kinds. See [`vs-dag`](../vs-dag/README.md)'s
   known limitations for what is actually missing.
-- `page.orient` and `page.dewarp` are not implemented; see `vs-ingest`'s status for
-  why neither is a pixel-statistics problem.
+- `page.dewarp` is not implemented; see `vs-ingest`'s status for why a page-curl warp
+  needs the page boundary rather than ink statistics. `page.orient` *is* registered, and
+  its own documentation separates the half that is measured from the half that is
+  judged.
 
 ## The one rule
 

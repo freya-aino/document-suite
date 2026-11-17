@@ -14,7 +14,7 @@ kinds steps exchange, and the `NodeTrace` that records what each node did.
 ## Known limitations
 
 - `blocks.verify` is listed in the step catalogue below but **is not implemented and
-  not registered anywhere** — the only gap in the catalogue (15 of 16 kinds exist).
+  not registered anywhere** — the only gap in the catalogue (16 of 17 kinds exist).
   It is kept in the catalogue rather than dropped because the shape is settled (two
   block sets in, confidence from agreement out) and `vs-stitch` names it as the
   intended home for VLM-assisted link judgement; what is missing is a definition of
@@ -127,6 +127,7 @@ earlier levels). Nodes in one level run concurrently.
 | `blocks.merge_native` | CPU | native text layer + layout (+ recognised tables/formulas) → blocks |
 | `blocks.merge` | CPU | merge several block sets (union by IoU, keeps highest-confidence) |
 | `blocks.verify` | CPU/GPU | compares two block sets; sets confidence from agreement — **not implemented** |
+| `page.orient` | CPU | turns a sideways or upside-down page (quarter turns are measured, the flip is a gated judgement) |
 | `page.deskew` | CPU | straightens a crooked scan (projection profile) |
 | `page.denoise` | CPU | median filter for speckled scans and photos |
 | `page.normalize` | CPU | contrast normalisation for faint or unevenly lit pages |

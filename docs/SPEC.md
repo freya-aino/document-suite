@@ -145,8 +145,8 @@ Dependency direction (no cycles):
 `vs-core` ← `vs-infra`, `vs-dag` ← `vs-router`, `vs-classify`, `vs-ingest`, `vs-models`
 ← `vs-stitch` ← `vs-extract` ← `vs-graph` ← `vs-vectors` ← `vs-vault` ← `vs-worker`, `vs-api`, `vs-adapt`.
 
-`vs-graph` owns the `GraphStore` trait and the `DocGraph` both stores are written from, so
-it sits below every store crate and depends on none of them.
+`vs-graph` owns the `DocGraph` both stores are written from, so it sits below every store
+crate and depends on none of them.
 
 ## 5. Cross-cutting concerns
 
@@ -261,8 +261,9 @@ Where the rest went: A1, A2, A7 → [`vs-models`](../crates/vs-models/SPEC.md) a
    [`vs-infra`](../crates/vs-infra/SPEC.md).
 
 Resolved: what the RAG service needs from the graph store. It now queries Postgres and
-Qdrant directly; the contract it reads is documented in
-[`vs-vault/SPEC.md`](../crates/vs-vault/SPEC.md) and the vector store's spec.
+Qdrant directly, and the contract it reads is [`docs/STORES.md`](STORES.md) — key
+formulas, all eight retrieval patterns as SQL, the Qdrant collection and payload layout,
+and the responsibilities that moved to the caller when the compiled queries went away.
 
 ## 9. Research basis
 

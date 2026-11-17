@@ -128,8 +128,13 @@ in front of them. Consequences it owns, which HelixDB's compiled queries used to
 - filtering to the current run, via `vault.v_current_run`, when a document has been
   reprocessed and two runs' blocks are both present.
 
-The read contract is documented in [`vs-vault/SPEC.md`](../vs-vault/SPEC.md) together with
-the SQL side.
+The read contract is [`docs/STORES.md`](../../docs/STORES.md), which covers both stores
+together — including the asymmetry that bites hardest here: **Postgres keeps every run of
+a document and this store keeps only the latest.** The vault never deletes, while
+`write_run` drops the document's previous points first. So a vector hit is always from the
+current run, and a SQL join is not unless the caller filters. The same section records
+that an entity's name vector is written once and never rewritten, because it is the target
+every other document in the corpus was matched against.
 
 ## Tests
 

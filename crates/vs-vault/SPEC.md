@@ -23,11 +23,12 @@ and D6 (this is the single system of record *and* the graph projection).
 Implemented: the full raw vault (now 9 hubs, 12 links, 12 satellites), the `ops` schema
 (jobs, batches, page tasks, state log, idempotency keys), the `registry` schema (DAG
 lists, entity and relation types), role separation between the migration owner and the
-runtime role, `write_document`, `write_page`, `write_stage2`, the `v_current_run` view,
-the graph layer (`PgGraphStore`) and corpus entity resolution (`PgCorpusResolver`).
+runtime role, `write_document`, `write_page`, `write_stage2`, `finish_run`, the
+`v_current_run` view, the graph layer (`graph.rs`, written inside `write_stage2`'s
+transaction) and corpus entity resolution (`PgCorpusResolver`).
 15 unit tests, plus 17 Postgres integration tests (`#[ignore]`d; they need a database).
 All seven migrations apply, and every write path has been executed: `tests/graph.rs`
-covers `PgGraphStore` across all of 0005 to 0007 and `PgCorpusResolver` against real
+covers the graph layer across all of 0005 to 0007 and `PgCorpusResolver` against real
 label rows.
 
 Running them for the first time found three defects that no unit test could have caught:
@@ -48,13 +49,25 @@ This is now the suite's only graph store (D6), and it was already richer than th
 replaced: it keeps **both** span and region evidence, full `load_dts` history, block
 provenance, and the DAG and model hubs — none of which the graph projection held.
 
+### One transaction, one entry point
+
+`write_stage2` takes the `DocGraph` and writes the graph layer inside its own
+transaction. It used to be two calls, `write_stage2` then `PgGraphStore::write_run`, with
+a commit between them, and that cost two things:
+
+- a run could be **recorded as finished before its graph existed** — a crash between the
+  two commits left `sat_run` saying `done` over a document with no sections, cells or
+  in-image text, which no reader could tell apart from a complete run;
+- two writers for one graph meant two projections that could drift. Defect 1 above was
+  fixed in one of them and had no counterpart in the other.
+
+The state machine that replaces it: `write_stage2` writes every Postgres row and marks
+the run `writing`; the vectors go to Qdrant; `finish_run` then records `done` or
+`partial`. Nothing can span two stores, so `writing` is the honest intermediate state and
+readers are told to treat it as "SQL complete, vectors possibly not" —
+[`docs/STORES.md`](../../docs/STORES.md) says so.
+
 Remaining:
-- [ ] **The graph write path is split in two.** `write_stage2` projects entities,
-      assertions, mentions and evidence from `StitchedDocument` + `ExtractionOutput`,
-      while `PgGraphStore::write_run` writes sections, `related` and `cites` from the
-      `DocGraph`. Two code paths therefore decide what a document contains, which is
-      exactly the divergence D6 exists to prevent. `write_stage2` should take the
-      `DocGraph` and both should write from that one structure.
 - [ ] **The judge cannot see a candidate's context sentence.** `sat_entity_label` has no
       `context` column, so `PgCorpusResolver`'s judge sees only the stored name, type and
       aliases — the same blind spot the previous store had, and the one Postgres could
@@ -68,9 +81,12 @@ Remaining:
 - [ ] Nothing checks that a satellite's `hash_diff` excludes write-time values. Defect 2
       above was exactly that mistake, and the same trap exists in every satellite whose
       descriptive set might later gain a timestamp.
-- [ ] Document the read contract for the external RAG service — it now queries this schema
-      and Qdrant directly, so tenant scoping and current-run filtering become the caller's
-      responsibility. `v_current_run` is how it finds the current run.
+- [x] The read contract for the external RAG service is
+      [`docs/STORES.md`](../../docs/STORES.md): the key formulas, all eight retrieval
+      patterns as SQL against this schema, the Qdrant layout, and the three things that
+      became the caller's responsibility when the compiled queries went away — tenant
+      scoping, current-run filtering and dense/sparse fusion. Every SQL block in it has
+      been `PREPARE`d against a migrated database, so the column names are real.
 - [ ] Table cells are stored per `(block, row, col)`, so a table whose structure changes
       between runs leaves the previous run's cells addressable at the same coordinates
       with different content. The satellite versions them, but a reader taking the latest

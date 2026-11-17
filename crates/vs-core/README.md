@@ -38,11 +38,26 @@ serde naming rules are stated as rules rather than conventions.
    | `block_hk` | `H(page_hk \| run_id \| block_index)` | blocks belong to a run; a new DAG gives new blocks |
    | `section_hk` | `H(heading_block_hk)` | run-scoped through its heading block |
    | `entity_hk` | `H(tenant \| canonical_entity_key)` | shared across runs and documents |
+   | `entity_hk` (unresolved) | `H(document_hk \| local_id)` | one document; `doc_local_entity` |
    | `assertion_hk` | `H(run_id \| predicate \| sorted argument keys)` | per-run, so reprocessing re-asserts |
 
    Note the asymmetry: `document_hk`, `page_hk` and `entity_hk` outlive a run, while
    `block_hk` and `assertion_hk` are scoped to one. Stores rely on this when dropping a
    partial run without touching shared rows.
+
+   `doc_local_entity` has no tenant part because `document_hk` already contains one, and
+   leaving it out is what lets every crate compute the key: the graph builder has the
+   stitched document and no tenant, the vault has both. They used to disagree — the
+   builder emitted the readable string `local:<document_hk>:<local_id>`, which is neither
+   a hash nor short enough for the `CHAR(64)` columns that hold entity keys, while the
+   vault hashed `tenant | document_hk | local_id`. Unreachable in practice, because
+   resolution is eager, which is exactly how two different wrong answers survived.
+
+   Two keys are **not** defined here, because the vault derives them: a table cell is
+   `H("cell:<block_hk>:<row>:<col>")` and a fragment of in-image text is
+   `H("imgtext:<block_hk>:<index>")` — a hash of a readable key rather than of a list of
+   parts, which narrows an already-unique string to `CHAR(64)`. They are in the reader's
+   contract, [`docs/STORES.md`](../../docs/STORES.md), with the rest.
 2. **Bounding boxes** are normalised to `[0, 1]` relative to the page (origin top-left).
    Pixel coordinates are recovered with the page's render size. This keeps boxes stable
    when pages are re-rendered at another DPI.

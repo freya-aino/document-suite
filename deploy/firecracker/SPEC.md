@@ -9,8 +9,10 @@ Implemented: `build-rootfs.sh` (guest image with the glibc worker and its shared
 libraries), `init.sh` (guest init, MMDS config fetch), `vm-config.example.json`, and
 `firecracker-run.sh` to boot one VM locally with a TAP device and NAT egress.
 
-**This is a single-VM development path, not a deployable fleet.** Nothing here has been
-run against real hardware in CI or staging, because there is no CI.
+**This is a single-VM development path, not a deployable fleet.** Nothing here runs in
+CI: `.github/workflows/ci.yml` builds and tests the workspace, but booting a microVM
+needs `/dev/kvm` and a TAP device, so these scripts are still only ever exercised by
+hand.
 
 Remaining:
 - [ ] **No host agent**, so there is no way to run more than one microVM per host on

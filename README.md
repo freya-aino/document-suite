@@ -15,13 +15,13 @@ built carries a `README.md` describing what exists; one with work outstanding ca
 
 ```
 docs/SPEC.md        system spec: architecture, decisions, assumptions
-                                                                            docs
+docs/STORES.md      what a reader needs to query the two stores            contract
 crates/
   vs-core/          shared types (ids, blocks, page profile, provenance)    README
   vs-dag/           DAG model, step trait, executor                         README
   vs-router/        routing table + DAG selection                           README
   vs-steps/         the production step catalogue                           README
-  vs-graph/         document graph model + builder, GraphStore trait        README
+  vs-graph/         document graph model + builder                          README
   vs-infra/         task bus (NATS), blob store (S3), config, telemetry     SPEC
   vs-api/     [bin] public HTTP API                                         SPEC
   vs-ingest/        format detection, rasterization, pre-processing         SPEC
@@ -29,7 +29,7 @@ crates/
   vs-models/        model registry, OpenAI client, model steps, parsers     SPEC
   vs-stitch/        page results -> document; intra-page layout             SPEC
   vs-extract/       mentions, assertions, entity resolution                 SPEC
-  vs-vault/         Data Vault writer + migrations; the graph store         SPEC
+  vs-vault/         Data Vault writer + migrations, incl. the graph layer   SPEC
   vs-vectors/       vector store trait + Qdrant (dense and sparse)          SPEC
   vs-worker/  [bin] worker roles: ingest | page | doc                       SPEC
   vs-adapt/   [bin] workflow generation, scoring, selection (dev/stage)     SPEC
@@ -37,23 +37,23 @@ deploy/
   firecracker/      microVM image + fleet                                   SPEC + README
   gpu/              model serving tier                                      SPEC + README
 config/             example models, worker, DAG list, search space, LiteLLM
+.github/            CI: clippy, the declared MSRV, and the integration tests
 ```
 
 ## Status
 
-All 17 crates compile together and the workspace is green: **314 tests pass, none
+All 17 crates compile together and the workspace is green: **321 tests pass, none
 ignored** — the 24 integration tests run against a live Postgres, Qdrant, NATS and Garage.
-No `todo!()` or `unimplemented!()` remains anywhere in the tree.
+`cargo clippy --workspace --all-targets -- -D warnings` is clean. No `todo!()` or
+`unimplemented!()` remains anywhere in the tree.
 
 Five components are done and carry a README; the rest carry a `SPEC.md` whose `## Status`
-section lists what is left — 77 items in total. The cross-cutting gaps:
+section lists what is left. The cross-cutting gaps:
 
-- **No CI.** Nothing enforces the green build, so every claim here and in those
-  checklists is verified by hand.
 - **Nothing has run end to end.** Every store is now exercised directly — all seven
-  migrations apply, and `PgGraphStore`, `PgCorpusResolver` and `QdrantStore` are tested
-  against real services — but no run goes upload → ingest → Stage 1 → Stage 2 → Postgres
-  + Qdrant, so the handover between stages is still only covered by fakes.
+  migrations apply, and the vault's write path, `PgCorpusResolver` and `QdrantStore` are
+  tested against real services — but no run goes upload → ingest → Stage 1 → Stage 2 →
+  Postgres + Qdrant, so the handover between stages is still only covered by fakes.
 - **No auth.** `vs-api` takes the tenant from `X-VS-Tenant` and admin rights from
   `X-VS-Admin`, both of which any caller can set. Keep it on a trusted network.
 - **Telemetry is a stub** (`crates/vs-infra/src/telemetry.rs`): structured logs only, no
@@ -63,13 +63,32 @@ section lists what is left — 77 items in total. The cross-cutting gaps:
   content-aware routing (goal G2) and the pre-processing steps are unvalidated: whether
   deskewing or binarising helps any page class is exactly the open question. Stage 2
   extraction quality and worker sizing are likewise unmeasured.
-- Figure and chart crops are never uploaded, so their `crop://…` URIs do not resolve.
 - `blocks.verify` appears in the `vs-dag` step catalogue and is not implemented.
 
 Deliberately not built, each recorded with its reasoning in the owning component's docs:
-orientation correction and dewarping (`vs-ingest` — neither is decidable from pixel
-statistics), and automatic cross-page document-type smoothing (`vs-classify` — pages fan
-out with no shared state, so it would serialise Stage 1).
+dewarping (`vs-ingest` — a page-curl warp needs the page boundary, not ink statistics)
+and automatic cross-page document-type smoothing (`vs-classify` — pages fan out with no
+shared state, so it would serialise Stage 1). `page.orient` *is* built, with the
+difference between its strong and weak halves stated in its own documentation: which axis
+the text lines run along is measured, which end is up is a judgement with a margin.
+
+## CI
+
+`.github/workflows/ci.yml` runs three jobs on every push and pull request:
+
+| Job | What it does | Why it is separate |
+|---|---|---|
+| `check` | `cargo clippy --workspace --all-targets -- -D warnings`, then `cargo test --workspace` | the fast gate; clippy here has already caught a use of a 1.82 API under a declared MSRV of 1.80 |
+| `msrv` | `cargo check` on exactly the toolchain `Cargo.toml` declares | so the MSRV is checked rather than asserted |
+| `integration` | brings up Postgres, Qdrant, NATS and Garage, then `cargo test --workspace -- --include-ignored` | the first time these tests ever ran they found three real defects, two of them months old |
+
+`.github/scripts/services.sh` starts the three services that a GitHub `services:` block
+cannot (NATS needs an argument, Garage needs provisioning). It takes ports from the
+environment, so the same script brings them up locally:
+
+```sh
+PREFIX=vs-ci QDRANT_GRPC=56334 NATS_PORT=54222 S3_PORT=53900 .github/scripts/services.sh
+```
 
 ## Development environment
 
@@ -78,7 +97,7 @@ own in a `devenv.nix` next to its code; `devenv.yaml` imports them all:
 
 | File | Provides |
 |---|---|
-| `devenv.nix` | Rust stable toolchain, cargo-nextest, `VS_CONFIG=config/worker.dev.toml` |
+| `devenv.nix` | Rust stable toolchain (the workspace needs ≥ 1.82), cargo-nextest, `VS_CONFIG=config/worker.dev.toml` |
 | `crates/vs-infra/devenv.nix` | NATS with JetStream (:4222), Garage S3 (:3900, bucket `visual-suite`, fixed dev key), `nats` CLI |
 | `crates/vs-vault/devenv.nix` | PostgreSQL 17 (:5432, db/user/pass `visual_suite`/`vs`/`vs`), sqlx-cli, `DATABASE_URL`, `vs-migrate` |
 | `crates/vs-ingest/devenv.nix` | pdfium (`PDFIUM_DYNAMIC_LIB_PATH`) |
@@ -124,7 +143,7 @@ curl 127.0.0.1:8080/v1/jobs/<job_id> -H 'x-vs-tenant: t1'
 
 ### Tests
 
-`cargo test --workspace` runs the 290 tests that need nothing (PDF tests need
+`cargo test --workspace` runs the 297 tests that need nothing (PDF tests need
 `PDFIUM_DYNAMIC_LIB_PATH`, set by devenv). The other 24 touch a real store and are
 `#[ignore]`d; with `devenv up` running:
 

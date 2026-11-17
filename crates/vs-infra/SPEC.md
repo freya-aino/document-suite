@@ -21,8 +21,6 @@ Remaining:
 - [ ] Wire the OTLP trace exporter from `telemetry.otlp_endpoint`.
 - [ ] Serve Prometheus on `telemetry.metrics_addr` in the worker, bound to the microVM's
       internal interface only.
-- [ ] Figure and chart crops have a key helper (`keys::crop`) that nothing calls, so crops
-      are never uploaded and the `crop://…` URIs in stored blocks do not resolve.
 - [ ] Encryption at rest for originals (§5.6) is asserted but not configured here.
 - [ ] No Kafka implementation behind `TaskBus` (A6 allows it; nothing needs it yet).
 
