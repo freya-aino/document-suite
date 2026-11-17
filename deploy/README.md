@@ -7,23 +7,51 @@ configuration — and the local stack is a profile you can ignore:
 
 ```sh
 devenv shell                      # toolchain, pdfium, sqlx-cli — no services
-cargo build --release -p vs-api -p vs-worker
+cargo build --release -p vs-suite
 devenv --profile stack up -d      # only if you want this repo's services too
 ```
 
-## The binaries
+## The service
 
-| Binary | Role | Listens | Needs |
-|---|---|---|---|
-| `vs-api` | ingress: upload, status, DAG-list admin | `VS_API_ADDR`, default `0.0.0.0:8080` | Postgres, NATS, S3, Keycloak |
-| `vs-worker --role ingest` | rasterize, text layer, page signals | — (also `telemetry.metrics_addr`) | Postgres, NATS, S3 |
-| `vs-worker --role page` | Stage 1 per page | — | the above + model endpoints |
-| `vs-worker --role doc` | Stage 2 per document | — | the above + Qdrant |
-| `vs-api migrate` | schema migrations; a deploy step, not a service | — | Postgres, as the schema **owner** |
-| `vs-adapt` | offline workflow scoring (dev/stage) | — | nothing at rest |
+**One binary, one process, one service.** `vs-suite` serves the HTTP API and runs all
+three worker roles together, so a deployment adds one unit and scales it by running more
+copies. They coordinate through the task bus, so two copies divide the work the same way
+separate processes would.
 
-All of them read one TOML file — `--config`, or `VS_CONFIG`. Start from
-[`config/worker.example.toml`](../config/worker.example.toml); it documents every key.
+| | |
+|---|---|
+| Listens | `VS_API_ADDR`, default `0.0.0.0:8080` |
+| Needs | Postgres, NATS, S3, Keycloak — and, for Stage 1 and Stage 2, model endpoints and Qdrant |
+| Stop | SIGTERM: stops accepting requests and drains in-flight tasks within `--shutdown-grace` (60 s) |
+
+Two other invocations of the same binary are not services: `vs-suite migrate` is a deploy
+step (schema **owner** credentials, not the runtime role's), and `vs-suite render-child` is
+what the ingest role re-executes per render — you never run it yourself.
+
+### Splitting it, if you want to
+
+`--roles` (`VS_ROLES`) narrows a copy, which is how the halves get scaled separately —
+goal G8 as your choice rather than the default shape:
+
+| Copy | Inbound port | Scales on |
+|---|---|---|
+| `vs-suite --roles api` | yes | request rate |
+| `vs-suite --roles ingest` / `page` / `doc` | **none** — it pulls from NATS | JetStream lag for that role and lane |
+
+A copy with no `api` role needs no `[auth]` section and no realm. A copy with it fails
+startup without one. `worker.max_in_flight` applies per role, so a copy running all three
+can have three times that many tasks in flight.
+
+`vs-adapt` is the fourth binary and is never deployed: an offline tool for scoring
+candidate workflows in dev and stage.
+
+### There is no image here
+
+This repo builds binaries, not containers: no Dockerfile for the service, and the only
+image builds under `deploy/` are the model tier's. Wrapping `vs-suite` in your own image
+is the intended path — it needs the binary, `libpdfium.so` next to it (the rasterizer
+dlopens it), a CA bundle, and a config file. `deploy/firecracker/build-rootfs.sh` is a
+worked example of exactly that packaging, for microVMs.
 
 ## Pointing it at your own services
 
@@ -43,10 +71,11 @@ Any key in that file is overridable by environment variable as
 Three things are not negotiable, in the sense that the process will not come up without
 them:
 
-1. **An `[auth]` section**, with a reachable issuer. `vs-api` fails at startup otherwise —
+1. **An `[auth]` section**, with a reachable issuer. The `api` role fails at startup
+   otherwise —
    there is no unauthenticated mode. Your realm needs an audience mapper, an organization
    claim and the admin role; see [`keycloak/README.md`](keycloak/README.md).
-2. **Migrations applied, and the `vs_app` role existing.** `vs-api migrate` runs as the
+2. **Migrations applied, and the `vs_app` role existing.** `vs-suite migrate` runs as the
    schema owner; the API and the workers connect as the runtime role `vs_app`
    (insert-only on the vault, granted by migration 0003), which the migrations expect to
    exist already. Both the API and the workers *check* the schema version at startup and
@@ -58,12 +87,14 @@ them:
 ## Operating it
 
 - **Health**: `GET /healthz` (process up) and `GET /readyz` (Postgres and the blob store
-  reachable) are the only unauthenticated routes, for load balancers.
-- **Metrics**: `GET /metrics` on `vs-api` needs the admin role — scrape it as a service
-  account. A worker serves its own on `telemetry.metrics_addr`, which has no
-  authentication, so bind it to an internal interface and never `0.0.0.0`.
-- **Scaling**: `vs-api` on request rate; the workers on JetStream lag per role and lane.
-  The roles are independent processes and scale separately.
+  reachable) are the only unauthenticated routes, for load balancers. A copy running no
+  `api` role serves neither: it has no HTTP server, so liveness is the process itself.
+- **Metrics**: `GET /metrics` needs the admin role — scrape it as a service account. A
+  copy without the `api` role has no HTTP server, and serves its metrics on
+  `telemetry.metrics_addr` instead; that port has no authentication, so bind it to an
+  internal interface and never `0.0.0.0`. Setting both gives you both.
+- **Scaling**: more copies of the service. Within a copy, the roles share one Postgres
+  pool and one NATS connection, so `postgres.max_connections` is a per-process budget.
 - **Tenancy**: the tenant is the organization claim of the caller's token. It is hashed
   into every document and entity key, prefixes every blob key, and partitions the Qdrant
   collections, so **changing what the claim contains re-keys the data** — pick it once.

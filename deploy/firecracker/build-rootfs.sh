@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Builds the read-only root filesystem of the vs-worker microVM (deploy/firecracker/SPEC.md).
+# Builds the read-only root filesystem of the worker microVM (deploy/firecracker/SPEC.md).
 #
-#   build-rootfs.sh --worker target/release/vs-worker \
+#   build-rootfs.sh --service target/release/vs-suite \
 #                   --pdfium /path/to/libpdfium.so \
 #                   --ca-bundle /etc/ssl/certs/ca-certificates.crt \
 #                   --config config/worker.toml \
@@ -10,8 +10,10 @@
 #                   [--nix-closure] [--size 512M] [--out rootfs.ext4]
 #
 # The image holds: /sbin/init (deploy/firecracker/init.sh), busybox and the applets init
-# uses, /usr/bin/vs-worker with its shared-library closure (glibc build; a static musl
+# uses, /usr/bin/vs-suite with its shared-library closure (glibc build; a static musl
 # binary cannot dlopen libpdfium.so), libpdfium.so, the CA bundle and the baked config.
+# The suite is one binary, and in this image it is started with a subset of roles: a
+# microVM takes no inbound connections, so it runs queue consumers and never the API.
 # The library closure comes from `ldd` by default, or from the Nix store
 # (`nix path-info -r`) with --nix-closure when the binary is a Nix build.
 #
@@ -37,7 +39,7 @@ INIT_SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/init.sh"
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        --worker) WORKER=$2; shift 2 ;;
+        --service | --worker) WORKER=$2; shift 2 ;; # --worker: the old name
         --pdfium) PDFIUM=$2; shift 2 ;;
         --ca-bundle) CA_BUNDLE=$2; shift 2 ;;
         --config) CONFIG=$2; shift 2 ;;
@@ -51,7 +53,7 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-for var in WORKER PDFIUM CA_BUNDLE CONFIG; do
+for var in WORKER PDFIUM CA_BUNDLE CONFIG; do  # WORKER is --service
     if [ -z "${!var}" ]; then
         echo "missing --$(echo "$var" | tr '[:upper:]_' '[:lower:]-')" >&2
         usage
@@ -75,7 +77,7 @@ mkdir -p "$ROOT"/{bin,sbin,usr/bin,usr/lib,lib,lib64,etc/vs,etc/ssl/certs,proc,s
 chmod 1777 "$ROOT/tmp"
 
 # ── Worker, pdfium, config, certificates ─────────────────────────────────────
-install -m 0755 "$WORKER" "$ROOT/usr/bin/vs-worker"
+install -m 0755 "$WORKER" "$ROOT/usr/bin/vs-suite"
 install -m 0755 "$PDFIUM" "$ROOT/usr/lib/libpdfium.so"
 install -m 0644 "$CONFIG" "$ROOT/etc/vs/worker.toml"
 if [ -n "$MODELS" ]; then
@@ -167,7 +169,7 @@ cat > "$ROOT/etc/group" <<'GROUP'
 root:x:0:
 nogroup:x:65534:
 GROUP
-echo "vs-worker" > "$ROOT/etc/hostname"
+echo "vs-suite" > "$ROOT/etc/hostname"
 printf '127.0.0.1 localhost\n' > "$ROOT/etc/hosts"
 # DNS: replaced by vs.dns= on the kernel command line, if given.
 printf 'nameserver 10.0.0.1\n' > "$ROOT/etc/resolv.conf"

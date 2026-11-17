@@ -25,7 +25,7 @@
 //!   `Task` values crossing it are the real ones, serialised and deserialised as
 //!   JetStream would; the transport itself is covered by `vs-infra/tests/nats.rs`.
 //!
-//! `cargo test -p vs-worker -- --ignored`, with `devenv up` or the `vs-test-*` containers.
+//! `cargo test -p vs-suite -- --ignored`, with `devenv up` or the `vs-test-*` containers.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -325,7 +325,7 @@ fn spec(source_uri: String) -> JobSpec {
 #[sqlx::test(migrator = "vs_vault::MIGRATOR")]
 #[ignore = "needs Postgres, Qdrant and an S3 blob store"]
 async fn a_document_goes_from_upload_to_both_stores(pool: PgPool) {
-    // `RUST_LOG=vs_extract=debug cargo test -p vs-worker --test pipeline -- --ignored
+    // `RUST_LOG=vs_extract=debug cargo test -p vs-suite --test pipeline -- --ignored
     // --nocapture` is how you find out which stage dropped something, which is the
     // question this test raises when it fails.
     let _ = tracing_subscriber::fmt().with_env_filter(tracing_subscriber::EnvFilter::from_default_env()).try_init();
@@ -447,12 +447,12 @@ async fn a_document_goes_from_upload_to_both_stores(pool: PgPool) {
 
 async fn handler(cfg: &Config, role: Role, bus: Arc<QueueBus>, pool: PgPool) -> Arc<dyn Handler> {
     let render_command = vs_ingest::ChildCommand {
-        // The built worker binary, because a test's own `current_exe` is the test binary
+        // The built service binary, because a test's own `current_exe` is the test binary
         // and does not speak the render-child protocol. Cargo sets this variable for an
         // integration test and guarantees the binary exists, which is stronger than
         // deriving the path from `current_exe`. A TIFF decodes in-process and never
         // spawns a child, so this only matters once the fixture becomes a PDF.
-        program: env!("CARGO_BIN_EXE_vs-worker").into(),
+        program: env!("CARGO_BIN_EXE_vs-suite").into(),
         args: vec!["render-child".into()],
         env: vec![],
     };

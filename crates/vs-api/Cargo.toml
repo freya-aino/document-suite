@@ -1,15 +1,11 @@
 [package]
 name = "vs-api"
-description = "Public HTTP API"
+description = "HTTP API routes; served by vs-suite"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
-
-[[bin]]
-name = "vs-api"
-path = "src/main.rs"
 
 [dependencies]
 vs-core.workspace = true
@@ -23,7 +19,6 @@ anyhow.workspace = true
 axum.workspace = true
 bytes.workspace = true
 chrono.workspace = true
-clap.workspace = true
 futures.workspace = true
 hex.workspace = true
 jsonwebtoken.workspace = true

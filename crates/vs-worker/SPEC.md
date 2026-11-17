@@ -1,19 +1,25 @@
 # vs-worker — Specification
 
-One binary, three roles (decision D2). Runs inside Firecracker microVMs, CPU only; all
-model work goes over HTTP to the GPU tier. One microVM runs one worker process with one
-role (set via `--role` / `VS_ROLE`, passed by the fleet manager through the kernel
-command line or MMDS). System spec: [`docs/SPEC.md`](../../docs/SPEC.md) §5.2 and §5.4.
+Three roles (decision D2), as a **library**. The suite deploys as one service
+([`vs-suite`](../vs-suite/README.md)), which runs all three in one process alongside the
+HTTP API; `--roles` narrows a copy to a subset. CPU only — all model work goes over HTTP
+to the GPU tier.
+
+In the Firecracker CPU tier one microVM runs one role, because a microVM takes no inbound
+connections and therefore never the `api` role: the roles come from `vs.roles=` on the
+kernel command line (or `VS_ROLES`), passed by the fleet manager. System spec:
+[`docs/SPEC.md`](../../docs/SPEC.md) §5.2 and §5.4.
 
 ## Status
 
 Implemented: all three roles, the common pull loop over both lanes with heartbeats, retry
 with backoff, dead-lettering, the max-deliveries give-up path, graceful drain on SIGTERM,
 and the cached DAG-list provider. The roles live in `lib.rs` behind `build_handler`, so a
-test builds the same handler a deployment runs; `main.rs` is the CLI and the signals.
+test builds the same handler a deployment runs; the CLI and the signals are
+[`vs-suite`](../vs-suite/README.md)'s.
 
 16 unit tests pass, with Stage 2 covered over fakes for the extractor, resolver and
-embedder, plus `tests/pipeline.rs`: one document through **all three roles** into a live
+embedder, plus `vs-suite`'s `tests/pipeline.rs`: one document through **all three roles** into a live
 Postgres and Qdrant, asserting exact row and point counts. That test substitutes only the
 model tier (a fake OpenAI-compatible server on a real socket, answering from the prompt it
 was sent so grounding and verification actually run) and the bus (an in-process queue, so

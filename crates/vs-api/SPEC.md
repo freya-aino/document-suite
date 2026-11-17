@@ -2,8 +2,13 @@
 
 The suite's ingress. Your existing front-end service-api calls it. **Stateless**: all state
 is in Postgres (`ops`), the object store and the task bus, so it scales horizontally on
-request rate, independently of the workers. System spec:
-[`docs/SPEC.md`](../../docs/SPEC.md) §5.6 (security) and §5.3 (lanes).
+request rate.
+
+These routes are a **library**, not a binary: the suite deploys as one service
+([`vs-suite`](../vs-suite/README.md)), which serves them in the same process as the three
+worker roles. A deployment that wants request handling scaled on its own runs a copy with
+`--roles api`. System spec: [`docs/SPEC.md`](../../docs/SPEC.md) §5.6 (security), §5.3
+(lanes) and §3 (decision D12).
 
 ## Status
 
@@ -18,9 +23,9 @@ real router over the real `ops` schema with real signed tokens, an in-memory blo
 and a fake bus whose backlog the test sets, and one that asks a running Keycloak for a
 token and verifies it.
 
-The header placeholder is gone. There is no configuration in which this binary serves a
-request without verifying a token: `[auth]` is required, the process refuses to start
-without it, and the verification is one middleware over every route but `/healthz` and
+The header placeholder is gone. There is no configuration in which these routes answer a
+request without verifying a token: `[auth]` is required, a process serving the `api` role
+refuses to start without it, and the verification is one middleware over every route but `/healthz` and
 `/readyz` rather than a per-handler check.
 
 Remaining:

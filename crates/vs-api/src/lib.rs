@@ -1,11 +1,15 @@
-//! Public HTTP API. See `SPEC.md`.
+//! The public HTTP API, as a library. See `SPEC.md`.
+//!
+//! The routes and their wiring live here rather than in a binary because the suite ships
+//! as **one** service: `vs-suite` serves these routes and runs the worker roles in the
+//! same process, so neither half can be the thing that owns `main`. What a deployment
+//! must provide is in `deploy/README.md`.
 
 // Handlers return `Response` in the error position for headers like `Retry-After`.
 #![allow(clippy::result_large_err)]
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -19,24 +23,21 @@ use axum::{
     Json, Router,
 };
 use bytes::Bytes;
-use clap::Parser;
 use futures::stream::{BoxStream, StreamExt, TryStreamExt};
 use metrics_exporter_prometheus::PrometheusHandle;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use tokio::io::AsyncWriteExt;
 
 use vs_core::{HashKey, JobSpec, JobState, LanguageTag, Owner, Priority, Profile, RunId, Task, TenantId};
 use vs_dag::StepRegistry;
 use vs_infra::blob::{key_from_uri, keys, BlobError, BlobStore};
 use vs_infra::config::ApiConfig;
-use vs_infra::queue::{Lane, NatsBus, Role, TaskBus};
-use vs_infra::ObjectBlobStore;
+use vs_infra::queue::{Lane, Role, TaskBus};
 use vs_vault::ops::{NewJob, Ops};
 
-mod auth;
+pub mod auth;
 use auth::{Admin, Auth, Caller, Tenant};
 
 /// Documents per `POST /v1/batches`.
@@ -46,39 +47,21 @@ const BATCH_CONCURRENCY: usize = 32;
 /// Seconds clients should wait after a 429.
 const RETRY_AFTER_S: &str = "30";
 
-#[derive(Parser)]
-struct Args {
-    #[arg(long, env = "VS_CONFIG", default_value = "config/worker.toml")]
-    config: std::path::PathBuf,
-    #[arg(long, env = "VS_API_ADDR", default_value = "0.0.0.0:8080")]
-    addr: String,
-    #[command(subcommand)]
-    cmd: Option<Cmd>,
-}
-
-#[derive(clap::Subcommand)]
-enum Cmd {
-    /// Apply database migrations (deploy step; needs the schema owner's credentials,
-    /// not the runtime role's).
-    Migrate {
-        #[arg(long, env = "DATABASE_URL")]
-        database_url: String,
-    },
-}
-
+/// Everything the routes need. Built by `vs-suite`, which owns the connections the
+/// worker roles share with them.
 #[derive(Clone)]
-struct AppState {
-    ops: Arc<Ops>,
+pub struct AppState {
+    pub ops: Arc<Ops>,
     /// Token verification. Every route but `/healthz` and `/readyz` goes through it.
-    auth: Arc<Auth>,
-    bus: Arc<dyn TaskBus>,
-    blob: Arc<dyn BlobStore>,
-    bucket: String,
-    api: ApiConfig,
+    pub auth: Arc<Auth>,
+    pub bus: Arc<dyn TaskBus>,
+    pub blob: Arc<dyn BlobStore>,
+    pub bucket: String,
+    pub api: ApiConfig,
     /// Production step registry for DAG-list validation; `None` if the model registry
     /// could not be loaded at startup (DAG-list uploads then get 503).
-    steps: Option<Arc<StepRegistry>>,
-    metrics: PrometheusHandle,
+    pub steps: Option<Arc<StepRegistry>>,
+    pub metrics: PrometheusHandle,
 }
 
 #[derive(Debug, Deserialize)]
@@ -117,60 +100,11 @@ fn internal(e: impl std::fmt::Display) -> ApiError {
     (StatusCode::INTERNAL_SERVER_ERROR, "internal error".into())
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    let args = Args::parse();
-    if let Some(Cmd::Migrate { database_url }) = &args.cmd {
-        let pool = PgPoolOptions::new().max_connections(1).connect(database_url).await?;
-        vs_vault::MIGRATOR.run(&pool).await?;
-        vs_vault::check_migrations(&pool).await?;
-        println!("migrations applied");
-        return Ok(());
-    }
-    let cfg = vs_infra::Config::load(&args.config)?;
-    // Required, and read before anything else is built: there is no configuration in
-    // which this binary serves requests without verifying tokens.
-    let auth_cfg = cfg.auth.clone().ok_or_else(|| {
-        anyhow::anyhow!("vs-api needs an [auth] section in {}: issuer and audience of the Keycloak realm", args.config.display())
-    })?;
-    // One recorder per process, installed by `telemetry::init`; this binary renders it
-    // on its own `/metrics` route rather than having the exporter bind a second port.
-    let telemetry = vs_infra::telemetry::init(&cfg.telemetry, "vs-api")?;
-    let metrics = telemetry.metrics.clone();
-
-    let mut pg = PgConnectOptions::from_str(&cfg.postgres.url)?;
-    if let Some(pw) = &cfg.postgres.password {
-        pg = pg.password(pw);
-    }
-    let pool = PgPoolOptions::new().max_connections(cfg.postgres.max_connections).connect_with(pg).await?;
-    vs_vault::check_migrations(&pool).await?;
-    let auth = Auth::discover(auth_cfg).await?;
-    auth.spawn_refresher();
-    let nats = NatsBus::connect(&cfg.bus.nats_url).await?;
-    nats.ensure_topology().await?;
-
-    let steps = match vs_models::ModelRegistry::load(&cfg.models.registry) {
-        Ok(reg) => Some(Arc::new(vs_steps::production_registry(Arc::new(vs_models::OpenAiClient::new(reg))))),
-        Err(e) => {
-            tracing::error!(path = %cfg.models.registry.display(), error = %e, "model registry not loaded; DAG-list uploads disabled");
-            None
-        }
-    };
-
-    let state = AppState {
-        ops: Arc::new(Ops { pool }),
-        auth,
-        bus: Arc::new(nats),
-        blob: Arc::new(ObjectBlobStore::s3(&cfg.blob)?),
-        bucket: cfg.blob.bucket.clone(),
-        api: cfg.api.clone(),
-        steps,
-        metrics,
-    };
-    let app = router(state.clone());
-
-    // Expired idempotency keys.
-    let ops = state.ops.clone();
+/// Deletes expired idempotency keys, hourly.
+///
+/// Part of serving these routes rather than of the binary that serves them: the keys are
+/// this crate's table, and a deployment that forgot to start this would grow it forever.
+pub fn spawn_idempotency_purge(ops: Arc<Ops>) {
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(std::time::Duration::from_secs(3600));
         loop {
@@ -180,15 +114,10 @@ async fn main() -> anyhow::Result<()> {
             }
         }
     });
-
-    let listener = tokio::net::TcpListener::bind(&args.addr).await?;
-    tracing::info!(addr = %args.addr, "vs-api listening");
-    axum::serve(listener, app).await?;
-    telemetry.shutdown();
-    Ok(())
 }
 
-fn router(state: AppState) -> Router {
+/// Every route, with authentication over all but the health probes.
+pub fn router(state: AppState) -> Router {
     // Body limit for uploads: the handler enforces `max_upload_bytes` on the file part
     // itself; the slack covers the other multipart parts.
     let upload_limit = usize::try_from(state.api.max_upload_bytes.saturating_add(1024 * 1024)).unwrap_or(usize::MAX);

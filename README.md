@@ -4,6 +4,11 @@ Rust workspace for high-throughput visual document processing: per-page, content
 VLM workflows (Stage 1), document-level entity/relation graph extraction (Stage 2), and
 traceable storage in a Postgres Data Vault 2.0 warehouse with vectors in Qdrant.
 
+It deploys as **one service** — `vs-suite`, which serves the HTTP API and runs all three
+worker roles in one process. Postgres, NATS, an S3-compatible store, Qdrant, Keycloak and
+the model endpoints belong to the environment around it;
+[`deploy/README.md`](deploy/README.md) is what another deployment needs to know.
+
 **Start with [`docs/SPEC.md`](docs/SPEC.md).**
 
 Every component documents itself next to its code. A component whose design is fully
@@ -31,7 +36,8 @@ crates/
   vs-extract/       mentions, assertions, entity resolution                 SPEC
   vs-vault/         Data Vault writer + migrations, incl. the graph layer   SPEC
   vs-vectors/       vector store trait + Qdrant (dense and sparse)          SPEC
-  vs-worker/  [bin] worker roles: ingest | page | doc                       SPEC
+  vs-worker/        worker roles: ingest | page | doc                        SPEC
+  vs-suite/   [bin] the service: the API and all three roles in one process  README
   vs-adapt/   [bin] workflow generation, scoring, selection (dev/stage)     SPEC
 deploy/             embedding the suite in another deployment               README
   keycloak/         the development realm vs-api verifies against            README
@@ -43,7 +49,7 @@ config/             example models, worker, DAG list, search space, LiteLLM
 
 ## Status
 
-All 17 crates compile together and the workspace is green: **363 tests pass, none
+All 18 crates compile together and the workspace is green: **366 tests pass, none
 ignored** — the 33 integration tests run against a live Postgres, Qdrant, NATS, Garage and
 Keycloak, one of them takes a document through the whole pipeline into both stores, and
 one asks the development realm for a token and verifies it.
@@ -54,7 +60,7 @@ Five components are done and carry a README; the rest carry a `SPEC.md` whose `#
 section lists what is left. The cross-cutting gaps:
 
 - **The models have never been real.** A document now goes upload → ingest → Stage 1 →
-  Stage 2 → Postgres + Qdrant in one test (`crates/vs-worker/tests/pipeline.rs`), against
+  Stage 2 → Postgres + Qdrant in one test (`crates/vs-suite/tests/pipeline.rs`), against
   real services and with the real handlers, so the handover between stages is covered.
   What stands in for the model tier is a fake server on a real socket, answering
   adaptively so grounding and verification are exercised rather than skipped. No VLM has
@@ -155,12 +161,12 @@ tier at all the `ingest` role still runs on its own.
 
 ```sh
 devenv --profile stack up -d && devenv --profile stack shell
-cargo build -p vs-api -p vs-worker
+cargo build -p vs-suite
 cargo run -p vs-ingest --example sample_pdf -- sample.pdf
-VS_API_ADDR=127.0.0.1:8080 ./target/debug/vs-api &
-VS_ROLE=ingest ./target/debug/vs-worker &
-VS_ROLE=page   ./target/debug/vs-worker &   # needs model endpoints in config/models.*.toml
-VS_ROLE=doc    ./target/debug/vs-worker &   # needs model endpoints + the graph/vector store
+# One service: the API and all three roles in one process. `page` and `doc` need model
+# endpoints from config/models.*.toml, so with no model tier at all, start the two roles
+# that do not call one: --roles api,ingest
+VS_API_ADDR=127.0.0.1:8080 ./target/debug/vs-suite &
 curl -X PUT --upload-file sample.pdf --aws-sigv4 "aws:amz:$AWS_REGION:s3" \
   --user "$AWS_ACCESS_KEY_ID:$AWS_SECRET_ACCESS_KEY" "$AWS_ENDPOINT/visual-suite/inbox/t1/sample.pdf"
 # Every request carries a Keycloak access token; the tenant is its organization claim.
@@ -182,7 +188,7 @@ isolation with. What each request is verified against is in
 
 ### Tests
 
-`cargo test --workspace` runs the 330 tests that need nothing (PDF tests need
+`cargo test --workspace` runs the 333 tests that need nothing (PDF tests need
 `PDFIUM_DYNAMIC_LIB_PATH`, set by devenv). The other 33 touch a real service and are
 `#[ignore]`d; with the stack profile running:
 
@@ -232,5 +238,5 @@ The worker for Firecracker is a normal glibc build, shipped in the rootfs with i
 shared libraries (pdfium cannot be loaded from a static musl binary):
 
 ```sh
-cargo build --release -p vs-worker
+cargo build --release -p vs-suite
 ```

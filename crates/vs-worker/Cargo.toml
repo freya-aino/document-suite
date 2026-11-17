@@ -1,15 +1,11 @@
 [package]
 name = "vs-worker"
-description = "Worker process (Firecracker microVMs): roles ingest | page | doc"
+description = "Worker roles ingest | page | doc, run by vs-suite"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
-
-[[bin]]
-name = "vs-worker"
-path = "src/main.rs"
 
 [dependencies]
 vs-core.workspace = true
@@ -28,7 +24,6 @@ vs-vectors.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 bytes.workspace = true
-clap.workspace = true
 futures.workspace = true
 hex.workspace = true
 image.workspace = true
@@ -43,10 +38,8 @@ tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
-axum.workspace = true
+# The unit tests in `src/`: a fixed timestamp, and an in-memory blob store. The
+# end-to-end pipeline test moved to `vs-suite`, which is where the binary it
+# re-executes for rendering now lives.
 chrono.workspace = true
-futures.workspace = true
 object_store.workspace = true
-reqwest.workspace = true
-tiff.workspace = true
-tracing-subscriber.workspace = true

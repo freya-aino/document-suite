@@ -118,7 +118,7 @@ misrouting.
 ### Render children (`child`, `pool`)
 
 **pdfium never runs in the worker process.** The ingest role renders through a
-`RenderPool` of child processes (`vs-worker render-child`; `vs-render-child` for
+`RenderPool` of child processes (`vs-suite render-child`; `vs-render-child` for
 tests), one pdfium binding each:
 
 - Stateless protocol: a JSON request line names the file, format and page; the reply is

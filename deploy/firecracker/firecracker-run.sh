@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Starts one vs-worker microVM from vm-config.example.json with a TAP device.
+# Starts one worker microVM from vm-config.example.json with a TAP device.
 #
 #   firecracker-run.sh [--role page] [--id 1] [--kernel vmlinux] [--rootfs rootfs.ext4]
 #                      [--scratch scratch.ext4] [--vcpus 1] [--mem 1024]
@@ -71,7 +71,7 @@ fi
 # ── VM config from the example ────────────────────────────────────────────────
 # The boot args carry the role and the guest address for init.sh; the drives, TAP and
 # sizes are substituted into a copy of the example config.
-BOOT_ARGS="console=ttyS0 reboot=k panic=1 pci=off ro vs.role=$ROLE vs.ip=$GUEST_IP/30 vs.gw=$HOST_IP vs.dns=$HOST_IP"
+BOOT_ARGS="console=ttyS0 reboot=k panic=1 pci=off ro vs.roles=$ROLE vs.ip=$GUEST_IP/30 vs.gw=$HOST_IP vs.dns=$HOST_IP"
 VM_JSON=$RUN_DIR/vm-config.json
 jq --arg kernel "$(readlink -f "$KERNEL")" \
    --arg rootfs "$(readlink -f "$ROOTFS")" \

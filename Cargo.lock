@@ -4119,7 +4119,6 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "chrono",
- "clap",
  "futures",
  "hex",
  "jsonwebtoken",
@@ -4326,6 +4325,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "vs-suite"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "chrono",
+ "clap",
+ "futures",
+ "metrics-exporter-prometheus",
+ "object_store",
+ "reqwest 0.12.28",
+ "serde_json",
+ "sqlx",
+ "tiff",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+ "vs-api",
+ "vs-core",
+ "vs-infra",
+ "vs-ingest",
+ "vs-models",
+ "vs-steps",
+ "vs-vault",
+ "vs-worker",
+]
+
+[[package]]
 name = "vs-vault"
 version = "0.1.0"
 dependencies = [
@@ -4368,25 +4397,20 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "axum",
  "bytes",
  "chrono",
- "clap",
  "futures",
  "hex",
  "image",
  "metrics",
  "object_store",
- "reqwest 0.12.28",
  "serde",
  "serde_json",
  "sha2",
  "sqlx",
- "tiff",
  "tokio",
  "toml",
  "tracing",
- "tracing-subscriber",
  "uuid",
  "vs-classify",
  "vs-core",

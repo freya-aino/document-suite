@@ -1,7 +1,7 @@
 # vs-steps
 
 The production step catalogue: one place that names every step a `page` worker can run.
-`vs-worker` executes from it, `vs-api` validates uploaded DAG lists against it, and
+The worker roles execute from it, the API validates uploaded DAG lists against it, and
 `vs-adapt` generates candidates from it — so all three agree on what exists. System spec:
 [`docs/SPEC.md`](../../docs/SPEC.md). Step contract:
 [`vs-dag/README.md`](../vs-dag/README.md) "Step contract".
@@ -24,7 +24,7 @@ the example search space generates candidates it accepts.
 ## The one rule
 
 **Add new steps here, nowhere else.** A step that is implemented but not registered is
-invisible to DAG-list validation, so a DAG naming it passes `vs-api` upload validation in
+invisible to DAG-list validation, so a DAG naming it passes upload validation in
 one deployment and fails in another. A step registered here but not implemented is worse:
 validation accepts DAG lists that fail at execution time, per page, after the model spend.
 

@@ -53,27 +53,30 @@ produced it, and the exact model and prompt version used.
 ## 3. Architecture
 
 ```
-            ┌──────────────┐        ┌──────────────────────────────────────────┐
- clients ──▶│  vs-api      │──jobs─▶│  Task bus (NATS JetStream)                │
- (your     │  (stateless, │        │  lanes: interactive | batch               │
- service-  │   scales     │        └───┬─────────────┬──────────────┬─────────┘
- api)      │   alone)     │            │ingest       │page          │doc
-            └──────┬───────┘            ▼             ▼              ▼
-                   │            ┌────────────────────────────────────────────┐
-                   │            │ vs-worker  (Firecracker microVMs, CPU only) │
-                   │            │  role=ingest : detect, rasterize, text layer│
-                   │            │  role=page   : classify → route → run DAG   │
-                   │            │  role=doc    : stitch → extract → graph     │
-                   │            └───────┬──────────────┬──────────────┬───────┘
-                   │                    │ HTTP (OpenAI-compatible)    │
-                   │                    ▼                             │
-                   │            ┌──────────────────────┐              │
-                   │            │ GPU model tier (vLLM)│              │
-                   │            │ doc-parse VLMs,      │              │
-                   │            │ general VLM, LLM,    │              │
-                   │            │ embedders, classifier│              │
-                   │            └──────────────────────┘              │
-                   ▼                                                  ▼
+            ┌───────────────────────────────────────────────────────────────┐
+            │  vs-suite  — one binary, one process, one deployable service  │
+            │                                                               │
+ clients ──▶│  api    : upload, status, DAG-list admin  ──jobs──┐           │
+ (your      │                                                   │           │
+ service-   │  ingest : detect, rasterize, text layer   ◀──┐    │           │
+ api)       │  page   : classify → route → run DAG      ◀──┤    │           │
+            │  doc    : stitch → extract → graph        ◀──┤    │           │
+            └───────────────────┬──────────────────────────┼────┼───────────┘
+                                │                          │    ▼
+                                │              ┌───────────┴─────────────────┐
+                                │              │ Task bus (NATS JetStream)   │
+                                │              │ lanes: interactive | batch  │
+                                │              │ subjects: ingest|page|doc   │
+                                │              └─────────────────────────────┘
+                                │ HTTP (OpenAI-compatible)
+                                ▼
+                       ┌──────────────────────┐        ┌──────────────────┐
+                       │ GPU model tier (vLLM)│        │ Keycloak (OIDC)  │
+                       │ doc-parse VLMs,      │        │ the realm every  │
+                       │ general VLM, LLM,    │        │ request is       │
+                       │ embedders, classifier│        │ verified against │
+                       └──────────────────────┘        └──────────────────┘
+
        ┌──────────────────────┐   ┌───────────────┐   ┌──────────────────────┐
        │ Postgres             │   │ Object store  │   │ Qdrant               │
        │  ops schema (jobs)   │   │ (S3-compat.)  │   │ dense + sparse       │
@@ -83,6 +86,14 @@ produced it, and the exact model and prompt version used.
        └──────────┬───────────┘   └───────────────┘              │
                   └──────────── RAG service reads ───────────────┘
 ```
+
+**One service** (decision D12): the four roles are concurrency, not packaging. A
+deployment adds one service and scales it by running more copies; `--roles` narrows a
+copy to part of the work when the halves should scale separately (goal G8), which is then
+a choice that deployment makes rather than one the suite makes for it. The roles still
+hand work to each other over the bus, so two copies of the whole service share the queue
+exactly as a split deployment would. In the Firecracker CPU tier a microVM runs worker
+roles only, because it takes no inbound connections.
 
 **Key decision D1:** Firecracker has no GPU passthrough, so microVMs run CPU work only
 (I/O, rendering, classification rules, orchestration, parsing model output, writes).
@@ -123,7 +134,7 @@ DAG list. The five commands and their inputs and outputs are specified once, in
 |---|---|---|---|
 | `vs-core` | lib | Shared types: IDs, hash keys, geometry, blocks, page profile, provenance, jobs | [README](../crates/vs-core/README.md) |
 | `vs-infra` | lib | Task bus, blob store, config, telemetry | [SPEC](../crates/vs-infra/SPEC.md) |
-| `vs-api` | bin | Public HTTP API: uploads, batches, status, DAG-list admin | [SPEC](../crates/vs-api/SPEC.md) |
+| `vs-api` | lib | Public HTTP API: uploads, batches, status, DAG-list admin | [SPEC](../crates/vs-api/SPEC.md) |
 | `vs-ingest` | lib | Format detection, rasterization, native text layer, CPU steps | [SPEC](../crates/vs-ingest/SPEC.md) |
 | `vs-classify` | lib | Page classification → `PageProfile` | [SPEC](../crates/vs-classify/SPEC.md) |
 | `vs-dag` | lib | DAG model, step trait, validation, executor | [README](../crates/vs-dag/README.md) |
@@ -135,7 +146,8 @@ DAG list. The five commands and their inputs and outputs are specified once, in
 | `vs-graph` | lib | Document graph model and builder | [README](../crates/vs-graph/README.md) |
 | `vs-vault` | lib | Data Vault 2.0 writer + migrations; graph projection and corpus entity resolution | [SPEC](../crates/vs-vault/SPEC.md) |
 | `vs-vectors` | lib | Vector store trait + Qdrant implementation (dense and sparse) | [SPEC](../crates/vs-vectors/SPEC.md) |
-| `vs-worker` | bin | Worker process with roles `ingest`, `page`, `doc` | [SPEC](../crates/vs-worker/SPEC.md) |
+| `vs-worker` | lib | The worker roles `ingest`, `page`, `doc` | [SPEC](../crates/vs-worker/SPEC.md) |
+| `vs-suite` | **bin** | **The service**: the API and all three roles in one process | [README](../crates/vs-suite/README.md) |
 | `vs-adapt` | bin | Workflow generation, scoring, selection | [SPEC](../crates/vs-adapt/SPEC.md) |
 | `deploy/` | ops | Embedding the suite in another deployment: binaries, the configuration surface, what must exist first | [README](../deploy/README.md) |
 | `deploy/keycloak` | ops | The development realm `vs-api` verifies against | [README](../deploy/keycloak/README.md) |
@@ -145,7 +157,9 @@ DAG list. The five commands and their inputs and outputs are specified once, in
 
 Dependency direction (no cycles):
 `vs-core` ← `vs-infra`, `vs-dag` ← `vs-router`, `vs-classify`, `vs-ingest`, `vs-models`
-← `vs-stitch` ← `vs-extract` ← `vs-graph` ← `vs-vectors` ← `vs-vault` ← `vs-worker`, `vs-api`, `vs-adapt`.
+← `vs-stitch` ← `vs-extract` ← `vs-graph` ← `vs-vectors` ← `vs-vault` ← `vs-worker`,
+`vs-api`, `vs-adapt` ← `vs-suite`, which depends on both `vs-api` and `vs-worker` and is
+the only binary that is a *service* (`vs-adapt` is an offline CLI).
 
 `vs-graph` owns the `DocGraph` both stores are written from, so it sits below every store
 crate and depends on none of them.
@@ -171,9 +185,11 @@ in its own `SPEC.md`.
 ### 5.2 Scaling and throughput
 
 Page tasks are the unit of parallelism, and **skipping work is the main lever** — the
-routing table encodes which pages may skip which steps. Who scales on what:
-[`vs-api`](../crates/vs-api/SPEC.md) on request rate;
-[`vs-worker`](../crates/vs-worker/SPEC.md) and
+routing table encodes which pages may skip which steps. The suite is one service
+(D12), so the default is to scale copies of it; what each part scales on, for a
+deployment that splits them with `--roles`:
+the [`api`](../crates/vs-api/SPEC.md) role on request rate;
+the [worker roles](../crates/vs-worker/SPEC.md) and
 [`deploy/firecracker`](../deploy/firecracker/SPEC.md) on JetStream lag per role and lane;
 [`deploy/gpu`](../deploy/gpu/SPEC.md) on queue depth and batch fill per model pool;
 [`vs-router`](../crates/vs-router/README.md) decides what is skipped.
@@ -199,9 +215,10 @@ Delivery is at-least-once, so **every write must be idempotent** — through has
 Standard span fields on every trace: `job_id`, `run_id`, `document_hk`, `page_no`,
 `node_id` — `document_hk` is the one not yet set anywhere. Exporters and the Prometheus
 endpoint: [`vs-infra`](../crates/vs-infra/SPEC.md). Each component's metric names are in
-its own spec, and both halves carry one name for the binary — a `service` label on every
+its own spec, and both halves carry one name for the process — a `service` label on every
 series, the same string as the traces' `service.name` — so a counter and a trace from the
-same process are joinable (`vs-api`, `vs-worker-page`, …).
+same process are joinable: `vs-suite` for a copy running the whole service, and
+`vs-suite-<roles>` (`vs-suite-page`, `vs-suite-api-ingest`) for one running part of it.
 
 ### 5.6 Security
 
@@ -222,7 +239,7 @@ encryption at rest: [`vs-infra`](../crates/vs-infra/SPEC.md).
 | ID | Decision | Reason |
 |----|----------|--------|
 | D1 | CPU work in Firecracker, models on a separate GPU tier over HTTP | Firecracker has no GPU passthrough |
-| D2 | One worker binary with roles | One rootfs image, simpler fleet |
+| D2 | One binary with roles | One rootfs image, simpler fleet |
 | D3 | Model access through an OpenAI-compatible API | Works with vLLM (and SGLang, LiteLLM, hosted APIs) without code changes |
 | D4 | Workflows are static DAGs, chosen per page from a versioned DAG list | Reproducible; optimisation happens offline in `vs-adapt` |
 | D5 | Data Vault is insert-only; reprocessing adds satellites with a new run | Natural DV2.0 history; old results stay traceable |
@@ -232,6 +249,7 @@ encryption at rest: [`vs-infra`](../crates/vs-infra/SPEC.md).
 | D9 | Vectors live in a dedicated vector store (Qdrant) behind a `VectorStore` trait, keyed by tenant and run | The vector store stays swappable; the graph stays in SQL next to its provenance |
 | D10 | Authentication is Keycloak (OIDC) access tokens verified in `vs-api`, against the realm's published keys | The SSO that already holds the identity model; verifying a signature locally keeps Keycloak off the path of every request, unlike introspection |
 | D11 | **The tenant is the organization**, from a verified claim | The isolation boundary has to be the thing that `TenantId` already is: key material in every hash key, blob prefix and vector partition. Organization also makes one corpus per company, so entity resolution and duplicate detection work across colleagues — which a per-person tenant would break, since the same file uploaded twice would be two documents with two keys. Person, department and workspace are therefore read scoping *within* a tenant, not key material |
+| D12 | **One service**: `vs-suite` serves the API and runs all three worker roles in one process | A deployment embedding the suite should add one service, not learn its internal shape. The roles already communicate over the bus, so one process or four changes nothing about the work; `--roles` keeps G8 available without making it the default. `vs-api` and `vs-worker` are libraries |
 
 **D6/D9 replaced the original HelixDB decisions.** HelixDB held the current graph
 projection and the vectors. It has been removed in favour of Postgres (graph) and Qdrant

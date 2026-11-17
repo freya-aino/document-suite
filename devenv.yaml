@@ -20,4 +20,4 @@ imports:
   - ./crates/vs-vault
   - ./crates/vs-ingest
   - ./crates/vs-vectors
-  - ./crates/vs-worker
+  - ./crates/vs-suite

@@ -114,8 +114,9 @@ inside the Tokio runtime. It installs the `tracing` subscriber (JSON logs on
 A second call returns an error rather than panicking or quietly shadowing the first,
 which is the only safe behaviour for something process-global.
 
-`service` becomes a **global label on every series** — `vs-api`, `vs-worker-ingest`,
-`vs-worker-page`, `vs-worker-doc` — so one Prometheus scraping the whole fleet can tell
+`service` becomes a **global label on every series** — `vs-suite` for a process running
+the whole service, `vs-suite-page` or `vs-suite-api-ingest` for one running part of it
+(`--roles`) — so one Prometheus scraping the whole fleet can tell
 whose counter it is reading. The worker's role is therefore part of the label, and `init`
 is called after the role is parsed.
 
@@ -123,10 +124,12 @@ Where the series are *served* is the asymmetry worth knowing:
 
 | Binary | `metrics_addr` | How `/metrics` is reached |
 |---|---|---|
-| `vs-worker` | set | the exporter binds it and answers `GET /metrics` itself — a worker has no HTTP server of its own |
-| `vs-api` | unset | the handle `init` returns is rendered on the API's own `/metrics` route |
+| without the `api` role | set | the exporter binds it and answers `GET /metrics` itself — there is no HTTP server in the process otherwise |
+| with the `api` role | unset | the handle `init` returns is rendered on the API's own `/metrics` route, which requires the admin role |
 
-Setting `metrics_addr` for `vs-api` would bind a second port serving the same registry;
+Setting `metrics_addr` *and* running the `api` role binds a second port serving the same
+registry — and that port has no authentication, while `/metrics` does, so bind it
+internally or leave it unset;
 nothing stops it, but there is no reason for it. Leaving it unset on a worker is not an
 error either — the recorder is still installed, so nothing is dropped, but nothing can
 scrape it. **Bind the microVM's internal interface, never `0.0.0.0`**: there is no auth
@@ -149,7 +152,7 @@ Two things a deployment has to get right, both of them things that fail silently
   both. `init` appends `/v1/traces` itself, so configure the bare origin.
 - **Call `Telemetry::shutdown` before exiting.** The batch processor holds spans for up
   to its flush interval, so without it a process loses the last batch — which is the one
-  covering whatever made it shut down. The worker calls it after the drain and `vs-api`
+  covering whatever made it shut down. `vs-suite` calls it after the drain and
   after `serve` returns.
 
 The SDK's batch processor owns a dedicated thread with no Tokio reactor on it, so the
@@ -159,7 +162,7 @@ healthy. `tests/traces.rs` runs a real socket and asserts a span arrives, becaus
 is the only kind of test that catches it.
 
 §5.5's standard fields are spread over the two spans that have them, not repeated on
-every span: `task` (`vs-worker`) carries `role`, `job_id`, `run_id`, `document_hk`,
+every span: `task` (a worker role) carries `role`, `job_id`, `run_id`, `document_hk`,
 `page_no` and `attempt`, with the last two empty for the roles that have no such value
 yet; `dag_node` (`vs-dag`) carries `node_id`, `step`, `dag`, `page_no` and `run_id`.
 `dag_node` nests inside `task`, so a page's trace is the shape of the DAG that ran it,

@@ -8,11 +8,11 @@
   packages = [ pkgs.sqlx-cli ];
 
   env = {
-    # Schema owner: `vs-migrate`, `vs-api migrate`, tests. Defaults to the `stack`
+    # Schema owner: `vs-migrate`, `vs-suite migrate`, tests. Defaults to the `stack`
     # profile's Postgres.
     DATABASE_URL = "postgres://vs:vs@127.0.0.1:5432/visual_suite";
-    # Runtime role password for API and workers (config/worker.dev.toml connects as
-    # vs_app; VS__SECTION__KEY keeps it out of the TOML).
+    # Runtime role password for the service (config/worker.dev.toml connects as vs_app;
+    # VS__SECTION__KEY keeps it out of the TOML).
     VS__POSTGRES__PASSWORD = "vs_app";
   };
 

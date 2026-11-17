@@ -1,7 +1,7 @@
 {
   "boot-source": {
     "kernel_image_path": "/var/lib/vs/vmlinux",
-    "boot_args": "console=ttyS0 reboot=k panic=1 pci=off ro vs.role=page vs.ip=172.16.1.2/30 vs.gw=172.16.1.1 vs.dns=172.16.1.1"
+    "boot_args": "console=ttyS0 reboot=k panic=1 pci=off ro vs.roles=page vs.ip=172.16.1.2/30 vs.gw=172.16.1.1 vs.dns=172.16.1.1"
   },
   "drives": [
     {

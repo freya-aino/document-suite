@@ -87,7 +87,7 @@ vllm serve <model> \
 ## Scaling
 
 - Scale each pool on queue depth (`num_requests_waiting`) and p95 latency.
-- `vs-worker` page autoscaling is capped by GPU pool latency (see
+- `page` role autoscaling is capped by GPU pool latency (see
   `deploy/firecracker/SPEC.md`), so CPU workers never flood the GPUs.
 - Batch lane traffic can use cheaper/preemptible GPU nodes; interactive lane gets a
   reserved replica set (route by a header to a separate endpoint list if needed).

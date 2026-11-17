@@ -114,7 +114,7 @@ Deliberate non-goals here:
 | schema owner (`vs` locally) | the migration deploy step, tests | owns `ops`, `registry`, `vault` |
 | `vs_app` | API and workers at runtime | `vault`: SELECT, INSERT only (no UPDATE/DELETE/TRUNCATE); `ops`, `registry`: SELECT, INSERT, UPDATE; no DDL |
 
-- Migrations are a **deploy step**: `vs-api migrate` (owner credentials in
+- Migrations are a **deploy step**: `vs-suite migrate` (owner credentials in
   `DATABASE_URL`) or `sqlx migrate run`. The API and workers never migrate; at startup
   they call `check_migrations`, which refuses to start unless every embedded migration
   is applied with a matching checksum.

@@ -22,7 +22,7 @@
   packages = [ pkgs.cargo-nextest ];
 
   env = {
-    # Read by vs-api and vs-worker (`--config`); its endpoints point at the stack profile.
+    # Read by vs-suite (`--config`); its endpoints point at the stack profile.
     VS_CONFIG = "${config.devenv.root}/config/worker.dev.toml";
     RUST_LOG = "info,vs_=debug";
   };

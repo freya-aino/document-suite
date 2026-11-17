@@ -16,6 +16,7 @@ members = [
     "crates/vs-vault",
     "crates/vs-vectors",
     "crates/vs-worker",
+    "crates/vs-suite",
     "crates/vs-adapt",
 ]
 
@@ -41,6 +42,8 @@ vs-extract = { path = "crates/vs-extract" }
 vs-graph = { path = "crates/vs-graph" }
 vs-vault = { path = "crates/vs-vault" }
 vs-vectors = { path = "crates/vs-vectors" }
+vs-api = { path = "crates/vs-api" }
+vs-worker = { path = "crates/vs-worker" }
 
 # external
 anyhow = "1"
