@@ -27,7 +27,12 @@ lists, entity and relation types), role separation between the migration owner a
 runtime role, `write_document`, `write_page`, `write_stage2`, `finish_run`, the
 `v_current_run` view, the graph layer (`graph.rs`, written inside `write_stage2`'s
 transaction) and corpus entity resolution (`PgCorpusResolver`).
-15 unit tests, plus 18 Postgres integration tests (`#[ignore]`d; they need a database).
+15 unit tests, plus 19 Postgres integration tests (`#[ignore]`d; they need a database).
+One of them is schema-wide rather than table-specific: it writes a whole document twice,
+20 ms apart, and asserts that **no** satellite in the `vault` schema gained a row, with
+the list of satellites read from the catalogue so it covers the one added next. Defect 2
+below was a `hash_diff` that covered the write timestamp, and that class of mistake is
+invisible until something is redelivered.
 All eight migrations apply, and every write path has been executed: `tests/graph.rs`
 covers the graph layer across all of 0005 to 0007 and `PgCorpusResolver` against real
 label rows. A document also reaches this schema through the whole pipeline, from
@@ -73,9 +78,6 @@ Remaining:
 - [ ] Applying the new migrations is a deploy-ordering constraint: `check_migrations`
       refuses to start a worker whose database is missing any embedded migration, so
       `vs-migrate` has to run before any binary built with 0005 to 0008.
-- [ ] Nothing checks that a satellite's `hash_diff` excludes write-time values. Defect 2
-      above was exactly that mistake, and the same trap exists in every satellite whose
-      descriptive set might later gain a timestamp.
 - [x] The read contract for the external RAG service is
       [`docs/STORES.md`](../../docs/STORES.md): the key formulas, all eight retrieval
       patterns as SQL against this schema, the Qdrant layout, and the three things that

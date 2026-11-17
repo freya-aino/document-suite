@@ -681,6 +681,78 @@ async fn the_sentence_an_entity_was_found_in_is_stored_and_versions_the_label(po
     assert_eq!(empty, "");
 }
 
+/// Rows per satellite in the `vault` schema, read from the catalogue rather than a list.
+///
+/// A list would have to be kept up to date, and the whole point of this check is to cover
+/// the satellite someone adds next.
+async fn satellite_rows(pool: &PgPool) -> Vec<(String, i64)> {
+    let names: Vec<String> = sqlx::query_scalar(
+        "SELECT table_name::text FROM information_schema.tables
+         WHERE table_schema = 'vault' AND table_name LIKE 'sat\\_%' AND table_type = 'BASE TABLE'
+         ORDER BY table_name",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap();
+    let mut out = Vec::with_capacity(names.len());
+    for name in names {
+        // `sat_run` is the one satellite whose payload is *meant* to change between these
+        // two passes: the run's state advances, which is what `latest_differs` exists to
+        // notice. Every other satellite is being written the same content twice.
+        if name == "sat_run" {
+            continue;
+        }
+        let n: i64 = sqlx::query_scalar(&format!("SELECT count(*) FROM vault.{name}")).fetch_one(pool).await.unwrap();
+        out.push((name, n));
+    }
+    out
+}
+
+#[sqlx::test(migrator = "vs_vault::MIGRATOR")]
+#[ignore = "needs Postgres from `devenv up`"]
+async fn no_satellites_hash_diff_depends_on_when_it_was_written(pool: PgPool) {
+    // The trap, and a defect this schema actually had: `sat_run`'s `hash_diff` once
+    // covered the write timestamp, so a redelivered task versioned the satellite every
+    // time it arrived. The individual tests above each assert a retry changes nothing for
+    // the tables they happen to count. This one asserts it for every satellite in the
+    // schema, including the ones that do not exist yet, by doing the whole write sequence
+    // twice with the clock moved on in between.
+    let v = PgVault { pool: pool.clone() };
+    let (r, m) = (run(), meta(1));
+    let (doc, ext) = stage2_fixture(&m, &r);
+    let graph = DocGraph::default();
+    // Built once and written twice. Rebuilding it per pass would be a different test and
+    // a failing one: `Provenance` carries `started_at` and `duration_ms`, and
+    // `sat_block_provenance` hashes the whole of it deliberately — a page genuinely
+    // re-executed took a different amount of time, and recording that is the satellite's
+    // job. What must not version a satellite is being *written* again, which is this.
+    let page = page_result(&m, &r);
+
+    let write_everything = || async {
+        v.write_document(&r, &spec(), &m).await.unwrap();
+        v.write_page(&page, Some("rule-1")).await.unwrap();
+        v.write_stage2(&r, &spec(), &doc, &ext, &graph, None).await.unwrap();
+        v.finish_run(&r, &spec(), JobState::Done).await.unwrap();
+    };
+
+    write_everything().await;
+    let before = satellite_rows(&pool).await;
+    assert!(before.len() >= 12, "the catalogue query found only {} satellites: {before:#?}", before.len());
+    assert!(before.iter().any(|(_, n)| *n > 0), "the fixture wrote nothing, so this proves nothing: {before:#?}");
+
+    // Enough that any clock a satellite might reach for has moved.
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    write_everything().await;
+    let after = satellite_rows(&pool).await;
+
+    let grown: Vec<_> = before.iter().zip(&after).filter(|((_, b), (_, a))| a != b).collect();
+    assert!(
+        grown.is_empty(),
+        "these satellites gained rows from an identical second write, so their hash_diff \
+         covers something that is not their content: {grown:#?}"
+    );
+}
+
 #[sqlx::test(migrator = "vs_vault::MIGRATOR")]
 #[ignore = "needs Postgres from `devenv up`"]
 async fn batches_jobs_and_timings(pool: PgPool) {
