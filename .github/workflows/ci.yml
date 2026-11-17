@@ -1,0 +1,102 @@
+# The gate the checklists in SPEC.md and the READMEs assume exists.
+#
+# Three jobs, because they fail for three different reasons:
+#
+# - `check` is the fast one, and the one that earns its keep. Clippy with `-D warnings`
+#   has already caught a use of `Option::is_none_or` under a declared MSRV of 1.80 — code
+#   that did not build on the minimum this workspace claims to support.
+# - `msrv` builds on exactly that declared minimum, so the claim in `Cargo.toml` is
+#   checked rather than asserted.
+# - `integration` runs the tests marked `#[ignore]`. They are not optional extras: the
+#   first time they were ever executed they found three real defects, two of them months
+#   old. Nothing but this job makes them run.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: clippy and unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      # `--all-targets` so tests and examples are linted too; the three defects found by
+      # execution were in test-adjacent code as often as not.
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+
+  msrv:
+    name: builds on the declared minimum Rust
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Keep in step with `rust-version` in the workspace Cargo.toml.
+      - uses: dtolnay/rust-toolchain@1.82.0
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --workspace --all-targets
+
+  integration:
+    name: tests that need Postgres, Qdrant, NATS and S3
+    runs-on: ubuntu-latest
+    services:
+      # The one service with a health check and nothing to provision beyond a role.
+      # Qdrant, NATS and Garage are started by the script below, which can pass the
+      # arguments and run the setup commands a `services:` block cannot.
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: vs
+          POSTGRES_PASSWORD: vs
+          POSTGRES_DB: visual_suite
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      # `sqlx::test` creates a database per test, so this role needs CREATEDB — the
+      # Postgres superuser has it.
+      DATABASE_URL: postgres://vs:vs@127.0.0.1:5432/visual_suite
+      VS__POSTGRES__PASSWORD: vs_app
+      VS__QDRANT__URL: http://127.0.0.1:6334 # gRPC, not the 6333 REST port
+      VS__BUS__NATS_URL: nats://127.0.0.1:4222
+      AWS_ENDPOINT: http://127.0.0.1:3900
+      AWS_REGION: garage
+      AWS_ALLOW_HTTP: "true"
+      # The fixed dev credentials from crates/vs-infra/devenv.nix, so a local `devenv up`
+      # and this job read the same values. Not secrets: this Garage lasts one job.
+      AWS_ACCESS_KEY_ID: GK0123456789abcdef01234567
+      AWS_SECRET_ACCESS_KEY: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Start Qdrant, NATS and Garage
+        run: .github/scripts/services.sh
+      - name: Create the runtime role
+        # Migration 0003 refuses to run without it, by design: the grants it makes are
+        # the difference between the worker being able to write and being able to delete.
+        run: |
+          PGPASSWORD=vs psql -h 127.0.0.1 -U vs -d visual_suite \
+            -c "DO \$\$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'vs_app')
+                THEN CREATE ROLE vs_app LOGIN PASSWORD 'vs_app'; END IF; END \$\$;"
+      - run: cargo test --workspace -- --include-ignored
+      - name: Service logs
+        if: failure()
+        run: for c in vs-ci-qdrant vs-ci-nats vs-ci-garage; do echo "== $c"; docker logs "$c" 2>&1 | tail -40; done
