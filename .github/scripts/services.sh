@@ -15,7 +15,9 @@
 # With a non-default KEYCLOAK_PORT, also export VS_KEYCLOAK_ISSUER: the test that asks the
 # realm for a token defaults to :8081.
 #
-# It is idempotent: an existing container of the same name is replaced.
+# It is idempotent: an existing container of the same name is replaced, and Garage's state
+# directory ($SERVICES_STATE, by default $TMPDIR/$PREFIX-state) is recreated. That
+# directory must outlive this script, because the Garage container mounts it.
 set -euo pipefail
 
 PREFIX="${PREFIX:-vs-ci}"
@@ -42,8 +44,15 @@ NATS_IMAGE="nats:2-alpine"
 GARAGE_IMAGE="dxflrs/garage:v1.0.1"
 KEYCLOAK_IMAGE="quay.io/keycloak/keycloak:26.4"
 
-work="$(mktemp -d)"
-trap 'rm -rf "$work"' EXIT
+# Garage's config file and its data and metadata directories are bind-mounted into a
+# container that outlives this script, so they must not live in a directory the script
+# deletes on its way out. `mktemp -d` with `trap rm -rf EXIT` left Garage running with its
+# data directory unlinked, and it then answered 503 to every request — after the script
+# had reported success, which is the worst place for it. Wiped at the start of each run
+# instead, which is also what makes the run idempotent.
+work="${SERVICES_STATE:-${TMPDIR:-/tmp}/$PREFIX-state}"
+rm -rf "$work"
+mkdir -p "$work"
 
 run() {
   local name="$1"; shift
