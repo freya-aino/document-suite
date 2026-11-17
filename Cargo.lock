@@ -4077,6 +4077,7 @@ name = "vs-api"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum",
  "bytes",
  "chrono",
@@ -4085,11 +4086,13 @@ dependencies = [
  "hex",
  "metrics",
  "metrics-exporter-prometheus",
+ "object_store",
  "serde",
  "serde_json",
  "sha2",
  "sqlx",
  "tokio",
+ "tower",
  "tracing",
  "uuid",
  "vs-core",

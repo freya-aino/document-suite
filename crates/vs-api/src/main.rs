@@ -936,6 +936,9 @@ async fn activate_dag_list(
 }
 
 #[cfg(test)]
+mod http_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

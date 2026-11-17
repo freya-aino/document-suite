@@ -9,8 +9,10 @@ request rate, independently of the workers. System spec:
 
 Implemented: every endpoint below, multipart and JSON upload, `Idempotency-Key` replay,
 interactive back-pressure (`429` with `Retry-After`), source-URI tenant-prefix checks,
-DAG-list admin with `vs_router::Router::load` validation, and `/metrics`. 4 unit tests
-pass — thin coverage for ~960 lines of HTTP surface.
+DAG-list admin with `vs_router::Router::load` validation, and `/metrics`. 4 unit tests,
+plus 5 HTTP tests (`src/http_tests.rs`, `#[ignore]`d; they need Postgres) driving the real
+router over the real `ops` schema, with an in-memory blob store and a fake bus whose
+backlog the test sets.
 
 Remaining:
 - [ ] **No auth.** The tenant comes from the `X-VS-Tenant` header (`[A-Za-z0-9_-]+`) and
@@ -18,9 +20,11 @@ Remaining:
       largest open item in the suite: it is the only thing standing between two tenants'
       documents. Keep the API on a trusted network until it is replaced. The intended
       design is mTLS or a JWT from your service-api — **still to be decided**.
-- [ ] Test coverage: no test exercises idempotency replay, back-pressure, the batch path,
-      the source-URI prefix check, or DAG-list activation. These are exactly the paths
-      where a regression silently loses or mis-attributes work.
+- [ ] Test coverage: the five paths where a regression silently loses or mis-attributes
+      work now have tests — replay, back-pressure, the batch path, the `source_uri`
+      prefix check and DAG-list activation. What is still untested is the multipart
+      upload path (`skip_if_processed`, the body limit, the spool file's cleanup) and the
+      read routes, which fail loudly rather than quietly.
 - [ ] No rate limiting per tenant; a single tenant can fill the batch lane.
 - [ ] No Kafka bus (inherited from `vs-infra`; nothing needs it yet).
 

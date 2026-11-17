@@ -42,8 +42,8 @@ config/             example models, worker, DAG list, search space, LiteLLM
 
 ## Status
 
-All 17 crates compile together and the workspace is green: **336 tests pass, none
-ignored** — the 27 integration tests run against a live Postgres, Qdrant, NATS and Garage,
+All 17 crates compile together and the workspace is green: **341 tests pass, none
+ignored** — the 32 integration tests run against a live Postgres, Qdrant, NATS and Garage,
 and one of them takes a document through the whole pipeline into both stores.
 `cargo clippy --workspace --all-targets -- -D warnings` is clean. No `todo!()` or
 `unimplemented!()` remains anywhere in the tree.
@@ -149,7 +149,7 @@ curl 127.0.0.1:8080/v1/jobs/<job_id> -H 'x-vs-tenant: t1'
 ### Tests
 
 `cargo test --workspace` runs the 309 tests that need nothing (PDF tests need
-`PDFIUM_DYNAMIC_LIB_PATH`, set by devenv). The other 27 touch a real store and are
+`PDFIUM_DYNAMIC_LIB_PATH`, set by devenv). The other 32 touch a real store and are
 `#[ignore]`d; with `devenv up` running:
 
 ```sh
