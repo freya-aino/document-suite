@@ -112,6 +112,7 @@ fn fixture() -> Fixture {
                 aliases: vec![],
                 mentions: vec!["m1".into()],
                 entity_hk: Some(HashKey::of(&["t", "method|bert"])),
+                context: String::new(),
             },
             DocEntity {
                 local_id: "e2".into(),
@@ -121,6 +122,7 @@ fn fixture() -> Fixture {
                 aliases: vec![],
                 mentions: vec![],
                 entity_hk: Some(HashKey::of(&["t", "dataset|glue"])),
+                context: String::new(),
             },
         ],
         assertions: vec![Assertion {
@@ -223,6 +225,7 @@ fn citations_get_a_direct_edge() {
         aliases: vec![],
         mentions: vec![],
         entity_hk: Some(HashKey::of(&["t", "reference|devlin"])),
+                context: String::new(),
     };
     let ref_hk = reference.entity_hk.clone().unwrap();
     f.ext.entities.push(reference);

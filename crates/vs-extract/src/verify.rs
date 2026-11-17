@@ -95,7 +95,7 @@ mod tests {
     #[test]
     fn describes_and_renders() {
         let hk = HashKey::of(&["b"]);
-        let e = DocEntity { local_id: "e1".into(), name: "BERT".into(), raw_type: "method".into(), type_id: None, aliases: vec![], mentions: vec![], entity_hk: None };
+        let e = DocEntity { local_id: "e1".into(), name: "BERT".into(), raw_type: "method".into(), type_id: None, aliases: vec![], mentions: vec![], entity_hk: None, context: String::new() };
         let a = Assertion {
             local_id: "a1".into(),
             predicate: "result".into(),

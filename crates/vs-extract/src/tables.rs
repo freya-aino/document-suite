@@ -187,7 +187,7 @@ pub fn extract_tables(doc: &StitchedDocument, provenance_idx: usize) -> Fragment
             let mid = format!("{tbl}.m{ids}");
             frag.mentions.push(Mention { id: mid.clone(), block_hk: b.block.block_hk.clone(), char_start: cs, char_end: ce, surface: name.clone(), raw_type: "metric".into(), confidence: 0.6 });
             let eid = format!("{tbl}.e{ids}");
-            frag.entities.push(DocEntity { local_id: eid.clone(), name, raw_type: "metric".into(), type_id: None, aliases: vec![], mentions: vec![mid], entity_hk: None });
+            frag.entities.push(DocEntity { local_id: eid.clone(), name, raw_type: "metric".into(), type_id: None, aliases: vec![], mentions: vec![mid], entity_hk: None, context: String::new() });
             metric_entities.push((k, eid));
         }
         for r in &body {
@@ -200,7 +200,7 @@ pub fn extract_tables(doc: &StitchedDocument, provenance_idx: usize) -> Fragment
             let mid = format!("{tbl}.m{ids}");
             frag.mentions.push(Mention { id: mid.clone(), block_hk: b.block.block_hk.clone(), char_start: cs, char_end: ce, surface: label.to_string(), raw_type: "method".into(), confidence: 0.6 });
             let method_id = format!("{tbl}.e{ids}");
-            frag.entities.push(DocEntity { local_id: method_id.clone(), name: label.to_string(), raw_type: "method".into(), type_id: None, aliases: vec![], mentions: vec![mid], entity_hk: None });
+            frag.entities.push(DocEntity { local_id: method_id.clone(), name: label.to_string(), raw_type: "method".into(), type_id: None, aliases: vec![], mentions: vec![mid], entity_hk: None, context: String::new() });
             for (k, metric_id) in &metric_entities {
                 let Some(cell) = r.cells.get(*k) else { continue };
                 let Some((value, cell_unit)) = parse_numeric_cell(cell) else { continue };

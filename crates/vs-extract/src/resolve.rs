@@ -233,7 +233,7 @@ mod tests {
     use vs_core::BlockKind;
 
     fn ent(id: &str, name: &str, ty: &str, mention: &str) -> DocEntity {
-        DocEntity { local_id: id.into(), name: name.into(), raw_type: ty.into(), type_id: None, aliases: vec![], mentions: vec![mention.into()], entity_hk: None }
+        DocEntity { local_id: id.into(), name: name.into(), raw_type: ty.into(), type_id: None, aliases: vec![], mentions: vec![mention.into()], entity_hk: None, context: String::new() }
     }
 
     #[test]

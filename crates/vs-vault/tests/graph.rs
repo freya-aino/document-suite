@@ -418,6 +418,7 @@ async fn the_resolver_reads_entity_labels_from_postgres(pool: PgPool) {
         aliases: vec![],
         mentions: vec![],
         entity_hk: None,
+        context: String::new(),
     };
 
     use vs_extract::resolve::{CorpusResolver, Resolution};
@@ -471,6 +472,7 @@ async fn the_resolver_refuses_another_tenants_entity(pool: PgPool) {
         aliases: vec![],
         mentions: vec![],
         entity_hk: None,
+        context: String::new(),
     };
 
     use vs_extract::resolve::{CorpusResolver, Resolution};

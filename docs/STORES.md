@@ -170,7 +170,8 @@ the entity name, filtered by `tenant`; this is what corpus resolution itself use
 **8. `GetEntity`** — one entity with its newest labels.
 
 ```sql
-SELECT h.entity_hk, h.canonical_key, l.name, l.type_id, l.raw_type, l.aliases, l.review_status
+SELECT h.entity_hk, h.canonical_key, l.name, l.type_id, l.raw_type, l.aliases,
+       l.review_status, l.context
 FROM vault.hub_entity h
 JOIN LATERAL (
   SELECT * FROM vault.sat_entity_label s
@@ -178,6 +179,12 @@ JOIN LATERAL (
 ) l ON true
 WHERE h.entity_hk = $1 AND h.tenant_id = $2;
 ```
+
+`context` is the sentence the entity was last found in, capped at 400 characters and `''`
+when there was none. `ORDER BY load_dts DESC LIMIT 1` gives the newest, which is the
+newest *document's* wording: this satellite versions on a changed context, so the history
+of an entity's label is also the list of ways it has been described. Reading all of it is
+a plain query without the `LIMIT`.
 
 ### Components inside a block
 

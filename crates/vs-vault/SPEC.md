@@ -13,7 +13,8 @@ Migrations: `migrations/0001_ops_registry.sql`, `migrations/0002_vault.sql`,
 keys, job state log, page-level evidence), `migrations/0005_graph.sql` (sections, the
 `related` shortcut, citations) and `migrations/0006_document_type.sql`, embedded via
 `sqlx::migrate!`, plus `migrations/0007_page_components.sql` (table cells, in-image text
-and its matches).
+and its matches) and `migrations/0008_entity_context.sql` (the sentence an entity was
+found in).
 
 System spec: [`docs/SPEC.md`](../../docs/SPEC.md) — decisions D5 (insert-only history)
 and D6 (this is the single system of record *and* the graph projection).
@@ -26,10 +27,11 @@ lists, entity and relation types), role separation between the migration owner a
 runtime role, `write_document`, `write_page`, `write_stage2`, `finish_run`, the
 `v_current_run` view, the graph layer (`graph.rs`, written inside `write_stage2`'s
 transaction) and corpus entity resolution (`PgCorpusResolver`).
-15 unit tests, plus 17 Postgres integration tests (`#[ignore]`d; they need a database).
-All seven migrations apply, and every write path has been executed: `tests/graph.rs`
+15 unit tests, plus 18 Postgres integration tests (`#[ignore]`d; they need a database).
+All eight migrations apply, and every write path has been executed: `tests/graph.rs`
 covers the graph layer across all of 0005 to 0007 and `PgCorpusResolver` against real
-label rows.
+label rows. A document also reaches this schema through the whole pipeline, from
+[`vs-worker`](../vs-worker/SPEC.md)'s `tests/pipeline.rs`.
 
 Running them for the first time found three defects that no unit test could have caught:
 
@@ -68,13 +70,9 @@ readers are told to treat it as "SQL complete, vectors possibly not" —
 [`docs/STORES.md`](../../docs/STORES.md) says so.
 
 Remaining:
-- [ ] **The judge cannot see a candidate's context sentence.** `sat_entity_label` has no
-      `context` column, so `PgCorpusResolver`'s judge sees only the stored name, type and
-      aliases — the same blind spot the previous store had, and the one Postgres could
-      actually fix. It needs the column plus the context threaded into `write_stage2`.
 - [ ] Applying the new migrations is a deploy-ordering constraint: `check_migrations`
       refuses to start a worker whose database is missing any embedded migration, so
-      `vs-migrate` has to run before any binary built with 0005 to 0007.
+      `vs-migrate` has to run before any binary built with 0005 to 0008.
 - [ ] Nothing checks that a satellite's `hash_diff` excludes write-time values. Defect 2
       above was exactly that mistake, and the same trap exists in every satellite whose
       descriptive set might later gain a timestamp.
@@ -168,7 +166,16 @@ no deletes (retention is handled by partition drops, if required).
 | `sat_page_profile` | hub_page | run id, profile JSON, dag ref, routing rule, render size |
 | `sat_block_content` | hub_block | kind, bbox, reading/global order, text, content JSON, level, confidence, furniture flag |
 | `sat_block_provenance` | hub_block | provenance JSON |
-| `sat_entity_label` | hub_entity | name, type id, raw type, aliases, review status |
+| `sat_entity_label` | hub_entity | name, type id, raw type, aliases, review status, **context** |
+
+`sat_entity_label.context` is the sentence the entity was last found in — the first
+mentioning block's text, capped at 400 characters. It exists so the resolver's LLM judge
+can compare two entities rather than two names: the new mention always arrives with its
+context, and until 0008 the stored side had none. Because it is part of the payload it is
+part of `hash_diff`, so a second document mentioning the entity in a different sentence
+adds a row. That makes this satellite grow with mentions rather than with corrections,
+which is the right record and worth knowing before anything else document-specific is
+added to it.
 | `sat_assertion_detail` | hub_assertion | raw predicate, predicate id, kind, qualifiers, literals, confidence, verified, provenance |
 | `sat_mention` (multi-active by `sub_seq`) | lnk_mention | run id, char span, surface, confidence |
 | `sat_evidence` (multi-active by `sub_seq`) | lnk_assertion_evidence | char span or bbox |

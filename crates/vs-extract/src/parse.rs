@@ -168,7 +168,7 @@ pub fn ground_output(raw: RawOutput, labels: &HashMap<String, HashKey>, texts: &
             continue;
         }
         id_map.insert(e.id.clone(), local_id.clone());
-        g.fragment.entities.push(DocEntity { local_id, name, raw_type: e.kind.trim().to_string(), type_id: None, aliases: vec![], mentions, entity_hk: None });
+        g.fragment.entities.push(DocEntity { local_id, name, raw_type: e.kind.trim().to_string(), type_id: None, aliases: vec![], mentions, entity_hk: None, context: String::new() });
     }
 
     let mut assertion_no = 0usize;

@@ -415,6 +415,7 @@ fn stage2_fixture(m: &DocumentMeta, r: &RunMeta) -> (StitchedDocument, Extractio
                 aliases: vec!["blk".into()],
                 mentions: vec!["m1".into(), "m2".into()],
                 entity_hk: Some(HashKey::entity(&TenantId("t1".into()), "block")),
+                context: "The Block method is described here.".into(),
             },
             DocEntity {
                 local_id: "e2".into(),
@@ -424,6 +425,7 @@ fn stage2_fixture(m: &DocumentMeta, r: &RunMeta) -> (StitchedDocument, Extractio
                 aliases: vec![],
                 mentions: vec!["m3".into()],
                 entity_hk: None,
+                context: String::new(),
             },
         ],
         assertions: vec![Assertion {
@@ -615,6 +617,68 @@ async fn write_stage2_is_idempotent_and_versions_satellites(pool: PgPool) {
             .unwrap(),
         Some(r.run_id)
     );
+}
+
+#[sqlx::test(migrator = "vs_vault::MIGRATOR")]
+#[ignore = "needs Postgres from `devenv up`"]
+async fn the_sentence_an_entity_was_found_in_is_stored_and_versions_the_label(pool: PgPool) {
+    let v = PgVault { pool: pool.clone() };
+    let (r, m) = (run(), meta(1));
+    v.write_document(&r, &spec(), &m).await.unwrap();
+    v.write_page(&page_result(&m, &r), Some("rule-1")).await.unwrap();
+    let (doc, mut ext) = stage2_fixture(&m, &r);
+    let graph = DocGraph::default();
+
+    v.write_stage2(&r, &spec(), &doc, &ext, &graph, None).await.unwrap();
+    let stored: String = sqlx::query_scalar(
+        "SELECT context FROM vault.sat_entity_label WHERE entity_hk = $1 ORDER BY load_dts DESC LIMIT 1",
+    )
+    .bind(HashKey::entity(&TenantId("t1".into()), "block").as_str())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(stored, "The Block method is described here.", "the resolver's context sentence must reach the label");
+
+    // A different sentence is a changed label, so it versions the satellite rather than
+    // overwriting it or being silently dropped. That is the documented cost of putting
+    // the context here — migration 0008 says why it is worth paying.
+    ext.entities[0].context = "Block was later renamed.".into();
+    v.write_stage2(&r, &spec(), &doc, &ext, &graph, None).await.unwrap();
+    let rows: Vec<String> = sqlx::query_scalar(
+        "SELECT context FROM vault.sat_entity_label WHERE entity_hk = $1 ORDER BY load_dts",
+    )
+    .bind(HashKey::entity(&TenantId("t1".into()), "block").as_str())
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(rows, vec!["The Block method is described here.", "Block was later renamed."]);
+    assert_eq!(count(&pool, "vault.hub_entity").await, 2, "versioning a label must not add an entity");
+
+    // Long contexts are cut, and cut on a character boundary: a block can be a page of
+    // text, and the judge reads a sentence of it. The 399th character here is multibyte,
+    // so a byte-indexed cut would panic.
+    ext.entities[0].context = format!("{}é tail", "x".repeat(399));
+    v.write_stage2(&r, &spec(), &doc, &ext, &graph, None).await.unwrap();
+    let long: String = sqlx::query_scalar(
+        "SELECT context FROM vault.sat_entity_label WHERE entity_hk = $1 ORDER BY load_dts DESC LIMIT 1",
+    )
+    .bind(HashKey::entity(&TenantId("t1".into()), "block").as_str())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(long.chars().count(), 401, "400 characters plus the ellipsis: {long:?}");
+    assert!(long.ends_with("é…"), "cut on the character, not the byte: {:?}", &long[long.len() - 8..]);
+
+    // An entity with no context stores "" rather than NULL, so a reader has one case to
+    // handle instead of two.
+    let empty: String = sqlx::query_scalar(
+        "SELECT context FROM vault.sat_entity_label WHERE entity_hk = $1 ORDER BY load_dts DESC LIMIT 1",
+    )
+    .bind(HashKey::doc_local_entity(&m.document_hk, "e2").as_str())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(empty, "");
 }
 
 #[sqlx::test(migrator = "vs_vault::MIGRATOR")]

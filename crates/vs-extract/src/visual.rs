@@ -78,7 +78,7 @@ pub fn extract_figures(doc: &StitchedDocument, provenance_idx: usize) -> Fragmen
                 raw_type: e.kind.clone(),
                 confidence: VISUAL_CONFIDENCE,
             });
-            frag.entities.push(DocEntity { local_id: eid.clone(), name: label.to_string(), raw_type: e.kind.clone(), type_id: None, aliases: vec![], mentions: vec![mid], entity_hk: None });
+            frag.entities.push(DocEntity { local_id: eid.clone(), name: label.to_string(), raw_type: e.kind.clone(), type_id: None, aliases: vec![], mentions: vec![mid], entity_hk: None, context: String::new() });
             by_label.entry(label.to_lowercase()).or_insert(eid);
         }
         for (k, r) in fig.relations.iter().enumerate() {

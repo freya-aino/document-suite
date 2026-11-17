@@ -38,6 +38,12 @@ pub struct Candidate {
     pub name: String,
     pub type_id: String,
     pub aliases: Vec<String>,
+    /// The sentence this entity was last seen in, as stored by `write_stage2`.
+    ///
+    /// Empty for an entity written before migration 0008, or one whose mentions were all
+    /// in blocks with no text. The judge is shown `(none)` in that case rather than an
+    /// empty line, so it can tell a missing context from an uninformative one.
+    pub context: String,
     pub cosine: f32,
 }
 
@@ -168,10 +174,10 @@ impl PgCorpusResolver {
         }
         let keys: Vec<String> = hits.iter().map(|h| h.entity_hk.clone()).collect();
         let rows = sqlx::query(
-            "SELECT h.entity_hk, l.name, COALESCE(l.type_id, '') AS type_id, l.aliases
+            "SELECT h.entity_hk, l.name, COALESCE(l.type_id, '') AS type_id, l.aliases, l.context
              FROM vault.hub_entity h
              JOIN LATERAL (
-                 SELECT s.name, s.type_id, s.aliases FROM vault.sat_entity_label s
+                 SELECT s.name, s.type_id, s.aliases, s.context FROM vault.sat_entity_label s
                  WHERE s.entity_hk = h.entity_hk ORDER BY s.load_dts DESC LIMIT 1
              ) l ON true
              WHERE h.entity_hk = ANY($1) AND h.tenant_id = $2",
@@ -196,6 +202,7 @@ impl PgCorpusResolver {
                         .as_array()
                         .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
                         .unwrap_or_default(),
+                    context: r.get("context"),
                     cosine: 0.0,
                 },
             );
@@ -305,16 +312,21 @@ impl Judge {
         cand: &Candidate,
     ) -> Result<bool, ExtractError> {
         let prompt = format!(
+            // Both sides carry a context sentence. Asking this question with the
+            // evidence on one side only — which is what the previous store could manage —
+            // reduced it to comparing two names, and two identical names are not a
+            // question a model can answer either way.
             "Entity A (from the document being processed)\n  name: {}\n  type: {}\n  aliases: {}\n  context: {}\n\n\
-             Entity B (already in the corpus)\n  name: {}\n  type: {}\n  aliases: {}\n\n\
+             Entity B (already in the corpus)\n  name: {}\n  type: {}\n  aliases: {}\n  context: {}\n\n\
              Are A and B the same real-world entity (same method, dataset, organisation, …), not merely related or similar?",
             entity.name,
             type_id,
             join_or_none(&entity.aliases),
-            if context.trim().is_empty() { "(none)" } else { context.trim() },
+            or_none(context),
             cand.name,
             if cand.type_id.is_empty() { "(unknown)" } else { &cand.type_id },
             join_or_none(&cand.aliases),
+            or_none(&cand.context),
         );
         let req = ChatRequest {
             system: Some(
@@ -348,6 +360,12 @@ fn join_or_none(xs: &[String]) -> String {
     if xs.is_empty() { "(none)".to_string() } else { xs.join(", ") }
 }
 
+/// `(none)` for an absent context, so the judge can tell "no sentence was stored" from
+/// "the sentence said nothing".
+fn or_none(s: &str) -> &str {
+    if s.trim().is_empty() { "(none)" } else { s.trim() }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -359,6 +377,7 @@ mod tests {
             name: name.into(),
             type_id: type_id.into(),
             aliases: aliases.iter().map(|s| s.to_string()).collect(),
+            context: String::new(),
             cosine,
         }
     }
@@ -448,6 +467,7 @@ mod tests {
             aliases: vec![],
             mentions: vec![],
             entity_hk: None,
+            context: String::new(),
         }
     }
 

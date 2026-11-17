@@ -493,6 +493,7 @@ pub fn extract_bibliography(doc: &StitchedDocument, provenance_idx: usize) -> (F
                 aliases,
                 mentions: vec![mention_id],
                 entity_hk: None,
+                context: String::new(),
             });
             if let Some(n) = r.marker {
                 by_number.entry(n).or_insert_with(|| local_id.clone());

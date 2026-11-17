@@ -24,6 +24,14 @@ pub struct DocEntity {
     pub mentions: Vec<String>,
     /// Canonical entity after corpus resolution.
     pub entity_hk: Option<HashKey>,
+    /// The text of the first block this entity was mentioned in.
+    ///
+    /// Filled in by the caller that resolves the entity, which is the only place that has
+    /// both the entity and the stitched document. It is what the corpus resolver embeds
+    /// and what the vault stores for a later judge to compare against, so an entity
+    /// resolved without one is resolved on its name alone.
+    #[serde(default)]
+    pub context: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

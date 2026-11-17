@@ -118,6 +118,22 @@ pub fn record_source(component: &str, what: &str, model: Option<&str>) -> String
 
 /// SHA-256 over a satellite's descriptive columns (passed as one JSON value; object keys
 /// serialise sorted, so the result is stable).
+/// Longest context sentence stored on an entity label.
+///
+/// The context is a whole block's text, which can be a page of it. The judge reads one
+/// sentence's worth to tell two entities apart, and the satellite gains a row per
+/// document that mentions the entity, so an uncapped column would multiply a long block
+/// by every corpus entity it names. Cut on a character boundary, never mid-codepoint.
+const MAX_CONTEXT_CHARS: usize = 400;
+
+fn truncate_context(context: &str) -> String {
+    let context = context.trim();
+    match context.char_indices().nth(MAX_CONTEXT_CHARS) {
+        None => context.to_string(),
+        Some((i, _)) => format!("{}…", &context[..i]),
+    }
+}
+
 pub(crate) fn hash_diff(descriptive: &Value) -> String {
     HashKey::of(&[&descriptive.to_string()]).to_string()
 }
@@ -458,10 +474,10 @@ impl VaultWriter for PgVault {
         .execute(&mut *tx)
         .await?;
         sqlx::query(&format!(
-            "INSERT INTO vault.sat_entity_label (entity_hk, load_dts, hash_diff, record_source, name, type_id, raw_type, aliases, review_status)
-             SELECT v.entity_hk, $1, v.hash_diff, $4, v.name, v.type_id, v.raw_type, v.aliases, v.review_status
-             FROM UNNEST($2::text[], $3::text[], $5::text[], $6::text[], $7::text[], $8::jsonb[], $9::text[])
-               AS v(entity_hk, hash_diff, name, type_id, raw_type, aliases, review_status)
+            "INSERT INTO vault.sat_entity_label (entity_hk, load_dts, hash_diff, record_source, name, type_id, raw_type, aliases, review_status, context)
+             SELECT v.entity_hk, $1, v.hash_diff, $4, v.name, v.type_id, v.raw_type, v.aliases, v.review_status, v.context
+             FROM UNNEST($2::text[], $3::text[], $5::text[], $6::text[], $7::text[], $8::jsonb[], $9::text[], $10::text[])
+               AS v(entity_hk, hash_diff, name, type_id, raw_type, aliases, review_status, context)
              WHERE {}",
             latest_differs("vault.sat_entity_label", "entity_hk")
         ))
@@ -474,6 +490,7 @@ impl VaultWriter for PgVault {
         .bind(&s2.entity_raw_type)
         .bind(&s2.entity_aliases)
         .bind(&s2.entity_review_status)
+        .bind(&s2.entity_context)
         .execute(&mut *tx)
         .await?;
 
@@ -667,6 +684,7 @@ struct Stage2Columns {
     entity_raw_type: Vec<String>,
     entity_aliases: Vec<Value>,
     entity_review_status: Vec<String>,
+    entity_context: Vec<String>,
     entity_hash_diff: Vec<String>,
 
     mention_lnk_hk: Vec<String>,
@@ -750,7 +768,11 @@ impl Stage2Columns {
             }
             let aliases = serde_json::to_value(&e.aliases).unwrap_or(Value::Array(vec![]));
             let review = if e.type_id.is_some() { "approved" } else { "pending" };
-            c.entity_hash_diff.push(hash_diff(&json!([e.name, e.type_id, e.raw_type, aliases, review])));
+            let context = truncate_context(&e.context);
+            // `context` is part of the payload, so it is part of the hash: the same entity
+            // mentioned by a second document in a different sentence is a changed label
+            // and gets its own row. See migration 0008 for why that is the intended cost.
+            c.entity_hash_diff.push(hash_diff(&json!([e.name, e.type_id, e.raw_type, aliases, review, context])));
             c.entity_hk.push(hk.to_string());
             c.entity_canonical_key.push(canonical_key);
             c.entity_name.push(e.name.clone());
@@ -758,6 +780,7 @@ impl Stage2Columns {
             c.entity_raw_type.push(e.raw_type.clone());
             c.entity_aliases.push(aliases);
             c.entity_review_status.push(review.to_string());
+            c.entity_context.push(context);
         }
 
         // Mentions grouped per (block, entity) link; the group shares one hash_diff so the

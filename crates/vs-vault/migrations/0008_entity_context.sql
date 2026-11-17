@@ -1,0 +1,20 @@
+-- The sentence an entity was found in, so the corpus resolver's judge can see both sides.
+--
+-- `PgCorpusResolver` escalates a candidate in the uncertain score band to an LLM, which is
+-- asked whether the new mention and the stored entity are the same real-world thing. It
+-- was being asked that question with the evidence on one side only: entity A arrives with
+-- its context sentence, entity B came out of this satellite, which held a name, a type and
+-- some aliases. "Transformer (method)" against "Transformer (method)" is not a question a
+-- model can answer, and the previous store could not hold the answer either — it is the
+-- one blind spot moving to Postgres was supposed to fix.
+--
+-- `NOT NULL DEFAULT ''` rather than nullable: an entity whose mentions are all in blocks
+-- with no text has no context, and "" says that without a reader having to handle a third
+-- case. The default also means no table rewrite on this migration (Postgres 11+).
+--
+-- The consequence, which is deliberate: `hash_diff` covers the whole payload, so an entity
+-- mentioned by a second document in a different sentence gets a new satellite row. That is
+-- the insert-only model working as designed — the stored label did change — and it is the
+-- reason this column makes the entity-label satellite grow with mentions rather than with
+-- corrections. Worth knowing before adding anything else document-specific to it.
+ALTER TABLE vault.sat_entity_label ADD COLUMN context TEXT NOT NULL DEFAULT '';

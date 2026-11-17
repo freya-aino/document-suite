@@ -269,11 +269,11 @@ async fn resolve_entities(
         })
         .collect();
     let limit = Arc::new(tokio::sync::Semaphore::new(RESOLVE_CONCURRENCY));
-    let futs = ext.entities.iter().zip(contexts).enumerate().map(|(i, (e, ctx))| {
+    let futs = ext.entities.iter().zip(contexts.iter()).enumerate().map(|(i, (e, ctx))| {
         let limit = limit.clone();
         async move {
             let _slot = limit.acquire().await.expect("semaphore is never closed");
-            resolver.resolve(tenant, e, &ctx).await.map(|r| (i, r))
+            resolver.resolve(tenant, e, ctx).await.map(|r| (i, r))
         }
     });
     let resolved: Vec<(usize, vs_extract::Resolution)> = futures::future::try_join_all(futs).await.map_err(extract_error)?;
@@ -282,6 +282,12 @@ async fn resolve_entities(
         ext.entities[i].entity_hk = Some(match r {
             vs_extract::Resolution::Link { entity_hk, .. } | vs_extract::Resolution::New { entity_hk } => entity_hk,
         });
+    }
+    // Kept, not dropped: this is the sentence the resolver judged on, and storing it is
+    // what lets the *next* document's judge see both sides of the comparison instead of
+    // only the one it brought with it.
+    for (e, ctx) in ext.entities.iter_mut().zip(contexts) {
+        e.context = ctx;
     }
     Ok(())
 }
@@ -545,6 +551,7 @@ mod tests {
                         aliases: vec![],
                         mentions: vec!["m1".into()],
                         entity_hk: None,
+                        context: String::new(),
                     },
                     DocEntity {
                         local_id: "e2".into(),
@@ -554,6 +561,7 @@ mod tests {
                         aliases: vec![],
                         mentions: vec![],
                         entity_hk: None,
+                        context: String::new(),
                     },
                 ],
                 ..Default::default()
