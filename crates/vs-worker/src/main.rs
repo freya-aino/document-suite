@@ -76,12 +76,13 @@ fn main() -> anyhow::Result<()> {
 async fn run_worker() -> anyhow::Result<()> {
     let args = Args::parse();
     let cfg = Config::load(&args.config)?;
-    vs_infra::telemetry::init(&cfg.telemetry);
     let role = match args.role {
         RoleArg::Ingest => Role::Ingest,
         RoleArg::Page => Role::Page,
         RoleArg::Doc => Role::Doc,
     };
+    // The role is part of the service label, so the three roles' series stay apart.
+    vs_infra::telemetry::init(&cfg.telemetry, &format!("vs-worker-{}", role.as_str()))?;
     tracing::info!(role = role.as_str(), "vs-worker starting");
 
     let pool = connect_pg(&cfg).await?;

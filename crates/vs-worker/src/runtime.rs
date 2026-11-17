@@ -125,6 +125,7 @@ async fn handle_exhausted(role: Role, bus: &dyn TaskBus, handler: &dyn Handler, 
     if let Some(task) = e.task().cloned() {
         let reason = format!("no result after {MAX_DELIVER} deliveries (worker crashed or hung on every attempt)");
         tracing::error!(role = role.as_str(), job_id = %job_id(&task), "{reason}");
+        finished(role, "no_result");
         handler.give_up(&task, &reason).await;
         if let Err(dl) = bus.dead_letter(role, &task, &reason).await {
             tracing::error!(error = %dl, "dead-letter publish failed; retrying later");
@@ -148,11 +149,39 @@ async fn acquire(lane: Lane, shared: &Arc<Semaphore>, interactive_only: &Arc<Sem
     }
 }
 
+/// `worker_tasks_total{role,outcome}`. The outcomes partition every way a delivery can
+/// leave this loop, so the sum is the delivery count — a `retried` is counted again when
+/// it comes back, which is the point: redelivery is the cost being measured.
+fn finished(role: Role, outcome: &'static str) {
+    metrics::counter!("worker_tasks_total", "role" => role.as_str(), "outcome" => outcome).increment(1);
+}
+
+/// Holds `worker_tasks_in_flight` up for the length of one task, and puts it back however
+/// the task ends — panic included, which a bare decrement at the end would not.
+struct InFlight(Role);
+
+impl InFlight {
+    fn enter(role: Role) -> Self {
+        metrics::gauge!("worker_tasks_in_flight", "role" => role.as_str()).increment(1.0);
+        Self(role)
+    }
+}
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        metrics::gauge!("worker_tasks_in_flight", "role" => self.0.as_str()).decrement(1.0);
+    }
+}
+
 async fn process(role: Role, bus: Arc<dyn TaskBus>, handler: Arc<dyn Handler>, d: Box<dyn Delivery>, _permit: OwnedSemaphorePermit) {
     let task = d.task().clone();
     let attempt = d.attempt();
     let span = tracing::info_span!("task", role = role.as_str(), job_id = %job_id(&task), attempt);
     async move {
+        // In-flight against `max_in_flight` is what the fleet autoscaler's
+        // `tasks_per_worker_target` is a target for, so it has to be observable.
+        let _in_flight = InFlight::enter(role);
+        let started = std::time::Instant::now();
         let heartbeat = role.ack_wait() / 3;
         let result = {
             let work = handler.handle(&task);
@@ -169,8 +198,12 @@ async fn process(role: Role, bus: Arc<dyn TaskBus>, handler: Arc<dyn Handler>, d
                 }
             }
         };
+        metrics::histogram!("worker_task_duration_seconds", "role" => role.as_str()).record(started.elapsed().as_secs_f64());
         let outcome = match result {
-            Ok(()) => d.ack().await,
+            Ok(()) => {
+                finished(role, "ok");
+                d.ack().await
+            }
             Err(e) if e.permanent || attempt >= MAX_DELIVER => {
                 let reason = format!("{:#}", e.error);
                 tracing::error!(permanent = e.permanent, error = %reason, "giving up on task");
@@ -178,11 +211,13 @@ async fn process(role: Role, bus: Arc<dyn TaskBus>, handler: Arc<dyn Handler>, d
                 if let Err(dl) = bus.dead_letter(role, &task, &reason).await {
                     tracing::error!(error = %dl, "dead-letter publish failed");
                 }
+                finished(role, if e.permanent { "permanent_error" } else { "attempts_exhausted" });
                 d.term().await
             }
             Err(e) => {
                 let delay = BACKOFF[(attempt as usize).saturating_sub(1).min(BACKOFF.len() - 1)];
                 tracing::warn!(error = %format!("{:#}", e.error), ?delay, "task failed, retrying");
+                finished(role, "retried");
                 d.nak(delay).await
             }
         };

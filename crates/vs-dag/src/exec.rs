@@ -60,6 +60,7 @@ impl<'a> Executor<'a> {
         text_layer: Artifact,
     ) -> Result<ExecOutput, ExecError> {
         let levels = dag.validate(self.registry)?;
+        metrics::counter!("dag_pages_total", "dag" => dag.reference()).increment(1);
         let mut store: HashMap<String, Artifact> = HashMap::new();
         store.insert(SOURCE_PAGE_IMAGE.to_string(), page_image);
         store.insert(SOURCE_TEXT_LAYER.to_string(), text_layer);
@@ -100,6 +101,10 @@ impl<'a> Executor<'a> {
                     started_at,
                     duration_ms: elapsed.as_millis() as u64,
                 };
+                // Recorded for every node whatever the outcome, including the timeout: a
+                // step that is slow enough to be killed is the one whose duration matters.
+                metrics::histogram!("dag_node_duration_seconds", "step" => node.step.clone(), "dag" => dag_ref.clone())
+                    .record(elapsed.as_secs_f64());
                 let failure = match res {
                     Ok(Ok(out)) => {
                         prov.model_ref = out.model_ref;
@@ -108,8 +113,14 @@ impl<'a> Executor<'a> {
                         traces.push(NodeTrace { node_id: node.id.clone(), provenance: prov, outcome: NodeOutcome::Ok });
                         continue;
                     }
-                    Ok(Err(e)) => ExecError::Node { node_id: node.id.clone(), source: e },
-                    Err(_) => ExecError::Timeout { node_id: node.id.clone(), timeout_ms },
+                    Ok(Err(e)) => {
+                        failed(node, &dag_ref, step_error_reason(&e));
+                        ExecError::Node { node_id: node.id.clone(), source: e }
+                    }
+                    Err(_) => {
+                        failed(node, &dag_ref, "timeout");
+                        ExecError::Timeout { node_id: node.id.clone(), timeout_ms }
+                    }
                 };
                 match (node.optional, Artifact::empty(out_kind)) {
                     (true, Some(empty)) => {
@@ -131,6 +142,24 @@ impl<'a> Executor<'a> {
             Some(other) => Err(ExecError::BadOutput(other.kind())),
             None => unreachable!("output validated"),
         }
+    }
+}
+
+fn failed(node: &crate::dag::Node, dag_ref: &str, reason: &'static str) {
+    metrics::counter!("dag_node_failures_total", "step" => node.step.clone(), "dag" => dag_ref.to_string(), "reason" => reason).increment(1);
+}
+
+/// A bounded label for `dag_node_failures_total{reason}`.
+///
+/// The error's own message is not usable here: it carries model names, parse offsets and
+/// row counts, so one label per distinct failure would grow the series set without limit.
+fn step_error_reason(e: &StepError) -> &'static str {
+    match e {
+        StepError::InvalidParams(_) => "invalid_params",
+        StepError::Model(_) => "model",
+        StepError::Parse(_) => "parse",
+        StepError::Io(_) => "io",
+        StepError::NotImplemented(_) => "not_implemented",
     }
 }
 

@@ -1719,11 +1719,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2b166dea96003ee2531cf14833efedced545751d800f03535801d833313f8c15"
 dependencies = [
  "base64 0.22.1",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "indexmap",
+ "ipnet",
  "metrics",
  "metrics-util",
  "quanta",
  "thiserror 2.0.21",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -4037,6 +4043,8 @@ dependencies = [
  "chrono",
  "futures",
  "hex",
+ "metrics",
+ "metrics-exporter-prometheus",
  "serde",
  "serde_json",
  "sha2",
@@ -4087,6 +4095,8 @@ dependencies = [
  "async-trait",
  "bytes",
  "futures",
+ "metrics",
+ "metrics-exporter-prometheus",
  "object_store",
  "reqwest 0.12.28",
  "serde",
@@ -4129,6 +4139,7 @@ dependencies = [
  "futures",
  "hex",
  "image",
+ "metrics",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
@@ -4146,6 +4157,8 @@ dependencies = [
 name = "vs-router"
 version = "0.1.0"
 dependencies = [
+ "metrics",
+ "metrics-exporter-prometheus",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
@@ -4224,6 +4237,7 @@ dependencies = [
  "futures",
  "hex",
  "image",
+ "metrics",
  "object_store",
  "serde",
  "serde_json",

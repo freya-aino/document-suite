@@ -196,8 +196,10 @@ Delivery is at-least-once, so **every write must be idempotent** — through has
 
 Standard span fields on every trace: `job_id`, `run_id`, `document_hk`, `page_no`,
 `node_id`. Exporters and the Prometheus endpoint:
-[`vs-infra`](../crates/vs-infra/SPEC.md) — **currently a stub; logs only**. Each
-component's metric names are in its own spec.
+[`vs-infra`](../crates/vs-infra/SPEC.md) — metrics are served, **OTLP traces are not
+wired**, so those span fields reach the logs only. Each component's metric names are in
+its own spec, and every series carries a `service` label naming the binary
+(`vs-api`, `vs-worker-page`, …).
 
 ### 5.6 Security
 

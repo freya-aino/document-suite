@@ -287,8 +287,19 @@ why the document classifier is worth its own call rather than more post-processi
 
 ## Metrics
 
-Emitted as `tracing` events under target `vs_models::metrics` (the telemetry layer turns them
-into Prometheus series):
+Prometheus series, emitted directly:
+
+| Series | Kind | Notes |
+|---|---|---|
+| `model_requests_total{model,status}` | counter | one per completed call. `status` is a **bounded** label — `ok`, `client_error`, `server_error`, `connection_error`, `bad_response`, `config`, `unknown_model` — not the error text, which embeds the offending response and would be one series per malformed reply. |
+| `model_request_duration_seconds{model}` | histogram | the whole call including retries, because that is what the caller waits for |
+| `model_request_attempts{model}` | histogram | 1 on a first-try success; the tail is the retry rate |
+| `model_tokens_total{model,kind}` | counter | `kind` is `prompt` or `completion` |
+| `model_in_flight{model}` | gauge | against the model's `max_concurrency` |
+| `model_endpoint_ejections_total{model,endpoint}` | counter | labelled by endpoint, because ejecting one of four is a capacity question and ejecting all four is an outage |
+
+The richer `tracing` events on target `vs_models::metrics` stay alongside them, carrying
+what a label cannot — the endpoint, the exact status line, the error message:
 
 - `model_request` — fields `model`, `status` (`ok`, HTTP status or `connection_error`),
   `latency_ms`, `prompt_tokens`, `completion_tokens`, `attempts`, `endpoint`

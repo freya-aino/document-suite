@@ -21,7 +21,7 @@ use axum::{
 use bytes::Bytes;
 use clap::Parser;
 use futures::stream::{BoxStream, StreamExt, TryStreamExt};
-use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
+use metrics_exporter_prometheus::PrometheusHandle;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -162,8 +162,9 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
     let cfg = vs_infra::Config::load(&args.config)?;
-    vs_infra::telemetry::init(&cfg.telemetry);
-    let metrics = PrometheusBuilder::new().install_recorder()?;
+    // One recorder per process, installed by `telemetry::init`; this binary renders it
+    // on its own `/metrics` route rather than having the exporter bind a second port.
+    let metrics = vs_infra::telemetry::init(&cfg.telemetry, "vs-api")?.metrics;
 
     let mut pg = PgConnectOptions::from_str(&cfg.postgres.url)?;
     if let Some(pw) = &cfg.postgres.password {

@@ -41,6 +41,37 @@ pub enum ModelError {
     Config(String),
 }
 
+/// `model_requests_total{model,status}`, `model_request_duration_seconds{model}` and
+/// `model_request_attempts` for one completed call, successful or not.
+///
+/// The duration covers every attempt, because what a caller waits for is the whole call,
+/// not the last try.
+fn record_request(spec: &ModelSpec, status: &'static str, elapsed: Duration, attempts: u32) {
+    metrics::counter!("model_requests_total", "model" => spec.id.clone(), "status" => status).increment(1);
+    metrics::histogram!("model_request_duration_seconds", "model" => spec.id.clone()).record(elapsed.as_secs_f64());
+    metrics::histogram!("model_request_attempts", "model" => spec.id.clone()).record(attempts as f64);
+}
+
+/// A bounded label for `model_requests_total{status}`.
+///
+/// The `status_label` used in the log event alongside it is deliberately richer, because a
+/// log line can carry anything. A metric label cannot: `ModelError::Response` embeds the
+/// offending response text, so one series per distinct malformed reply would grow the
+/// series set without limit. HTTP status codes are bounded, so they stay.
+fn metric_status(e: &ModelError) -> &'static str {
+    match e {
+        ModelError::Http(_) => "connection_error",
+        ModelError::Status { status, .. } => match status {
+            400..=499 => "client_error",
+            500..=599 => "server_error",
+            _ => "other_status",
+        },
+        ModelError::Response(_) => "bad_response",
+        ModelError::Config(_) => "config",
+        ModelError::UnknownModel(_) => "unknown_model",
+    }
+}
+
 impl ModelError {
     /// Connection errors and HTTP 429/503 are retried; everything else is final.
     pub fn is_retryable(&self) -> bool {
@@ -246,6 +277,7 @@ impl OpenAiClient {
         let _permit = state.limit.acquire().await.expect("semaphore never closed");
         let in_flight = spec.max_concurrency.max(1).saturating_sub(state.limit.available_permits());
         tracing::trace!(target: "vs_models::metrics", model = %spec.id, in_flight, "model_in_flight");
+        metrics::gauge!("model_in_flight", "model" => spec.id.clone()).set(in_flight as f64);
         let t0 = Instant::now();
         let mut attempt: u32 = 0;
         loop {
@@ -269,6 +301,9 @@ impl OpenAiClient {
                         prompt_tokens = p, completion_tokens = c, attempts = attempt + 1, endpoint = %endpoint,
                         "model_request"
                     );
+                    record_request(spec, "ok", t0.elapsed(), attempt + 1);
+                    metrics::counter!("model_tokens_total", "model" => spec.id.clone(), "kind" => "prompt").increment(u64::from(p));
+                    metrics::counter!("model_tokens_total", "model" => spec.id.clone(), "kind" => "completion").increment(u64::from(c));
                     return Ok(v);
                 }
                 Err(e) => {
@@ -284,6 +319,7 @@ impl OpenAiClient {
                             model = %spec.id, status = %status_label, latency_ms = t0.elapsed().as_millis() as u64,
                             attempts = attempt + 1, endpoint = %endpoint, error = %e, "model_request"
                         );
+                        record_request(spec, metric_status(&e), t0.elapsed(), attempt + 1);
                         return Err(e);
                     }
                     tracing::debug!(model = %spec.id, endpoint = %endpoint, attempt, error = %e, "retrying model call");
@@ -359,6 +395,9 @@ impl OpenAiClient {
                 model = %spec.id, endpoint = %endpoint, failures = h.consecutive_failures,
                 eject_secs = EJECT_FOR.as_secs(), "endpoint_ejected"
             );
+            // The endpoint, not the model, is the useful label: ejecting one of four is a
+            // capacity question, ejecting all four is an outage.
+            metrics::counter!("model_endpoint_ejections_total", "model" => spec.id.clone(), "endpoint" => endpoint.to_string()).increment(1);
         }
     }
 

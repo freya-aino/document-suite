@@ -90,3 +90,9 @@ fast at ingest (no silent fallback), so reproducibility runs never mix lists.
 
 `router_selections_total{rule,dag,profile}`, `router_low_confidence_total`,
 `router_default_total`.
+
+All three are emitted from `select` itself, not from its caller, so every path through
+the table is counted — including the two that bypass the rules entirely, which is where a
+routing table goes wrong unnoticed. Those two carry the pseudo-rule names
+`low_confidence` and `default` in the `rule` label, so `router_selections_total` always
+accounts for every page the table saw.

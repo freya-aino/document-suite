@@ -8,19 +8,15 @@ owns the §5.3 lane, §5.4 reliability and §5.5 observability contracts.
 
 Implemented: the NATS JetStream bus in full (stream topology, DLQ, max-deliveries
 advisories, lane fairness, message de-duplication, double acks, the exhausted-task give-up
-path), the S3/Garage blob store, and TOML + environment config. 8 unit tests pass; 4
-integration tests need NATS and Garage from `devenv up`.
-
-**`telemetry` is the one real stub in this workspace.** It initialises `tracing` and then
-logs `"OTLP / metrics exporters not wired yet"` if either is configured. Consequence: the
-workers emit no metrics and no traces at all, and only `vs-api` serves `/metrics` (through
-its own exporter). Every per-crate metric specified elsewhere in these docs is currently
-unobservable in a worker.
+path), the S3/Garage blob store, TOML + environment config, and `telemetry`: structured
+logs plus the one process-wide Prometheus recorder, served over HTTP when
+`telemetry.metrics_addr` is set and handed to the caller otherwise. 8 unit tests pass; 5
+integration tests, 4 of which need NATS and Garage from `devenv up`.
 
 Remaining:
-- [ ] Wire the OTLP trace exporter from `telemetry.otlp_endpoint`.
-- [ ] Serve Prometheus on `telemetry.metrics_addr` in the worker, bound to the microVM's
-      internal interface only.
+- [ ] **No traces.** `telemetry.otlp_endpoint` is read and warned about, not wired, so
+      the span fields §5.5 specifies go to the logs and nowhere else. Metrics are the
+      half that is done.
 - [ ] Encryption at rest for originals (§5.6) is asserted but not configured here.
 - [ ] No Kafka implementation behind `TaskBus` (A6 allows it; nothing needs it yet).
 
@@ -112,6 +108,36 @@ tenant → active-DAG-list mapping (default 60).
 
 ## Telemetry (`telemetry`)
 
-`tracing` with JSON logs; OTLP exporter when `telemetry.otlp_endpoint` is set; Prometheus
-endpoint on `telemetry.metrics_addr` (workers expose it on the VM's internal interface
-only). Standard span fields: `job_id`, `run_id`, `document_hk`, `page_no`, `node_id`.
+`telemetry::init(cfg, service)` is the one entry point, called once per process from
+inside the Tokio runtime. It installs the `tracing` subscriber (JSON logs on
+`json_logs`), installs the process-wide Prometheus recorder, and returns its handle.
+
+A second call returns an error rather than panicking or quietly shadowing the first,
+which is the only safe behaviour for something process-global.
+
+`service` becomes a **global label on every series** — `vs-api`, `vs-worker-ingest`,
+`vs-worker-page`, `vs-worker-doc` — so one Prometheus scraping the whole fleet can tell
+whose counter it is reading. The worker's role is therefore part of the label, and `init`
+is called after the role is parsed.
+
+Where the series are *served* is the asymmetry worth knowing:
+
+| Binary | `metrics_addr` | How `/metrics` is reached |
+|---|---|---|
+| `vs-worker` | set | the exporter binds it and answers `GET /metrics` itself — a worker has no HTTP server of its own |
+| `vs-api` | unset | the handle `init` returns is rendered on the API's own `/metrics` route |
+
+Setting `metrics_addr` for `vs-api` would bind a second port serving the same registry;
+nothing stops it, but there is no reason for it. Leaving it unset on a worker is not an
+error either — the recorder is still installed, so nothing is dropped, but nothing can
+scrape it. **Bind the microVM's internal interface, never `0.0.0.0`**: there is no auth
+in front of a worker.
+
+Histogram buckets are set once, globally, from 5 ms to 10 minutes. The exporter's own
+defaults stop near 10 s, which would put a page render, a VLM call and a whole Stage 2
+document into one overflow bucket — the three durations anyone actually wants a quantile
+for.
+
+OTLP traces are **not wired**: `otlp_endpoint` is read and warned about. Standard span
+fields, present in the logs today: `job_id`, `run_id`, `document_hk`, `page_no`,
+`node_id`.

@@ -133,5 +133,5 @@ earlier levels). Nodes in one level run concurrently.
 
 ## Metrics
 
-`dag_node_duration_ms{step,dag}`, `dag_node_failures_total{step,dag,reason}`,
+`dag_node_duration_seconds{step,dag}`, `dag_node_failures_total{step,dag,reason}`,
 `dag_pages_total{dag}`.

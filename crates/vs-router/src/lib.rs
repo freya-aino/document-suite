@@ -112,6 +112,22 @@ pub struct Router {
     by_id: HashMap<String, usize>,
 }
 
+/// `router_selections_total{rule,dag,profile}`.
+///
+/// Emitted from `select` rather than from its caller so that every path through the table
+/// is counted — the low-confidence short circuit and the default fall-through included,
+/// which is exactly where a routing table goes wrong unnoticed. `rule` carries the
+/// pseudo-rules `low_confidence` and `default` for those two, so the three counters here
+/// always sum to `router_selections_total`.
+fn record_selection(dag: &str, rule: &str, profile: Profile) {
+    let profile = match profile {
+        Profile::Quality => "quality",
+        Profile::Balanced => "balanced",
+        Profile::Fast => "fast",
+    };
+    metrics::counter!("router_selections_total", "rule" => rule.to_string(), "dag" => dag.to_string(), "profile" => profile).increment(1);
+}
+
 impl Router {
     pub fn load(list: DagList, steps: &dyn StepSignatures) -> Result<Self, RouterError> {
         let mut by_id = HashMap::new();
@@ -153,6 +169,8 @@ impl Router {
     pub fn select(&self, page: &PageProfile, profile: Profile) -> Selection<'_> {
         let r = &self.list.routing;
         if page.confidence < r.min_classifier_confidence {
+            metrics::counter!("router_low_confidence_total").increment(1);
+            record_selection(&r.low_confidence_dag, "low_confidence", profile);
             return Selection { dag: self.dag(&r.low_confidence_dag).expect("validated"), rule_id: None, reason: Reason::LowConfidence };
         }
         let best = r
@@ -170,12 +188,19 @@ impl Router {
                     .then(ib.cmp(ia))
             });
         match best {
-            Some((_, rule)) => Selection {
-                dag: self.dag(&rule.dag).expect("validated"),
-                rule_id: Some(&rule.id),
-                reason: Reason::Rule { specificity: rule.when.specificity() },
-            },
-            None => Selection { dag: self.dag(&r.default_dag).expect("validated"), rule_id: None, reason: Reason::Default },
+            Some((_, rule)) => {
+                record_selection(&rule.dag, &rule.id, profile);
+                Selection {
+                    dag: self.dag(&rule.dag).expect("validated"),
+                    rule_id: Some(&rule.id),
+                    reason: Reason::Rule { specificity: rule.when.specificity() },
+                }
+            }
+            None => {
+                metrics::counter!("router_default_total").increment(1);
+                record_selection(&r.default_dag, "default", profile);
+                Selection { dag: self.dag(&r.default_dag).expect("validated"), rule_id: None, reason: Reason::Default }
+            }
         }
     }
 }
@@ -292,6 +317,34 @@ mod tests {
         let s = r.select(&page("en", true, 0.3), Profile::Balanced);
         assert_eq!(s.reason, Reason::LowConfidence);
         assert_eq!(s.dag.id, "robust");
+    }
+
+    #[test]
+    fn every_path_through_the_table_is_counted() {
+        // A thread-local recorder: each `#[test]` gets its own thread, so what this one
+        // records is only what it did.
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let _guard = metrics::set_default_local_recorder(&recorder);
+
+        let r = router();
+        r.select(&page("en-GB", true, 0.9), Profile::Balanced); // a rule matched
+        r.select(&page("de", false, 0.9), Profile::Balanced); // nothing matched
+        r.select(&page("en", true, 0.3), Profile::Quality); // short-circuited on confidence
+
+        let body = handle.render();
+        assert!(body.contains("router_default_total 1"), "{body}");
+        assert!(body.contains("router_low_confidence_total 1"), "{body}");
+        // The two bypass paths carry pseudo-rule names, so `router_selections_total`
+        // accounts for every page the table saw rather than only the ones a rule claimed
+        // — which is where a routing table goes wrong unnoticed.
+        for expect in [
+            r#"router_selections_total{rule="digital-sci-en",dag="digital-sci-en",profile="balanced"} 1"#,
+            r#"router_selections_total{rule="default",dag="robust",profile="balanced"} 1"#,
+            r#"router_selections_total{rule="low_confidence",dag="robust",profile="quality"} 1"#,
+        ] {
+            assert!(body.contains(expect), "missing {expect}\n{body}");
+        }
     }
 
     #[test]

@@ -13,14 +13,12 @@ drain on SIGTERM, and the cached DAG-list provider. 16 unit tests pass, with the
 pipeline tested over fakes for the extractor, resolver and embedder.
 
 Remaining:
-- [ ] **No metrics and no traces.** `vs-infra`'s telemetry is a stub, so a running worker
-      is observable only through its logs. Everything in §5.5 of the system spec is
-      unimplemented from a worker's point of view.
+- [ ] **No traces.** Metrics are served now (see "Metrics" below), but
+      `telemetry.otlp_endpoint` is still unwired, so the span fields §5.5 specifies exist
+      in the logs and nowhere a trace viewer can follow them across a job.
 - [ ] Sizing guidance below is a starting guess, never validated by a load test, so the
       vCPU/RAM figures and the `tasks_per_worker_target` the autoscaler would use are
       unverified.
-- [ ] `THUMBNAIL_PX` is hard-coded here while `vs-classify` and `vs-adapt` each have their
-      own source for the same number.
 - [ ] The `page` role takes `known_doc_type` from the caller's `JobSpec` and nowhere
       else, so the cross-page smoothing `vs-classify` provides for happens only when the
       caller already knew the type. Deliberate, and argued at `PageHandler::classify`:
@@ -192,6 +190,24 @@ Error classes: too many failed pages, unparseable page results, stitch errors (n
 pages / mixed runs), extraction schema violations and graph invariant violations are
 permanent; model, embedder, ontology-store, vector-store, blob and Postgres failures are
 transient. `give_up` sets the job to `Failed` with the error.
+
+## Metrics
+
+Served per `vs-infra`'s telemetry section; every series also carries
+`service="vs-worker-<role>"`.
+
+| Series | Kind | Notes |
+|---|---|---|
+| `worker_tasks_total{role,outcome}` | counter | `outcome` partitions every way a delivery leaves the loop: `ok`, `retried`, `permanent_error`, `attempts_exhausted`, `no_result`. A redelivered task is counted again when it comes back, which is the point — redelivery is the cost being measured. |
+| `worker_task_duration_seconds{role}` | histogram | one attempt, handler only |
+| `worker_tasks_in_flight{role}` | gauge | against `max_in_flight`; this is what the fleet autoscaler's `tasks_per_worker_target` is a target for. Released on panic as well as on return. |
+
+`no_result` is the give-up path for a task that exhausted its deliveries without any
+handler ever returning — a crash or a hang on every attempt. It is the one outcome that
+says the worker, not the document, is at fault.
+
+The steps a `page` worker runs report themselves: see
+[`vs-dag`](../vs-dag/README.md)'s and [`vs-models`](../vs-models/SPEC.md)'s metrics.
 
 ## Sizing guidance (to validate in load tests)
 

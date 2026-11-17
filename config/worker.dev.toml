@@ -58,4 +58,6 @@ dag_list_refresh_s = 60                # how long a worker trusts its cached act
 
 [telemetry]
 # otlp_endpoint: none locally
+# metrics_addr: unset, so nothing binds a port. The recorder is still installed, so
+# `vs-api` serves the same series on its own /metrics.
 json_logs = false
