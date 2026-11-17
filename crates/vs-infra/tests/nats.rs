@@ -23,6 +23,7 @@ fn ingest_task(job_id: uuid::Uuid) -> Task {
             source_uri: "s3://visual-suite/originals/it/x".into(),
             external_ref: None,
             doc_type: None,
+            owner: None,
         },
     }
 }

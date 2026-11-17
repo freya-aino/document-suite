@@ -53,7 +53,7 @@ train → DAG list → prod upload → classification → selected DAG
 | `vs-adapt run` | dataset manifest, candidates, `--models`, render child | `out/pages/<doc>/<page>.png`, `out/results/<doc>/<page>/<dag>.json` (page result per (page, DAG)) + `out/runs.jsonl` (latency, GPU-seconds, tokens) |
 | `vs-adapt score` | `runs.jsonl`, ground truth (optional), `--judge-model` (optional) | `evals.jsonl` (`PageEval` per page × DAG) |
 | `vs-adapt select` | evals, objective, candidates, `--current` (optional) | `dag-list.json` + `report.md` |
-| `vs-adapt promote` | dag-list.json, `--api`, `--tenant` | uploads as `candidate` via `POST /v1/dag-lists` (headers `X-VS-Tenant`, `X-VS-Admin: 1`; activation stays a manual step) |
+| `vs-adapt promote` | dag-list.json, `--api`, `--token` (`VS_API_TOKEN`) | uploads as `candidate` via `POST /v1/dag-lists` as a bearer token holding the admin role; the organization is the token's, not a flag (activation stays a manual step) |
 
 ```
 vs-adapt generate --search-space config/search-space.example.json --out candidates.json [--models config/models.example.toml]

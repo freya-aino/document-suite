@@ -11,8 +11,8 @@ use std::time::Instant;
 
 use axum::{
     body::Body,
-    extract::{DefaultBodyLimit, FromRequest, FromRequestParts, MatchedPath, Multipart, Path, Query, Request, State},
-    http::{header, request::Parts, HeaderMap, HeaderValue, StatusCode},
+    extract::{DefaultBodyLimit, FromRequest, MatchedPath, Multipart, Path, Query, Request, State},
+    http::{header, HeaderMap, HeaderValue, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -28,13 +28,16 @@ use sha2::{Digest, Sha256};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use tokio::io::AsyncWriteExt;
 
-use vs_core::{HashKey, JobSpec, JobState, LanguageTag, Priority, Profile, RunId, Task, TenantId};
+use vs_core::{HashKey, JobSpec, JobState, LanguageTag, Owner, Priority, Profile, RunId, Task, TenantId};
 use vs_dag::StepRegistry;
 use vs_infra::blob::{key_from_uri, keys, BlobError, BlobStore};
 use vs_infra::config::ApiConfig;
 use vs_infra::queue::{Lane, NatsBus, Role, TaskBus};
 use vs_infra::ObjectBlobStore;
 use vs_vault::ops::{NewJob, Ops};
+
+mod auth;
+use auth::{Admin, Auth, Caller, Tenant};
 
 /// Documents per `POST /v1/batches`.
 const MAX_BATCH_DOCUMENTS: usize = 10_000;
@@ -66,6 +69,8 @@ enum Cmd {
 #[derive(Clone)]
 struct AppState {
     ops: Arc<Ops>,
+    /// Token verification. Every route but `/healthz` and `/readyz` goes through it.
+    auth: Arc<Auth>,
     bus: Arc<dyn TaskBus>,
     blob: Arc<dyn BlobStore>,
     bucket: String,
@@ -112,45 +117,6 @@ fn internal(e: impl std::fmt::Display) -> ApiError {
     (StatusCode::INTERNAL_SERVER_ERROR, "internal error".into())
 }
 
-/// Calling tenant.
-///
-/// PLACEHOLDER until the auth decision (mTLS or JWT from the service-api, SPEC.md):
-/// read from the `X-VS-Tenant` header, which any caller can set. Do not expose the API
-/// beyond the trusted network in this state.
-struct Tenant(TenantId);
-
-impl<S: Send + Sync> FromRequestParts<S> for Tenant {
-    type Rejection = ApiError;
-
-    async fn from_request_parts(parts: &mut Parts, _: &S) -> Result<Self, Self::Rejection> {
-        let t = parts
-            .headers
-            .get("x-vs-tenant")
-            .and_then(|v| v.to_str().ok())
-            .map(str::trim)
-            .filter(|t| !t.is_empty() && t.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'))
-            .ok_or((StatusCode::UNAUTHORIZED, "missing or invalid X-VS-Tenant".to_string()))?;
-        Ok(Tenant(TenantId(t.to_string())))
-    }
-}
-
-/// Admin routes (DAG lists).
-///
-/// PLACEHOLDER like `Tenant`: the `X-VS-Admin: 1` header, which any caller can set, until
-/// roles come from the auth token.
-struct Admin;
-
-impl<S: Send + Sync> FromRequestParts<S> for Admin {
-    type Rejection = ApiError;
-
-    async fn from_request_parts(parts: &mut Parts, _: &S) -> Result<Self, Self::Rejection> {
-        match parts.headers.get("x-vs-admin").and_then(|v| v.to_str().ok()).map(str::trim) {
-            Some("1") => Ok(Admin),
-            _ => Err((StatusCode::FORBIDDEN, "admin route: X-VS-Admin: 1 required".into())),
-        }
-    }
-}
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
@@ -162,6 +128,11 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
     let cfg = vs_infra::Config::load(&args.config)?;
+    // Required, and read before anything else is built: there is no configuration in
+    // which this binary serves requests without verifying tokens.
+    let auth_cfg = cfg.auth.clone().ok_or_else(|| {
+        anyhow::anyhow!("vs-api needs an [auth] section in {}: issuer and audience of the Keycloak realm", args.config.display())
+    })?;
     // One recorder per process, installed by `telemetry::init`; this binary renders it
     // on its own `/metrics` route rather than having the exporter bind a second port.
     let telemetry = vs_infra::telemetry::init(&cfg.telemetry, "vs-api")?;
@@ -173,6 +144,8 @@ async fn main() -> anyhow::Result<()> {
     }
     let pool = PgPoolOptions::new().max_connections(cfg.postgres.max_connections).connect_with(pg).await?;
     vs_vault::check_migrations(&pool).await?;
+    let auth = Auth::discover(auth_cfg).await?;
+    auth.spawn_refresher();
     let nats = NatsBus::connect(&cfg.bus.nats_url).await?;
     nats.ensure_topology().await?;
 
@@ -186,6 +159,7 @@ async fn main() -> anyhow::Result<()> {
 
     let state = AppState {
         ops: Arc::new(Ops { pool }),
+        auth,
         bus: Arc::new(nats),
         blob: Arc::new(ObjectBlobStore::s3(&cfg.blob)?),
         bucket: cfg.blob.bucket.clone(),
@@ -218,7 +192,16 @@ fn router(state: AppState) -> Router {
     // Body limit for uploads: the handler enforces `max_upload_bytes` on the file part
     // itself; the slack covers the other multipart parts.
     let upload_limit = usize::try_from(state.api.max_upload_bytes.saturating_add(1024 * 1024)).unwrap_or(usize::MAX);
-    Router::new()
+
+    // Everything that reads or writes a tenant's work, plus `/metrics`: behind one
+    // authentication layer rather than per-handler checks, so adding a route cannot
+    // quietly add an unauthenticated one.
+    //
+    // `/metrics` is in here because this API is reachable from outside, where an
+    // unauthenticated metrics endpoint publishes request volumes, upload sizes and error
+    // rates to anyone who asks. A Prometheus scrape authenticates as a Keycloak service
+    // account holding the admin role — see SPEC.md.
+    let protected = Router::new()
         .route("/v1/documents", post(create_document).layer(DefaultBodyLimit::max(upload_limit)))
         .route("/v1/batches", post(create_batch).layer(DefaultBodyLimit::max(16 * 1024 * 1024)))
         .route("/v1/jobs/{job_id}", get(get_job))
@@ -227,11 +210,14 @@ fn router(state: AppState) -> Router {
         .route("/v1/documents/{document_hk}/pages/{page_no}", get(get_page))
         .route("/v1/dag-lists", get(list_dag_lists).post(upload_dag_list))
         .route("/v1/dag-lists/{version}/activate", post(activate_dag_list))
-        .route("/healthz", get(|| async { "ok" }))
-        .route("/readyz", get(readyz))
         .route("/metrics", get(metrics_handler))
-        .layer(middleware::from_fn(record_metrics))
-        .with_state(state)
+        .route_layer(middleware::from_fn_with_state(state.auth.clone(), auth::authenticate));
+
+    // Liveness and readiness only. A load balancer cannot hold a token, and neither
+    // says anything about a tenant.
+    let public = Router::new().route("/healthz", get(|| async { "ok" })).route("/readyz", get(readyz));
+
+    protected.merge(public).layer(middleware::from_fn(record_metrics)).with_state(state)
 }
 
 // ───────────── metrics ─────────────
@@ -240,7 +226,17 @@ async fn record_metrics(req: Request, next: Next) -> Response {
     let start = Instant::now();
     let method = req.method().to_string();
     let path = req.extensions().get::<MatchedPath>().map(|p| p.as_str().to_string()).unwrap_or_else(|| "unmatched".into());
-    let res = next.run(req).await;
+    // The span is created here, outside the authentication layer, with the caller's
+    // fields empty: `auth::authenticate` fills them in once it knows who called, and
+    // every log line under the request then carries the organization and the person.
+    let span = tracing::info_span!(
+        "http_request",
+        method = %method,
+        path = %path,
+        tenant = tracing::field::Empty,
+        subject = tracing::field::Empty,
+    );
+    let res = tracing::Instrument::instrument(next.run(req), span).await;
     let status = res.status().as_u16().to_string();
     let labels = [("method", method), ("path", path), ("status", status)];
     metrics::counter!("vs_api_http_requests_total", &labels).increment(1);
@@ -248,7 +244,7 @@ async fn record_metrics(req: Request, next: Next) -> Response {
     res
 }
 
-async fn metrics_handler(State(s): State<AppState>) -> Response {
+async fn metrics_handler(State(s): State<AppState>, _: Admin) -> Response {
     ([(header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")], s.metrics.render()).into_response()
 }
 
@@ -358,9 +354,10 @@ async fn existing_run(s: &AppState, tenant: &TenantId, document_hk: &HashKey) ->
     }))
 }
 
-fn spec_from(tenant: TenantId, opts: &UploadOptions, source_uri: String) -> JobSpec {
+fn spec_from(tenant: TenantId, owner: Owner, opts: &UploadOptions, source_uri: String) -> JobSpec {
     JobSpec {
         tenant,
+        owner: Some(owner),
         language: opts.language.clone(),
         priority: opts.priority,
         profile: opts.profile,
@@ -374,10 +371,11 @@ fn spec_from(tenant: TenantId, opts: &UploadOptions, source_uri: String) -> JobS
 /// `POST /v1/documents`: multipart (`file` + `options`) or JSON (`source_uri`).
 async fn create_document(
     State(s): State<AppState>,
-    Tenant(tenant): Tenant,
+    Caller(caller): Caller,
     Query(q): Query<DocumentQuery>,
     req: Request,
 ) -> Result<Response, Response> {
+    let tenant = caller.tenant.clone();
     let headers = req.headers().clone();
     let is_multipart = headers
         .get(header::CONTENT_TYPE)
@@ -397,6 +395,7 @@ async fn create_document(
 
     let s2 = s.clone();
     let tenant2 = tenant.clone();
+    let owner = caller.owner();
     idempotent(&s, &tenant, &headers, "documents", async move {
         let s = s2;
         let tenant = tenant2;
@@ -419,7 +418,7 @@ async fn create_document(
                         return Ok((StatusCode::OK, existing));
                     }
                 }
-                let accepted = enqueue(&s, spec_from(tenant, &opts, key), Some(document_hk)).await?;
+                let accepted = enqueue(&s, spec_from(tenant, owner.clone(), &opts, key), Some(document_hk)).await?;
                 Ok((StatusCode::ACCEPTED, accepted))
             }
             None => {
@@ -442,7 +441,7 @@ async fn create_document(
                     }
                     document_hk = Some(hk);
                 }
-                let accepted = enqueue(&s, spec_from(tenant, &opts, key), document_hk).await?;
+                let accepted = enqueue(&s, spec_from(tenant, owner.clone(), &opts, key), document_hk).await?;
                 Ok((StatusCode::ACCEPTED, accepted))
             }
         }
@@ -650,10 +649,11 @@ struct BatchAccepted {
 
 async fn create_batch(
     State(s): State<AppState>,
-    Tenant(tenant): Tenant,
+    Caller(caller): Caller,
     headers: HeaderMap,
     Json(req): Json<BatchRequest>,
 ) -> Result<Response, Response> {
+    let tenant = caller.tenant.clone();
     if req.documents.is_empty() {
         return Err((StatusCode::BAD_REQUEST, "documents must not be empty").into_response());
     }
@@ -675,6 +675,7 @@ async fn create_batch(
         }
         specs.push(JobSpec {
             tenant: tenant.clone(),
+            owner: Some(caller.owner()),
             language,
             priority: req.options.priority,
             profile: req.options.profile,
@@ -935,6 +936,8 @@ async fn activate_dag_list(
     Ok(Json(json!({ "version": version, "status": "active", "tenant_id": scope.map(|t| t.as_str()) })))
 }
 
+#[cfg(test)]
+mod auth_tests;
 #[cfg(test)]
 mod http_tests;
 

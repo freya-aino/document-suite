@@ -115,8 +115,11 @@ enum Cmd {
         /// API base URL, e.g. `http://localhost:8080`.
         #[arg(long)]
         api: String,
-        #[arg(long, env = "VS_TENANT")]
-        tenant: String,
+        /// Keycloak access token holding the admin role. The tenant is **not** a flag
+        /// any more: the API takes the organization from this token, so a promotion
+        /// lands in the organization whose token was used.
+        #[arg(long, env = "VS_API_TOKEN", hide_env_values = true)]
+        token: String,
     },
 }
 
@@ -270,10 +273,10 @@ async fn main() -> anyhow::Result<()> {
             println!("wrote {} with {} rules and {}", out.display(), list.routing.rules.len(), report_path.display());
             Ok(())
         }
-        Cmd::Promote { dag_list, api, tenant } => {
+        Cmd::Promote { dag_list, api, token } => {
             let list: vs_router::DagList = read_json(&dag_list)?;
             let url = format!("{}/v1/dag-lists", api.trim_end_matches('/'));
-            let resp = reqwest::Client::new().post(&url).header("X-VS-Tenant", &tenant).header("X-VS-Admin", "1").json(&list).send().await?;
+            let resp = reqwest::Client::new().post(&url).bearer_auth(token.trim()).json(&list).send().await?;
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
             println!("{status} {url}\n{body}");

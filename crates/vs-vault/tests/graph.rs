@@ -42,6 +42,7 @@ fn spec() -> JobSpec {
         source_uri: "originals/t1/abc".into(),
         external_ref: None,
         doc_type: None,
+        owner: None,
     }
 }
 

@@ -42,7 +42,7 @@ config/             example models, worker, DAG list, search space, LiteLLM
 
 ## Status
 
-All 17 crates compile together and the workspace is green: **342 tests pass, none
+All 17 crates compile together and the workspace is green: **361 tests pass, none
 ignored** — the 32 integration tests run against a live Postgres, Qdrant, NATS and Garage,
 and one of them takes a document through the whole pipeline into both stores.
 `cargo clippy --workspace --all-targets -- -D warnings` is clean. No `todo!()` or
@@ -58,8 +58,16 @@ section lists what is left. The cross-cutting gaps:
   adaptively so grounding and verification are exercised rather than skipped. No VLM has
   ever parsed a page here, so extraction quality remains entirely unmeasured — see
   `vs-adapt`'s status.
-- **No auth.** `vs-api` takes the tenant from `X-VS-Tenant` and admin rights from
-  `X-VS-Admin`, both of which any caller can set. Keep it on a trusted network.
+- **Authentication is real; read scoping inside an organization is not.** `vs-api`
+  verifies Keycloak access tokens against the realm's published keys, and the tenant is
+  the organization claim of a verified token — not a header, which is what it used to be.
+  The process refuses to start without `[auth]`, and one middleware covers every route
+  but the health probes, so there is no unauthenticated way in. What is *not* enforced is
+  access inside an organization: every member can read every document it owns, although
+  the identity model says access should be the person's. The job records who asked
+  (`JobSpec::owner`), so the data is there; enforcing it on documents needs ownership
+  columns in the vault and a migration — see `vs-api`'s status for why it is not
+  half-done.
 - **Telemetry is wired but unproven in a deployment.** One recorder per process, served
   on `telemetry.metrics_addr` for a worker and `/metrics` for `vs-api`, with the series
   each component's spec names; spans batch-export to `telemetry.otlp_endpoint` over
@@ -136,19 +144,24 @@ VS_ROLE=page   ./target/debug/vs-worker &   # needs model endpoints in config/mo
 VS_ROLE=doc    ./target/debug/vs-worker &   # needs model endpoints + the graph/vector store
 curl -X PUT --upload-file sample.pdf --aws-sigv4 "aws:amz:$AWS_REGION:s3" \
   --user "$AWS_ACCESS_KEY_ID:$AWS_SECRET_ACCESS_KEY" "$AWS_ENDPOINT/visual-suite/inbox/t1/sample.pdf"
-curl -X POST 127.0.0.1:8080/v1/documents -H 'x-vs-tenant: t1' -H 'content-type: application/json' \
+# Every request carries a Keycloak access token; the tenant is its organization claim.
+TOKEN=$(curl -s -X POST "$KC/realms/koki/protocol/openid-connect/token" \
+  -d grant_type=client_credentials -d client_id=vs-api -d client_secret="$KC_SECRET" \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["access_token"])')
+curl -X POST 127.0.0.1:8080/v1/documents -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' \
   -d '{"language":"en","source_uri":"inbox/t1/sample.pdf"}'
 # `doc_type` is optional and trusted over anything inferred:
 #   -d '{"language":"en","source_uri":"...","doc_type":"invoice"}'
-curl 127.0.0.1:8080/v1/jobs/<job_id> -H 'x-vs-tenant: t1'
+curl 127.0.0.1:8080/v1/jobs/<job_id> -H "authorization: Bearer $TOKEN"
 ```
 
-`X-VS-Tenant` is a development stand-in for auth — see
-[`crates/vs-api/SPEC.md`](crates/vs-api/SPEC.md).
+`vs-api` needs a Keycloak to start: `config/worker.dev.toml`'s `[auth]` section carries
+the `docker run` line for a local one and the realm it expects. What each request is
+verified against is in [`crates/vs-api/SPEC.md`](crates/vs-api/SPEC.md).
 
 ### Tests
 
-`cargo test --workspace` runs the 310 tests that need nothing (PDF tests need
+`cargo test --workspace` runs the 329 tests that need nothing (PDF tests need
 `PDFIUM_DYNAMIC_LIB_PATH`, set by devenv). The other 32 touch a real store and are
 `#[ignore]`d; with `devenv up` running:
 

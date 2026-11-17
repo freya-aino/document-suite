@@ -10,7 +10,7 @@ pub mod provenance;
 pub use block::{Block, BlockContent, BlockKind, PageResult};
 pub use geometry::BBox;
 pub use ids::{content_sha256, split_ref, HashKey, LanguageTag, RunId, TenantId};
-pub use job::{JobSpec, JobState, Priority, Profile, Task};
+pub use job::{JobSpec, JobState, Owner, Priority, Profile, Task};
 pub use page::{ClassifierTier, DocType, PageProfile, DocTypeSource, DocumentType};
 pub use provenance::{Evidence, Provenance};
 

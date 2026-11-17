@@ -310,6 +310,13 @@ fn spec(source_uri: String) -> JobSpec {
         source_uri,
         external_ref: Some("pipeline-test".into()),
         doc_type: None,
+        // A real owner, so the caller the API verified travels the whole way: the spec is
+        // re-serialized onto the bus between all three roles and into `ops.jobs.spec`.
+        owner: Some(vs_core::Owner {
+            subject: "person-1".into(),
+            department: Some("dept-a".into()),
+            workspaces: vec!["ws-red".into()],
+        }),
     }
 }
 

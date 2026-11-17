@@ -22,6 +22,23 @@ pub enum Profile {
     Fast,
 }
 
+/// Who asked for a job, from the verified token — never from a request body.
+///
+/// The isolation boundary is the organization, which is the `tenant` and is hashed into
+/// every key (`HashKey::document`). This is the rest of the caller's identity, recorded
+/// so that read scoping *within* an organization can be enforced later without
+/// re-plumbing: a job already knows which person, department and workspaces it came
+/// from. Nothing enforces on it yet — see `vs-api/SPEC.md`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Owner {
+    /// Keycloak `sub`: stable, and not an email address.
+    pub subject: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub department: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub workspaces: Vec<String>,
+}
+
 /// Per-document request accepted by the API.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct JobSpec {
@@ -48,6 +65,11 @@ pub struct JobSpec {
     /// what page 1 concluded.
     #[serde(default)]
     pub doc_type: Option<DocType>,
+    /// The authenticated caller. `None` only for specs written before authentication
+    /// existed, which is why it is `#[serde(default)]`: `ops.jobs.spec` is JSONB and a
+    /// job queued by the previous build must still deserialize.
+    #[serde(default)]
+    pub owner: Option<Owner>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

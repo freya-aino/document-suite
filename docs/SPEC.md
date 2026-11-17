@@ -1,6 +1,6 @@
 # Visual Suite — System Specification
 
-Version: 0.5 · Status: implemented; one document verified end to end against live stores, with a fake model tier · Date: 2026-11-17
+Version: 0.6 · Status: implemented; one document verified end to end against live stores, with a fake model tier; authenticated against Keycloak · Date: 2026-11-17
 
 This is the top-level spec: purpose, architecture, the component map, the cross-cutting
 contracts, and the decisions. Each component has its own `SPEC.md` next to its code
@@ -203,9 +203,14 @@ same process are joinable (`vs-api`, `vs-worker-page`, …).
 
 ### 5.6 Security
 
-Tenancy is part of every hash key, and the tenant never comes from a request body.
-Auth and tenant scoping: [`vs-api`](../crates/vs-api/SPEC.md) — **currently a header
-placeholder**. Network isolation and the no-inbound-ports rule:
+Tenancy is part of every hash key, and the tenant never comes from a request body — nor
+from a header. **The tenant is the organization**, taken from a verified Keycloak token
+(D11), which makes it the isolation boundary: every document and entity key hashes it,
+every blob key is prefixed by it, and the Qdrant collections are partitioned on it. The
+rest of the caller's identity — person, department, workspaces — is recorded on the job
+(`JobSpec::owner`) but is **not yet enforced**: inside one organization, every member can
+read every document. Auth, the checks each request is held to, and that gap:
+[`vs-api`](../crates/vs-api/SPEC.md). Network isolation and the no-inbound-ports rule:
 [`deploy/firecracker`](../deploy/firecracker/SPEC.md). Secrets from the environment, and
 encryption at rest: [`vs-infra`](../crates/vs-infra/SPEC.md).
 
@@ -222,6 +227,8 @@ encryption at rest: [`vs-infra`](../crates/vs-infra/SPEC.md).
 | D7 | Structured model output via guided decoding (JSON schema) | Parseable output, fewer hallucinated formats |
 | D8 | Large intermediate artefacts (page images, page results) live in the object store; queues carry references only | Small messages, no shared FS in Firecracker |
 | D9 | Vectors live in a dedicated vector store (Qdrant) behind a `VectorStore` trait, keyed by tenant and run | The vector store stays swappable; the graph stays in SQL next to its provenance |
+| D10 | Authentication is Keycloak (OIDC) access tokens verified in `vs-api`, against the realm's published keys | The SSO that already holds the identity model; verifying a signature locally keeps Keycloak off the path of every request, unlike introspection |
+| D11 | **The tenant is the organization**, from a verified claim | The isolation boundary has to be the thing that `TenantId` already is: key material in every hash key, blob prefix and vector partition. Organization also makes one corpus per company, so entity resolution and duplicate detection work across colleagues — which a per-person tenant would break, since the same file uploaded twice would be two documents with two keys. Person, department and workspace are therefore read scoping *within* a tenant, not key material |
 
 **D6/D9 replaced the original HelixDB decisions.** HelixDB held the current graph
 projection and the vectors. It has been removed in favour of Postgres (graph) and Qdrant
@@ -262,7 +269,14 @@ Where the rest went: A1, A2, A7 → [`vs-models`](../crates/vs-models/SPEC.md) a
 4. Retention rules for originals and page images →
    [`vs-infra`](../crates/vs-infra/SPEC.md).
 
-Resolved: what the RAG service needs from the graph store. It now queries Postgres and
+5. Whether read scoping inside an organization is per person, per department or per
+   workspace, and what a shared workspace means for a document — the question that
+   decides the ownership columns the vault would need →
+   [`vs-api`](../crates/vs-api/SPEC.md).
+
+Resolved: the authentication design. It was "mTLS or a JWT from your service-api — to be
+decided"; it is now Keycloak tokens verified in `vs-api`, with the organization as the
+tenant (D10, D11). Also resolved: what the RAG service needs from the graph store. It now queries Postgres and
 Qdrant directly, and the contract it reads is [`docs/STORES.md`](STORES.md) — key
 formulas, all eight retrieval patterns as SQL, the Qdrant collection and payload layout,
 and the responsibilities that moved to the caller when the compiled queries went away.

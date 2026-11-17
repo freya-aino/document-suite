@@ -39,6 +39,25 @@ max_upload_bytes = 2147483648      # 2 GiB; multipart uploads above this get 413
 interactive_max_pending = 1000     # 429 for interactive requests above this lane backlog
 # scratch_dir = "/scratch"         # upload spool while hashing; default: system temp dir
 
+[auth]
+# Required by vs-api: it refuses to start without this section. Keycloak realm issuer,
+# matched against the token's `iss` exactly and used for OIDC discovery.
+issuer = "https://sso.example.org/realms/koki"
+# Accepted `aud` values. Needs an audience mapper on the vs-api client in Keycloak —
+# without one, Keycloak mints `aud: account` and every request is refused.
+audience = ["vs-api"]
+# Client whose `resource_access.<client_id>.roles` are read as well as the realm roles.
+client_id = "vs-api"
+# Claim holding the organization, which becomes the tenant: the isolation boundary.
+# A dotted path reads a nested claim (`koki.org`).
+org_claim = "organization"
+department_claim = "department"       # recorded on the job; not yet enforced
+workspaces_claim = "workspaces"      # recorded on the job; not yet enforced
+# Realm or client role required by /v1/dag-lists and /metrics.
+admin_role = "vs-admin"
+jwks_refresh_s = 300                 # how long a fetched JWKS is reused
+leeway_s = 30                        # clock-skew allowance on exp and nbf
+
 [classify]
 born_digital_min_chars = 50
 born_digital_min_coverage = 0.8

@@ -15,6 +15,11 @@ pub struct Config {
     /// `vs-api` only.
     #[serde(default)]
     pub api: ApiConfig,
+    /// `vs-api` only, and **required** by it: the binary refuses to start without an
+    /// `[auth]` section, so there is no configuration in which the API serves requests
+    /// without verifying tokens. Optional here because the worker roles never read it.
+    #[serde(default)]
+    pub auth: Option<AuthConfig>,
     /// Passed through to `vs-classify` (`ClassifyConfig`).
     #[serde(default = "empty_table")]
     pub classify: toml::Value,
@@ -184,6 +189,83 @@ pub struct ApiConfig {
 impl Default for ApiConfig {
     fn default() -> Self {
         Self { max_upload_bytes: 2 * 1024 * 1024 * 1024, interactive_max_pending: 1000, scratch_dir: None }
+    }
+}
+
+/// Keycloak (OIDC) token verification for `vs-api`.
+///
+/// `issuer` and `audience` have no defaults: an audience that defaulted to "accept
+/// anything" would make every other check here decorative, since Keycloak hands the same
+/// realm's tokens to every client in it. The audience needs an audience mapper on the
+/// `vs-api` client in Keycloak, which is what puts `vs-api` in the token's `aud`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AuthConfig {
+    /// Realm issuer URL, matched against the token's `iss` exactly, and the base for
+    /// OIDC discovery (`<issuer>/.well-known/openid-configuration`).
+    pub issuer: String,
+    /// Accepted `aud` values. Must be non-empty.
+    pub audience: Vec<String>,
+    /// Keycloak client whose `resource_access.<client_id>.roles` are read in addition to
+    /// the realm roles. `None`: realm roles only.
+    #[serde(default)]
+    pub client_id: Option<String>,
+    /// Claim holding the organization that becomes the `TenantId` — the isolation
+    /// boundary. Dotted paths index nested objects (`koki.org`).
+    #[serde(default = "org_claim")]
+    pub org_claim: String,
+    /// Claim holding the caller's department. Recorded on the job, not yet enforced.
+    #[serde(default = "department_claim")]
+    pub department_claim: String,
+    /// Claim holding the caller's workspaces: an array of strings, or one
+    /// space-separated string. Recorded on the job, not yet enforced.
+    #[serde(default = "workspaces_claim")]
+    pub workspaces_claim: String,
+    /// Realm or client role required by the admin routes and `/metrics`.
+    #[serde(default = "admin_role")]
+    pub admin_role: String,
+    /// How long a fetched JWKS is served from cache. Default 300 s.
+    #[serde(default = "jwks_refresh_s")]
+    pub jwks_refresh_s: u64,
+    /// Clock-skew allowance on `exp` and `nbf`, in seconds. Default 30.
+    #[serde(default = "leeway_s")]
+    pub leeway_s: u64,
+}
+
+fn org_claim() -> String {
+    "organization".into()
+}
+fn department_claim() -> String {
+    "department".into()
+}
+fn workspaces_claim() -> String {
+    "workspaces".into()
+}
+fn admin_role() -> String {
+    "vs-admin".into()
+}
+fn jwks_refresh_s() -> u64 {
+    300
+}
+fn leeway_s() -> u64 {
+    30
+}
+
+impl AuthConfig {
+    /// Rejects a section that would weaken verification rather than failing loudly.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if self.issuer.trim().is_empty() {
+            anyhow::bail!("auth.issuer must be set");
+        }
+        if !self.issuer.starts_with("https://") && !self.issuer.starts_with("http://") {
+            anyhow::bail!("auth.issuer must be an absolute http(s) URL");
+        }
+        if self.audience.iter().all(|a| a.trim().is_empty()) {
+            anyhow::bail!("auth.audience must list at least one non-empty audience");
+        }
+        if self.admin_role.trim().is_empty() {
+            anyhow::bail!("auth.admin_role must be set");
+        }
+        Ok(())
     }
 }
 

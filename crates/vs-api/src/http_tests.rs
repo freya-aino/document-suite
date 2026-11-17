@@ -8,7 +8,10 @@
 //! internals.
 //!
 //! The blob store is `object_store`'s in-memory one and the bus is a fake whose backlog
-//! the test sets, because the questions here are about the API's own decisions. Needs
+//! the test sets, because the questions here are about the API's own decisions. The
+//! tokens, though, are real: these requests carry a signed token for organization `t1`
+//! and are verified by the same code a deployment runs, so the tenant they act on is the
+//! one the token says. What authentication *refuses* is in `auth_tests.rs`. Needs
 //! Postgres: `cargo test -p vs-api -- --ignored`.
 
 use std::sync::{Arc, Mutex};
@@ -26,15 +29,24 @@ use vs_infra::queue::{Delivery, Exhausted, Lane, QueueError, Role, TaskBus};
 use vs_infra::{BlobStore, ObjectBlobStore};
 use vs_vault::ops::Ops;
 
+use super::auth_tests::{admin_claims, claims, token, verifier, ORG, SUBJECT};
 use super::{router, ApiConfig, AppState};
 
-const TENANT: &str = "t1";
+/// The organization in the test token, which is therefore the tenant.
+const TENANT: &str = ORG;
 const BUCKET: &str = "visual-suite";
 
 /// Records publishes and reports whatever backlog the test asked for.
-struct FakeBus {
+pub(crate) struct FakeBus {
     published: Mutex<Vec<Task>>,
     pending: u64,
+}
+
+impl FakeBus {
+    /// A bus with no backlog, for the tests that never look at it.
+    pub(crate) fn idle() -> Self {
+        Self { published: Mutex::new(Vec::new()), pending: 0 }
+    }
 }
 
 #[async_trait]
@@ -66,6 +78,7 @@ async fn state(pool: PgPool, pending: u64) -> (AppState, Arc<FakeBus>) {
     }
     let s = AppState {
         ops: Arc::new(Ops { pool }),
+        auth: verifier(),
         bus: bus.clone(),
         blob,
         bucket: BUCKET.into(),
@@ -91,7 +104,7 @@ fn post(path: &str, body: Value) -> Request<Body> {
         .method("POST")
         .uri(path)
         .header("content-type", "application/json")
-        .header("x-vs-tenant", TENANT)
+        .header("authorization", format!("Bearer {}", token(&claims())))
         .body(Body::from(body.to_string()))
         .expect("request")
 }
@@ -118,6 +131,15 @@ async fn a_replayed_request_returns_the_first_answer_and_creates_no_second_job(p
 
     let jobs: i64 = sqlx::query_scalar("SELECT count(*) FROM ops.jobs").fetch_one(&pool).await.expect("count jobs");
     assert_eq!(jobs, 1, "the replay created a second job");
+
+    // The job records the person the token named, and the organization it is keyed
+    // under. Enforcing read scoping within an organization is a later pass, but the only
+    // place that identity exists is this request, so it is recorded now rather than
+    // reconstructed later from nothing.
+    let (tenant, subject): (String, Option<String>) =
+        sqlx::query_as("SELECT spec->>'tenant', spec->'owner'->>'subject' FROM ops.jobs").fetch_one(&pool).await.expect("owner");
+    assert_eq!(tenant, TENANT, "the tenant must be the token's organization");
+    assert_eq!(subject.as_deref(), Some(SUBJECT), "the job does not say who asked for it");
     assert_eq!(bus.published.lock().expect("lock").len(), 1, "the replay published a second ingest task");
 
     // A different key is a different request, even with an identical body.
@@ -258,8 +280,7 @@ async fn activating_a_dag_list_leaves_exactly_one_active_in_the_scope(pool: PgPo
         Request::builder()
             .method("POST")
             .uri(path)
-            .header("x-vs-tenant", TENANT)
-            .header("x-vs-admin", "1")
+            .header("authorization", format!("Bearer {}", token(&admin_claims())))
             .body(Body::empty())
             .expect("request")
     };
@@ -284,12 +305,14 @@ async fn activating_a_dag_list_leaves_exactly_one_active_in_the_scope(pool: PgPo
     assert_eq!(send(&s, admin("/v1/dag-lists/nope/activate")).await.0, StatusCode::NOT_FOUND);
     assert_eq!(send(&s, admin("/v1/dag-lists/v1/activate?global=true")).await.0, StatusCode::NOT_FOUND);
 
-    // Without the admin header it is not an administrative route at all.
+    // A token without the admin role does not reach an administrative route, and the
+    // activation above stands: a 403 must not have changed anything.
     let not_admin = Request::builder()
         .method("POST")
         .uri("/v1/dag-lists/v1/activate")
-        .header("x-vs-tenant", TENANT)
+        .header("authorization", format!("Bearer {}", token(&claims())))
         .body(Body::empty())
         .expect("request");
     assert_eq!(send(&s, not_admin).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(ops.active_dag_list_version(&tenant).await.expect("version").as_deref(), Some("v2"));
 }
