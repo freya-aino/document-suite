@@ -43,3 +43,4 @@ uuid.workspace = true
 
 [dev-dependencies]
 chrono.workspace = true
+object_store.workspace = true

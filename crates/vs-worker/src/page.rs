@@ -7,10 +7,11 @@ use async_trait::async_trait;
 use bytes::Bytes;
 
 use vs_classify::{combine, tier0, ClassifyConfig, PageSignals, VisionClassifier};
-use vs_core::{Block, DocType, HashKey, JobSpec, PageProfile, PageResult, RunId, Task};
+use vs_core::{Block, BlockContent, DocType, HashKey, JobSpec, PageProfile, PageResult, RunId, Task};
 use vs_dag::{Artifact, BlockDraft, ExecError, ExecOutput, Executor, PageImage, StepContext, StepError, StepRegistry, TextLayer};
 use vs_infra::blob::{key_from_uri, keys, BlobError, BlobStore};
 use vs_infra::queue::{Lane, Role, TaskBus};
+use vs_models::steps::crop_png;
 use vs_vault::ops::{Ops, PageOutcome, PageProgress};
 use vs_vault::VaultWriter;
 
@@ -124,7 +125,8 @@ impl PageHandler {
         });
         let out = Executor::new(&self.steps).run(sel.dag, &ctx, image, Artifact::TextLayer(text_layer)).await.map_err(exec_error)?;
 
-        let blocks = drafts_to_blocks(out, &ctx.page_hk, &t.run_id);
+        let mut blocks = drafts_to_blocks(out, &ctx.page_hk, &t.run_id);
+        upload_crops(self.blob.as_ref(), &mut blocks, &image_bytes, &ctx.page_hk, &t.run_id).await?;
         let result = page_result(t.document_hk.clone(), t.page_no, t.run_id, profile, dag_ref.clone(), width, height, blocks);
         let body = serde_json::to_vec(&result)?;
         self.blob.put(&keys::page_result(doc, &t.run_id.to_string(), t.page_no), body.into(), "application/json").await?;
@@ -231,6 +233,61 @@ fn exec_error(e: ExecError) -> TaskError {
     }
 }
 
+/// Stores a page crop for every figure and chart block, and points the block at it.
+///
+/// `figure.crop` mints `crop://<page_hk>/<node>/<n>.png` for the bytes it hands down
+/// the DAG, and those bytes live only for the length of the run — so what reached
+/// `sat_block_content` and the graph was a URI in a scheme nothing serves. Every
+/// stored figure carried a pointer no reader could follow, with `keys::crop` sitting
+/// unused in `vs-infra`. This is that upload.
+///
+/// The crop is cut from the block's own bbox, which is the padded one `figure.crop`
+/// chose where that step ran. Blocks produced by a whole-page parser never went
+/// through it and have no crop at all today; they get one here too.
+///
+/// A failure is the page's failure: a figure block whose `crop_uri` is a lie is
+/// worse than a page that retries.
+pub async fn upload_crops(
+    blob: &dyn BlobStore,
+    blocks: &mut [Block],
+    page: &Bytes,
+    page_hk: &HashKey,
+    run_id: &RunId,
+) -> Result<(), TaskError> {
+    let wanted: Vec<(usize, vs_core::BBox)> = blocks
+        .iter()
+        .enumerate()
+        .filter(|(_, b)| matches!(b.content, BlockContent::Figure { .. } | BlockContent::Chart { .. }))
+        .map(|(i, b)| (i, b.bbox))
+        .collect();
+    if wanted.is_empty() {
+        return Ok(());
+    }
+    // Decoding a 200 dpi page and re-encoding crops is CPU work; keep it off the
+    // async executor, and decode once for all of them.
+    let bytes = page.clone();
+    let cropped = tokio::task::spawn_blocking(move || -> Result<Vec<(usize, Vec<u8>)>, StepError> {
+        let img = image::load_from_memory(&bytes).map_err(|e| StepError::Io(format!("decode page image: {e}")))?;
+        wanted
+            .into_iter()
+            .map(|(i, bbox)| crop_png(&img, &bbox, 0).map(|(png, _, _)| (i, png)))
+            .collect()
+    })
+    .await
+    .map_err(|e| TaskError::from(anyhow::anyhow!("crop task failed: {e}")))?
+    .map_err(|e| TaskError::permanent(anyhow::anyhow!("{e}")))?;
+
+    for (i, png) in cropped {
+        let key = keys::crop(page_hk.as_str(), &run_id.to_string(), blocks[i].index);
+        blob.put(&key, Bytes::from(png), "image/png").await.map_err(page_data)?;
+        match &mut blocks[i].content {
+            BlockContent::Figure { crop_uri, .. } | BlockContent::Chart { crop_uri, .. } => *crop_uri = key,
+            _ => unreachable!("only figure and chart blocks were selected"),
+        }
+    }
+    Ok(())
+}
+
 /// Turns executor output into final blocks: stable index by reading order, hash keys,
 /// provenance taken from the trace of the node that produced each draft.
 pub fn drafts_to_blocks(out: ExecOutput, page_hk: &HashKey, run_id: &RunId) -> Vec<Block> {
@@ -287,8 +344,78 @@ pub fn page_result(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vs_core::{BBox, BlockContent, BlockKind, Provenance};
+    use vs_core::{BBox, BlockKind, Provenance};
     use vs_dag::{NodeOutcome, NodeTrace};
+    use vs_infra::blob::ObjectBlobStore;
+
+    fn block(index: u32, kind: BlockKind, content: BlockContent) -> Block {
+        Block {
+            block_hk: HashKey::of(&[&index.to_string()]),
+            index,
+            kind,
+            bbox: BBox::new(0.1, 0.1, 0.6, 0.6).unwrap(),
+            reading_order: index,
+            content,
+            text: String::new(),
+            level: None,
+            confidence: 0.9,
+            provenance: Provenance {
+                run_id: RunId::new(),
+                dag_ref: "d@1".into(),
+                node_id: "n".into(),
+                step_kind: "figure.describe".into(),
+                model_ref: None,
+                prompt_ref: None,
+                params_hash: "0".into(),
+                started_at: chrono::Utc::now(),
+                duration_ms: 1,
+            },
+        }
+    }
+
+    /// A figure's `crop_uri` must name an object that exists.
+    ///
+    /// `figure.crop` hands `crop://…` down the DAG for bytes that are dropped when the
+    /// run ends, so every stored figure used to point into a scheme nothing serves.
+    #[tokio::test]
+    async fn figure_and_chart_crops_are_stored_and_addressable() {
+        let page = {
+            let img = image::DynamicImage::new_rgb8(200, 100);
+            let mut buf = std::io::Cursor::new(Vec::new());
+            img.write_to(&mut buf, image::ImageFormat::Png).unwrap();
+            Bytes::from(buf.into_inner())
+        };
+        let blob = ObjectBlobStore::new(Arc::new(object_store::memory::InMemory::new()));
+        let (page_hk, run) = (HashKey::of(&["p"]), RunId::new());
+        let mut blocks = vec![
+            block(0, BlockKind::Paragraph, BlockContent::Text { text: "x".into() }),
+            block(1, BlockKind::Figure, BlockContent::Figure { crop_uri: "crop://p/n/0.png".into(), description: None }),
+            block(
+                2,
+                BlockKind::Chart,
+                BlockContent::Chart { crop_uri: String::new(), data_html: None, description: None },
+            ),
+        ];
+        upload_crops(&blob, &mut blocks, &page, &page_hk, &run).await.unwrap();
+
+        // The paragraph is untouched.
+        assert_eq!(blocks[0].content, BlockContent::Text { text: "x".into() });
+        for i in [1, 2] {
+            let uri = match &blocks[i].content {
+                BlockContent::Figure { crop_uri, .. } | BlockContent::Chart { crop_uri, .. } => crop_uri.clone(),
+                other => panic!("{other:?}"),
+            };
+            assert_eq!(uri, keys::crop(page_hk.as_str(), &run.to_string(), blocks[i].index));
+            // The URI resolves, which is the whole point, and the bytes are a real PNG
+            // of the block's own region: 0.5 x 0.5 of a 200 x 100 page.
+            let bytes = blob.get(&uri).await.expect("crop must exist");
+            let img = image::load_from_memory(&bytes).unwrap();
+            assert_eq!((img.width(), img.height()), (100, 50));
+        }
+        // A page with nothing to crop neither decodes nor writes.
+        let mut text_only = vec![block(0, BlockKind::Paragraph, BlockContent::Empty)];
+        upload_crops(&blob, &mut text_only, &Bytes::from_static(b"not an image"), &page_hk, &run).await.unwrap();
+    }
 
     #[test]
     fn drafts_get_keys_and_provenance() {
