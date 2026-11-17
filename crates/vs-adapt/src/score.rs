@@ -368,7 +368,7 @@ pub fn pick_reference<'a>(ok_dags: &[(&'a str, &str)], labelled_mean: &HashMap<S
     let mut best: Option<(&str, f32)> = None;
     for (d, text) in ok_dags {
         let mean = ok_dags.iter().filter(|(o, _)| o != d).map(|(_, t)| metrics::text_similarity(text, t)).sum::<f32>() / (ok_dags.len().max(2) - 1) as f32;
-        if best.map_or(true, |(bd, bm)| mean > bm || (mean == bm && *d < bd)) {
+        if best.is_none_or(|(bd, bm)| mean > bm || (mean == bm && *d < bd)) {
             best = Some((d, mean));
         }
     }

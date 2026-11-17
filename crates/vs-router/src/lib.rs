@@ -20,9 +20,9 @@ pub struct Match {
 
 impl Match {
     pub fn matches(&self, p: &PageProfile) -> bool {
-        let flag = |cond: Option<bool>, v: bool| cond.map_or(true, |c| c == v);
-        self.languages.as_ref().map_or(true, |ls| ls.iter().any(|l| l.eq_ignore_ascii_case(&p.language.primary())))
-            && self.doc_types.as_ref().map_or(true, |ds| ds.contains(&p.doc_type))
+        let flag = |cond: Option<bool>, v: bool| cond.is_none_or(|c| c == v);
+        self.languages.as_ref().is_none_or(|ls| ls.iter().any(|l| l.eq_ignore_ascii_case(&p.language.primary())))
+            && self.doc_types.as_ref().is_none_or(|ds| ds.contains(&p.doc_type))
             && flag(self.born_digital, p.born_digital)
             && flag(self.has_handwriting, p.has_handwriting)
             && flag(self.has_images, p.has_images)

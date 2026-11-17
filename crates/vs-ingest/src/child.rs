@@ -113,7 +113,10 @@ pub fn serve(input: impl Read, output: impl Write) -> io::Result<()> {
     Ok(())
 }
 
-fn handle(req: Request) -> Result<(Reply, Vec<Arc<[u8]>>), IngestError> {
+/// A reply and the blobs that go out with it on the side channel.
+type Handled = (Reply, Vec<Arc<[u8]>>);
+
+fn handle(req: Request) -> Result<Handled, IngestError> {
     match req {
         Request::Count { path, format, max_pages } => {
             let r = open_rasterizer_file(format, &path, max_pages)?;

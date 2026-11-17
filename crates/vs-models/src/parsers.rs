@@ -953,7 +953,7 @@ fn html_elements(s: &str) -> Vec<HtmlElement<'_>> {
 }
 
 fn is_tag_boundary(lower: &str, idx: usize) -> bool {
-    lower[idx..].chars().next().map_or(true, |c| c.is_whitespace() || c == '>' || c == '/')
+    lower[idx..].chars().next().is_none_or(|c| c.is_whitespace() || c == '>' || c == '/')
 }
 
 fn parse_attrs(tag_src: &str) -> Vec<(String, &str)> {

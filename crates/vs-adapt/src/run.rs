@@ -161,7 +161,7 @@ impl Runner {
 
     /// Renders and classifies every page of the manifest (page images → `out/pages`).
     pub async fn prepare(&self, manifest: &[ManifestEntry]) -> anyhow::Result<Vec<PageCtx>> {
-        let docs: Vec<&ManifestEntry> = manifest.iter().filter(|m| self.cfg.split.as_ref().map_or(true, |s| &m.split == s)).collect();
+        let docs: Vec<&ManifestEntry> = manifest.iter().filter(|m| self.cfg.split.as_ref().is_none_or(|s| &m.split == s)).collect();
         let spool = self.cfg.out.join("spool");
         std::fs::create_dir_all(&spool)?;
         let mut paths = vec![];

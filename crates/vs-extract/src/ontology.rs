@@ -157,7 +157,7 @@ impl<S: OntologyStore> EmbeddingTypeNormalizer<S> {
         let mut best: Option<(f32, usize)> = None;
         for (k, (i, _)) in candidates.iter().enumerate() {
             let score = cosine(&vecs[0], &vecs[k + 1]);
-            if best.map_or(true, |(b, _)| score > b) {
+            if best.is_none_or(|(b, _)| score > b) {
                 best = Some((score, *i));
             }
         }

@@ -5,7 +5,7 @@
 {
   languages.rust = {
     enable = true;
-    channel = "stable"; # workspace needs >= 1.80
+    channel = "stable"; # workspace needs >= 1.82 (Option::is_none_or)
   };
 
   packages = [ pkgs.cargo-nextest ];

@@ -234,7 +234,7 @@ fn read_number(chars: &[char], mut pos: usize) -> Option<(String, usize)> {
     // sub-figure letter: 2a, 2b (one letter, not followed by another word char)
     if pos < chars.len()
         && chars[pos].is_ascii_lowercase()
-        && chars.get(pos + 1).map_or(true, |c| !is_word_char(*c))
+        && chars.get(pos + 1).is_none_or(|c| !is_word_char(*c))
     {
         pos += 1;
     }

@@ -326,7 +326,7 @@ impl OpenAiClient {
             let mut h = state.health[i].lock().expect("health lock");
             match h.ejected_until {
                 Some(until) if until > now => {
-                    if fallback.map_or(true, |(_, u)| until < u) {
+                    if fallback.is_none_or(|(_, u)| until < u) {
                         fallback = Some((i, until));
                     }
                 }
@@ -482,6 +482,9 @@ impl Embedder for OpenAiEmbedder {
     }
 }
 
+/// An image to send with a request: its bytes and its media type.
+type InlineImage = (Arc<[u8]>, &'static str);
+
 /// Downscales images whose long side exceeds the model's declared `max_image_px`.
 ///
 /// Returns borrowed bytes when nothing needs doing, which is the common case: declaring a
@@ -489,12 +492,12 @@ impl Embedder for OpenAiEmbedder {
 /// A decode or encode failure sends the original rather than failing the step — the model
 /// server will either cope or say so, and that is a better outcome than refusing a page
 /// because we could not shrink it.
-fn fit_images<'a>(spec: &ModelSpec, images: &'a [(Arc<[u8]>, &'static str)]) -> Cow<'a, [(Arc<[u8]>, &'static str)]> {
+fn fit_images<'a>(spec: &ModelSpec, images: &'a [InlineImage]) -> Cow<'a, [InlineImage]> {
     let Some(max_px) = spec.max_image_px.filter(|m| *m > 0) else { return Cow::Borrowed(images) };
     if images.is_empty() {
         return Cow::Borrowed(images);
     }
-    let mut out: Option<Vec<(Arc<[u8]>, &'static str)>> = None;
+    let mut out: Option<Vec<InlineImage>> = None;
     for (i, (bytes, _mime)) in images.iter().enumerate() {
         match shrink_to(bytes, max_px) {
             Some(small) => {

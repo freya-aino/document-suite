@@ -123,11 +123,7 @@ pub fn split_entries(text: &str) -> Vec<EntrySpan> {
             let rest: String = chars[i..chars.len().min(i + 8)].iter().collect();
             if let Some((n, _)) = leading_marker(&rest) {
                 let prev = chars[..i].iter().rev().find(|c| !c.is_whitespace() || **c == '\n');
-                let at_boundary = match prev {
-                    None => true,
-                    Some('\n') | Some('.') => true,
-                    _ => false,
-                };
+                let at_boundary = matches!(prev, None | Some('\n') | Some('.'));
                 // Also accept markers after a newline that was swallowed as a space.
                 let prev_is_newline = i > 0 && chars[i - 1] == '\n';
                 if at_boundary || prev_is_newline {
