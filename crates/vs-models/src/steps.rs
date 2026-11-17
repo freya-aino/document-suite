@@ -24,7 +24,26 @@ use crate::prompts::{self, Prompt};
 // ---------------------------------------------------------------------------------------
 
 fn model_param(params: &Value) -> Result<&str, StepError> {
+    reject_unimplemented(params)?;
     params["model"].as_str().ok_or_else(|| StepError::InvalidParams("`model` is required".into()))
+}
+
+/// Refuses a param this crate documents and does not honour.
+///
+/// Called from `model_param` because every model step calls that, and the alternative is
+/// seven call sites one of which will be forgotten. A param that is accepted and ignored
+/// is worse than one that does not exist: a DAG author sets `crop_dpi`, sees no change,
+/// and has no way to tell whether the setting did nothing or the model did not care.
+fn reject_unimplemented(params: &Value) -> Result<(), StepError> {
+    if !params["crop_dpi"].is_null() {
+        return Err(StepError::InvalidParams(
+            "`crop_dpi` is documented but not implemented: re-rendering a region at a higher DPI needs the original \
+             document, and a step cannot reach it (`StepContext` has no blob store). Remove it, or raise the page's \
+             `worker.render_dpi`, which this crop is taken from."
+                .into(),
+        ));
+    }
+    Ok(())
 }
 
 fn max_tokens(params: &Value, default: u32) -> u32 {

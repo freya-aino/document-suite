@@ -25,7 +25,9 @@ Remaining:
 - [ ] `coord_scale` is honoured only by `auto` and `generic_json`. The document-VLM
       families hardcode their own convention, which is correct for them but means a
       declared override is silently ignored if the family is one of those.
-- [ ] `crop_dpi` is a documented step param that is still ignored (uses the page image).
+- [ ] A higher-DPI re-crop is still not possible. `crop_dpi` now fails loudly instead of
+      doing nothing, which is as far as this can go without a step being able to read the
+      original document — a `StepContext` change, not a step change.
 - [ ] The model landscape below is from vendor-curated leaderboard snapshots, not from
       our own measurement. `vs-adapt` is the thing that should decide, and it has not been
       run on a real dataset.
@@ -267,8 +269,12 @@ text / HTML / LaTeX. A failed model call fails the step (`StepError::Model`); th
 `optional` flag decides whether that fails the page.
 
 Common params: `model` (registry id, required), `prompt` (prompt id or literal text, optional
-override), `max_tokens`, `kinds` (block kind names), `crop_padding_px`, `crop_dpi` (re-render
-region at higher DPI from the original — post-v1, uses the page image in v1).
+override), `max_tokens`, `kinds` (block kind names), `crop_padding_px`.
+
+`crop_dpi` — re-render the region from the original at a higher DPI — is **rejected** with
+`InvalidParams`, not silently ignored as it was. It needs the original document, and a step
+cannot reach it: `StepContext` carries no blob store. Crops come from the page image at
+`worker.render_dpi`, so raising that is the way to get more pixels today.
 
 ## Classifiers
 

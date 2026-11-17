@@ -115,6 +115,21 @@ async fn layout_detect_requires_model() {
 }
 
 #[tokio::test]
+async fn a_documented_but_unimplemented_param_is_refused_rather_than_ignored() {
+    // `crop_dpi` was accepted and had no effect, so a DAG author could set it, see no
+    // change in the crops and have no way to tell whether the setting did nothing or the
+    // model did not care. The endpoint here is unreachable on purpose: the param has to
+    // be refused before any model is called, or the message arrives as a timeout.
+    let c = client(&registry_toml("vlm", "generic_json", &["http://127.0.0.1:1/v1"], ""));
+    let err = LayoutDetect { client: c }
+        .run(&ctx(), &[&Artifact::PageImage(page_png())], &json!({"model": "vlm", "crop_dpi": 600}))
+        .await
+        .unwrap_err();
+    let StepError::InvalidParams(msg) = &err else { panic!("{err:?}") };
+    assert!(msg.contains("crop_dpi") && msg.contains("render_dpi"), "the message must say what to do instead: {msg}");
+}
+
+#[tokio::test]
 async fn region_ocr_crops_each_target_region_and_keeps_layout_geometry() {
     let srv = MockServer::start(Arc::new(|_, c| {
         assert_eq!(c.user_text(), "OCR:", "PaddleOCR-VL native prompt");

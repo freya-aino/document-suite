@@ -54,7 +54,9 @@ Remaining:
 - [ ] Adaptive (Sauvola) binarisation. Only global Otsu is implemented, so a page with
       uneven lighting binarises badly even after `page.normalize`.
 - [ ] Higher-DPI re-crop from the original is not implemented (see "`figure.crop`" below),
-      so a small figure is described from page-DPI pixels.
+      so a small figure is described from page-DPI pixels. `vs-models`' `crop_dpi` param
+      now refuses rather than pretending; what it would need is a step that can read the
+      original document, which `StepContext` cannot.
 - [ ] `text_layer_coverage` is a stated v1 approximation; the connected-component estimate
       on the rendered page is the documented improvement path and is unbuilt.
 - [ ] Office formats via a LibreOffice-headless converter pool (A18, post-v1).
@@ -192,7 +194,8 @@ rendered page per child is held before upload.
   resolves. Blocks from a whole-page parser never pass through `figure.crop` and get a
   crop there too.
 - Crops are taken from the rendered page image at render DPI; re-cropping from the
-  original at a higher DPI is not implemented.
+  original at a higher DPI is not implemented, and `vs-models`' `crop_dpi` param rejects
+  the request rather than quietly cropping at page DPI anyway.
 
 ## Errors
 
