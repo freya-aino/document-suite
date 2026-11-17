@@ -8,9 +8,13 @@
 //! once per process.
 
 use std::net::SocketAddr;
+use std::time::Duration;
 
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
-use tracing_subscriber::{fmt, EnvFilter};
+use opentelemetry_sdk::trace::SdkTracerProvider;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::{fmt, EnvFilter, Layer};
 
 use crate::config::TelemetryConfig;
 
@@ -23,10 +27,32 @@ const DURATION_BUCKETS: &[f64] = &[
     0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0,
 ];
 
+/// How long `shutdown` waits for buffered spans to reach the collector.
+///
+/// Shorter than the worker's shutdown grace, because a worker that cannot reach its
+/// collector must still exit before the orchestrator kills it. Losing the last batch of
+/// spans is an acceptable price for that; blocking the drain is not.
+const TRACE_FLUSH: Duration = Duration::from_secs(3);
+
 /// What `init` hands back to its caller.
 pub struct Telemetry {
     /// The live registry, for a binary that renders `/metrics` itself.
     pub metrics: PrometheusHandle,
+    /// Held so the batch span processor stays alive for the length of the process, and so
+    /// `shutdown` has something to flush. `None` when `otlp_endpoint` is unset.
+    traces: Option<SdkTracerProvider>,
+}
+
+impl Telemetry {
+    /// Flushes buffered spans. Call it before exiting, or the last batch — which is the
+    /// one covering whatever made you shut down — never leaves the process.
+    pub fn shutdown(&self) {
+        if let Some(p) = &self.traces {
+            if let Err(e) = p.shutdown_with_timeout(TRACE_FLUSH) {
+                tracing::warn!(error = %e, "could not flush traces on shutdown");
+            }
+        }
+    }
 }
 
 /// Initialises logging and installs the process-wide metrics recorder.
@@ -37,16 +63,36 @@ pub struct Telemetry {
 /// rather than quietly producing a second set of series.
 pub fn init(cfg: &TelemetryConfig, service: &str) -> anyhow::Result<Telemetry> {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    // `try_init`, not `init`: a second call is a programming error, and it should come
-    // back as one rather than panicking inside a library.
     let logs = if cfg.json_logs {
-        fmt().with_env_filter(filter).json().try_init()
+        fmt::layer().json().boxed()
     } else {
         // No colour codes when logging to a file or pipe.
-        let ansi = std::io::IsTerminal::is_terminal(&std::io::stdout());
-        fmt().with_env_filter(filter).with_ansi(ansi).try_init()
+        fmt::layer().with_ansi(std::io::IsTerminal::is_terminal(&std::io::stdout())).boxed()
     };
-    logs.map_err(|e| anyhow::anyhow!("tracing subscriber already installed: {e}"))?;
+
+    // Spans go to the collector *and* the logs. The exporter is built before the
+    // subscriber so that an unreachable or malformed endpoint is a startup error rather
+    // than a silent fallback to logs-only.
+    let traces = match &cfg.otlp_endpoint {
+        Some(endpoint) => Some(trace_provider(endpoint, service)?),
+        None => {
+            tracing::debug!("telemetry.otlp_endpoint unset; spans go to the logs only");
+            None
+        }
+    };
+    let otel = traces.as_ref().map(|p| {
+        use opentelemetry::trace::TracerProvider as _;
+        tracing_opentelemetry::layer().with_tracer(p.tracer("vs"))
+    });
+
+    // `try_init`, not `init`: a second call is a programming error, and it should come
+    // back as one rather than panicking inside a library.
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(logs)
+        .with(otel)
+        .try_init()
+        .map_err(|e| anyhow::anyhow!("tracing subscriber already installed: {e}"))?;
 
     let builder = PrometheusBuilder::new().set_buckets(DURATION_BUCKETS)?.add_global_label("service", service);
     let metrics = match &cfg.metrics_addr {
@@ -70,8 +116,25 @@ pub fn init(cfg: &TelemetryConfig, service: &str) -> anyhow::Result<Telemetry> {
         }
     };
 
-    if cfg.otlp_endpoint.is_some() {
-        tracing::warn!("OTLP trace exporter not wired yet");
-    }
-    Ok(Telemetry { metrics })
+    Ok(Telemetry { metrics, traces })
+}
+
+/// Batch-exports spans over OTLP HTTP/protobuf.
+///
+/// HTTP rather than gRPC because `reqwest` with rustls is already a dependency of this
+/// crate and `tonic` is not, and every collector speaks both. The consequence for a
+/// deployment is the port: OTLP/HTTP is 4318, not gRPC's 4317.
+fn trace_provider(endpoint: &str, service: &str) -> anyhow::Result<SdkTracerProvider> {
+    use opentelemetry_otlp::WithExportConfig as _;
+    let exporter = opentelemetry_otlp::SpanExporter::builder()
+        .with_http()
+        .with_endpoint(format!("{}/v1/traces", endpoint.trim_end_matches('/')))
+        .with_timeout(TRACE_FLUSH)
+        .build()?;
+    Ok(SdkTracerProvider::builder()
+        .with_batch_exporter(exporter)
+        // The same name the Prometheus series carry, so a trace and a counter from the
+        // same process are joinable.
+        .with_resource(opentelemetry_sdk::Resource::builder().with_service_name(service.to_string()).build())
+        .build())
 }

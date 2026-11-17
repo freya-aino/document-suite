@@ -13,9 +13,8 @@ drain on SIGTERM, and the cached DAG-list provider. 16 unit tests pass, with the
 pipeline tested over fakes for the extractor, resolver and embedder.
 
 Remaining:
-- [ ] **No traces.** Metrics are served now (see "Metrics" below), but
-      `telemetry.otlp_endpoint` is still unwired, so the span fields §5.5 specifies exist
-      in the logs and nowhere a trace viewer can follow them across a job.
+- [ ] Nothing samples traces: every task span is exported. Affordable at one span per
+      task, not necessarily once the per-attempt model spans under it are counted.
 - [ ] Sizing guidance below is a starting guess, never validated by a load test, so the
       vCPU/RAM figures and the `tasks_per_worker_target` the autoscaler would use are
       unverified.

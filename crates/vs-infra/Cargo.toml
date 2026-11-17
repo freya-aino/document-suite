@@ -17,6 +17,9 @@ futures.workspace = true
 metrics.workspace = true
 metrics-exporter-prometheus = { workspace = true, features = ["http-listener"] }
 object_store.workspace = true
+opentelemetry.workspace = true
+opentelemetry-otlp.workspace = true
+opentelemetry_sdk.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -24,6 +27,7 @@ thiserror.workspace = true
 tokio.workspace = true
 toml.workspace = true
 tracing.workspace = true
+tracing-opentelemetry.workspace = true
 tracing-subscriber.workspace = true
 
 [dev-dependencies]

@@ -63,7 +63,9 @@ embed_batch_size = 0                   # 0 = the model's registry batch_size
 dag_list_refresh_s = 60                # how long a worker trusts its cached active DAG list
 
 [telemetry]
-otlp_endpoint = "http://otel-collector.internal:4317"
+# OTLP over HTTP/protobuf, so port 4318 and not gRPC's 4317. Give the bare origin;
+# `/v1/traces` is appended.
+otlp_endpoint = "http://otel-collector.internal:4318"
 # Prometheus scrape endpoint. Bind the microVM's internal interface, never 0.0.0.0:
 # a worker has no auth of any kind in front of it.
 metrics_addr = "10.0.0.2:9464"

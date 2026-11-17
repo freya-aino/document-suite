@@ -42,7 +42,7 @@ config/             example models, worker, DAG list, search space, LiteLLM
 
 ## Status
 
-All 17 crates compile together and the workspace is green: **332 tests pass, none
+All 17 crates compile together and the workspace is green: **333 tests pass, none
 ignored** — the 24 integration tests run against a live Postgres, Qdrant, NATS and Garage.
 `cargo clippy --workspace --all-targets -- -D warnings` is clean. No `todo!()` or
 `unimplemented!()` remains anywhere in the tree.
@@ -56,10 +56,11 @@ section lists what is left. The cross-cutting gaps:
   Postgres + Qdrant, so the handover between stages is still only covered by fakes.
 - **No auth.** `vs-api` takes the tenant from `X-VS-Tenant` and admin rights from
   `X-VS-Admin`, both of which any caller can set. Keep it on a trusted network.
-- **No traces.** Metrics are wired: one recorder per process, served on
-  `telemetry.metrics_addr` for a worker and on `/metrics` for `vs-api`, with the series
-  each component's spec names. `telemetry.otlp_endpoint` is still only read and warned
-  about, so the standard span fields reach the logs and no trace viewer.
+- **Telemetry is wired but unproven in a deployment.** One recorder per process, served
+  on `telemetry.metrics_addr` for a worker and `/metrics` for `vs-api`, with the series
+  each component's spec names; spans batch-export to `telemetry.otlp_endpoint` over
+  OTLP/HTTP. Both are tested against real sockets, and neither has run against a real
+  Prometheus or collector, so the dashboards and the sampling policy are still to come.
 - **Nothing is measured.** `vs-adapt` has never been run on a real dataset, so
   content-aware routing (goal G2) and the pre-processing steps are unvalidated: whether
   deskewing or binarising helps any page class is exactly the open question. Stage 2
@@ -143,7 +144,7 @@ curl 127.0.0.1:8080/v1/jobs/<job_id> -H 'x-vs-tenant: t1'
 
 ### Tests
 
-`cargo test --workspace` runs the 308 tests that need nothing (PDF tests need
+`cargo test --workspace` runs the 309 tests that need nothing (PDF tests need
 `PDFIUM_DYNAMIC_LIB_PATH`, set by devenv). The other 24 touch a real store and are
 `#[ignore]`d; with `devenv up` running:
 

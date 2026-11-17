@@ -195,11 +195,11 @@ Delivery is at-least-once, so **every write must be idempotent** — through has
 ### 5.5 Observability
 
 Standard span fields on every trace: `job_id`, `run_id`, `document_hk`, `page_no`,
-`node_id`. Exporters and the Prometheus endpoint:
-[`vs-infra`](../crates/vs-infra/SPEC.md) — metrics are served, **OTLP traces are not
-wired**, so those span fields reach the logs only. Each component's metric names are in
-its own spec, and every series carries a `service` label naming the binary
-(`vs-api`, `vs-worker-page`, …).
+`node_id` — `document_hk` is the one not yet set anywhere. Exporters and the Prometheus
+endpoint: [`vs-infra`](../crates/vs-infra/SPEC.md). Each component's metric names are in
+its own spec, and both halves carry one name for the binary — a `service` label on every
+series, the same string as the traces' `service.name` — so a counter and a trace from the
+same process are joinable (`vs-api`, `vs-worker-page`, …).
 
 ### 5.6 Security
 

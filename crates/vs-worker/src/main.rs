@@ -82,7 +82,7 @@ async fn run_worker() -> anyhow::Result<()> {
         RoleArg::Doc => Role::Doc,
     };
     // The role is part of the service label, so the three roles' series stay apart.
-    vs_infra::telemetry::init(&cfg.telemetry, &format!("vs-worker-{}", role.as_str()))?;
+    let telemetry = vs_infra::telemetry::init(&cfg.telemetry, &format!("vs-worker-{}", role.as_str()))?;
     tracing::info!(role = role.as_str(), "vs-worker starting");
 
     let pool = connect_pg(&cfg).await?;
@@ -202,7 +202,10 @@ async fn run_worker() -> anyhow::Result<()> {
         interactive_share: cfg.worker.interactive_share,
         shutdown_grace: Duration::from_secs(args.shutdown_grace),
     };
-    runtime::run_loop(role, bus, handler, loop_cfg, stop_rx).await
+    let result = runtime::run_loop(role, bus, handler, loop_cfg, stop_rx).await;
+    // After the drain, so the spans of the tasks that finished during it are included.
+    telemetry.shutdown();
+    result
 }
 
 /// Render children are this binary with `render-child`.

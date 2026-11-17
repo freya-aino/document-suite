@@ -9,14 +9,13 @@ owns the §5.3 lane, §5.4 reliability and §5.5 observability contracts.
 Implemented: the NATS JetStream bus in full (stream topology, DLQ, max-deliveries
 advisories, lane fairness, message de-duplication, double acks, the exhausted-task give-up
 path), the S3/Garage blob store, TOML + environment config, and `telemetry`: structured
-logs plus the one process-wide Prometheus recorder, served over HTTP when
-`telemetry.metrics_addr` is set and handed to the caller otherwise. 8 unit tests pass; 5
-integration tests, 4 of which need NATS and Garage from `devenv up`.
+logs, the one process-wide Prometheus recorder, and OTLP span export. 8 unit tests pass;
+6 integration tests, 4 of which need NATS and Garage from `devenv up`.
 
 Remaining:
-- [ ] **No traces.** `telemetry.otlp_endpoint` is read and warned about, not wired, so
-      the span fields §5.5 specifies go to the logs and nowhere else. Metrics are the
-      half that is done.
+- [ ] Nothing samples. Every span is exported, which is affordable at one span per task
+      and per DAG node and will not stay so once the model client's per-attempt span is
+      included at volume.
 - [ ] Encryption at rest for originals (§5.6) is asserted but not configured here.
 - [ ] No Kafka implementation behind `TaskBus` (A6 allows it; nothing needs it yet).
 
@@ -138,6 +137,30 @@ defaults stop near 10 s, which would put a page render, a VLM call and a whole S
 document into one overflow bucket — the three durations anyone actually wants a quantile
 for.
 
-OTLP traces are **not wired**: `otlp_endpoint` is read and warned about. Standard span
-fields, present in the logs today: `job_id`, `run_id`, `document_hk`, `page_no`,
-`node_id`.
+Spans go to `otlp_endpoint` over **OTLP HTTP/protobuf**, batched, with the same
+`service.name` the Prometheus series carry so a trace and a counter from one process are
+joinable. The exporter is built before the subscriber, so an endpoint that cannot be
+parsed is a startup failure rather than a silent fall back to logs-only.
+
+Two things a deployment has to get right, both of them things that fail silently:
+
+- **The port is 4318, not 4317.** HTTP/protobuf rather than gRPC because `reqwest` with
+  rustls is already a dependency here and `tonic` is not, and every collector accepts
+  both. `init` appends `/v1/traces` itself, so configure the bare origin.
+- **Call `Telemetry::shutdown` before exiting.** The batch processor holds spans for up
+  to its flush interval, so without it a process loses the last batch — which is the one
+  covering whatever made it shut down. The worker calls it after the drain and `vs-api`
+  after `serve` returns.
+
+The SDK's batch processor owns a dedicated thread with no Tokio reactor on it, so the
+exporter uses reqwest's **blocking** client, which brings its own. The async client
+compiles and then panics on that thread, losing every span while the process looks
+healthy. `tests/traces.rs` runs a real socket and asserts a span arrives, because that
+is the only kind of test that catches it.
+
+§5.5's standard fields are spread over the two spans that have them, not repeated on
+every span: `task` (`vs-worker`) carries `role`, `job_id`, `run_id`, `document_hk`,
+`page_no` and `attempt`, with the last two empty for the roles that have no such value
+yet; `dag_node` (`vs-dag`) carries `node_id`, `step`, `dag`, `page_no` and `run_id`.
+`dag_node` nests inside `task`, so a page's trace is the shape of the DAG that ran it,
+and a `model_call` span nests inside the node that made the call.

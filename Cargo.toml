@@ -55,6 +55,14 @@ futures = "0.3"
 hex = "0.4"
 libc = "0.2"
 metrics = "0.24"
+opentelemetry = "0.33"
+# OTLP over HTTP/protobuf rather than gRPC: reqwest is already here with rustls, tonic is
+# not, and every collector accepts both. The *blocking* reqwest client, because the SDK's
+# batch span processor owns a dedicated thread with no Tokio reactor on it — the async
+# client panics there, on a background thread, losing every span while the process looks
+# healthy (`tests/traces.rs` is what catches that).
+opentelemetry-otlp = { version = "0.33", default-features = false, features = ["trace", "http-proto", "reqwest-blocking-client"] }
+opentelemetry_sdk = { version = "0.33", features = ["rt-tokio"] }
 metrics-exporter-prometheus = { version = "0.17", default-features = false }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "tiff"] }
 # Pure-Rust image operations for the pre-processing steps (goal G9: no OpenCV bindings).
@@ -73,6 +81,7 @@ tiff = "0.11"
 tokio = { version = "1", features = ["full"] }
 toml = "0.8"
 tracing = "0.1"
+tracing-opentelemetry = "0.34"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 uuid = { version = "1", features = ["v7", "serde"] }
 

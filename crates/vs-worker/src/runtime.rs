@@ -52,6 +52,39 @@ pub fn job_id(task: &Task) -> uuid::Uuid {
     }
 }
 
+/// The span every task runs inside, carrying §5.5's standard fields.
+///
+/// `document_hk` and `page_no` are declared and left empty rather than omitted, so one
+/// span shape covers all three roles: an `ingest` task has no document key yet — deriving
+/// it is part of what the task does — and only a `page` task has a page number. A trace
+/// viewer filtering on `document_hk` therefore finds every span that could have one.
+fn task_span(role: Role, task: &Task, attempt: u32) -> tracing::Span {
+    let span = tracing::info_span!(
+        "task",
+        role = role.as_str(),
+        job_id = %job_id(task),
+        run_id = tracing::field::Empty,
+        document_hk = tracing::field::Empty,
+        page_no = tracing::field::Empty,
+        attempt,
+    );
+    match task {
+        Task::Ingest { run_id, .. } => {
+            span.record("run_id", tracing::field::display(run_id));
+        }
+        Task::Page { run_id, document_hk, page_no, .. } => {
+            span.record("run_id", tracing::field::display(run_id));
+            span.record("document_hk", tracing::field::display(document_hk));
+            span.record("page_no", page_no);
+        }
+        Task::Doc { run_id, document_hk, .. } => {
+            span.record("run_id", tracing::field::display(run_id));
+            span.record("document_hk", tracing::field::display(document_hk));
+        }
+    }
+    span
+}
+
 /// Runs until `shutdown` turns true, then waits up to `shutdown_grace` for in-flight
 /// tasks. Unfinished tasks are redelivered by JetStream after `ack_wait`.
 pub async fn run_loop(
@@ -176,7 +209,7 @@ impl Drop for InFlight {
 async fn process(role: Role, bus: Arc<dyn TaskBus>, handler: Arc<dyn Handler>, d: Box<dyn Delivery>, _permit: OwnedSemaphorePermit) {
     let task = d.task().clone();
     let attempt = d.attempt();
-    let span = tracing::info_span!("task", role = role.as_str(), job_id = %job_id(&task), attempt);
+    let span = task_span(role, &task, attempt);
     async move {
         // In-flight against `max_in_flight` is what the fleet autoscaler's
         // `tasks_per_worker_target` is a target for, so it has to be observable.

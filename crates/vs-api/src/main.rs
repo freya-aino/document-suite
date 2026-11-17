@@ -164,7 +164,8 @@ async fn main() -> anyhow::Result<()> {
     let cfg = vs_infra::Config::load(&args.config)?;
     // One recorder per process, installed by `telemetry::init`; this binary renders it
     // on its own `/metrics` route rather than having the exporter bind a second port.
-    let metrics = vs_infra::telemetry::init(&cfg.telemetry, "vs-api")?.metrics;
+    let telemetry = vs_infra::telemetry::init(&cfg.telemetry, "vs-api")?;
+    let metrics = telemetry.metrics.clone();
 
     let mut pg = PgConnectOptions::from_str(&cfg.postgres.url)?;
     if let Some(pw) = &cfg.postgres.password {
@@ -209,6 +210,7 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(&args.addr).await?;
     tracing::info!(addr = %args.addr, "vs-api listening");
     axum::serve(listener, app).await?;
+    telemetry.shutdown();
     Ok(())
 }
 

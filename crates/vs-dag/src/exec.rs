@@ -1,5 +1,6 @@
 use chrono::Utc;
 use futures::future::join_all;
+use tracing::Instrument;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -76,6 +77,17 @@ impl<'a> Executor<'a> {
                 nctx.node_id = node.id.clone();
                 nctx.dag_ref = dag_ref.clone();
                 let timeout_ms = node.timeout_ms.unwrap_or_else(|| step.default_timeout_ms());
+                // One span per node, so a page's trace is the DAG's shape: `node_id` and
+                // `page_no` are two of §5.5's standard fields and this is the only place
+                // in the workspace that has them.
+                let span = tracing::info_span!(
+                    "dag_node",
+                    node_id = %node.id,
+                    step = %node.step,
+                    dag = %dag_ref,
+                    page_no = ctx.page_no,
+                    run_id = %ctx.run_id,
+                );
                 async move {
                     let started_at = Utc::now();
                     let t0 = Instant::now();
@@ -86,6 +98,7 @@ impl<'a> Executor<'a> {
                     .await;
                     (i, res, started_at, t0.elapsed(), timeout_ms, step.signature().output)
                 }
+                .instrument(span)
             });
 
             for (i, res, started_at, elapsed, timeout_ms, out_kind) in join_all(futs).await {
