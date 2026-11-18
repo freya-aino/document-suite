@@ -54,7 +54,7 @@ anyhow = "1"
 async-nats = "0.38"
 async-trait = "0.1"
 axum = { version = "0.8", features = ["multipart"] }
-base64 = "0.22"
+base64 = "0.23"
 bytes = "1"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive", "env"] }
@@ -70,7 +70,7 @@ opentelemetry = "0.33"
 # healthy (`tests/traces.rs` is what catches that).
 opentelemetry-otlp = { version = "0.33", default-features = false, features = ["trace", "http-proto", "reqwest-blocking-client"] }
 opentelemetry_sdk = { version = "0.33", features = ["rt-tokio"] }
-metrics-exporter-prometheus = { version = "0.17", default-features = false }
+metrics-exporter-prometheus = { version = "0.18", default-features = false }
 # Pinned to 9, and no longer for the MSRV reason that first pinned it (10+ declare 1.88,
 # which the declared 1.89 now allows). 10 and later route verification through a
 # pluggable `CryptoProvider` and need a backend feature chosen explicitly, so moving is a
@@ -84,7 +84,12 @@ object_store = { version = "0.11", features = ["aws"] }
 # `sync`: one process-wide binding shared across threads (calls are serialised).
 pdfium-render = { version = "0.8", features = ["sync"] }
 qdrant-client = "1.20"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+# 0.13 renamed the TLS features: `rustls` is now the aws-lc-rs provider plus
+# `rustls-platform-verifier`, so certificates come from the system trust store instead of
+# webpki's bundled roots. That suits the deployments here, which both ship a CA bundle
+# (the image installs ca-certificates, the microVM rootfs bakes one in), and it is why
+# they must.
+reqwest = { version = "0.13", default-features = false, features = ["json", "form", "rustls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
@@ -92,7 +97,7 @@ sqlx = { version = "0.8", default-features = false, features = ["postgres", "run
 thiserror = "2"
 tiff = "0.11"
 tokio = { version = "1", features = ["full"] }
-toml = "0.8"
+toml = "1"
 tracing = "0.1"
 tracing-opentelemetry = "0.34"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
