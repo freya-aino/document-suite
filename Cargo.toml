@@ -51,7 +51,6 @@ vs-worker = { path = "crates/vs-worker" }
 
 # external
 anyhow = "1"
-async-nats = "0.53"
 async-trait = "0.1"
 axum = { version = "0.8", features = ["multipart"] }
 base64 = "0.23"

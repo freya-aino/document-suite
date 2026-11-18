@@ -5,7 +5,7 @@
 # Postgres, so the default shell provisions nothing and every endpoint is a `VS__*`
 # override away (`deploy/README.md`). The services are a profile:
 #
-#   devenv --profile stack up          # Postgres, NATS, Garage, Qdrant, Keycloak
+#   devenv --profile stack up          # Postgres, Garage, Qdrant, Keycloak
 #   devenv --profile firecracker shell # worker microVMs; needs /dev/kvm
 #
 # Component-specific *client* configuration (where to find a database, which S3

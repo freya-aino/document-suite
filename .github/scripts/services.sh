@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# Starts the services the `--ignored` tests need: Qdrant, NATS, an S3 server and Keycloak.
+# Starts the services the `--ignored` tests need: Qdrant, an S3 server and Keycloak.
 #
-# Postgres is a workflow service container instead, because it is the one of the four
-# with a usable health check and no provisioning beyond a role. These three need either
-# arguments the `services:` block cannot pass (NATS needs `-js`) or several setup
-# commands after they are up (Garage), so they run as plain containers.
+# Postgres is a workflow service container instead, because it is the one with a usable
+# health check and no provisioning beyond a role. These three need several setup commands
+# after they are up (Garage's layout and keys, Keycloak's realm import), which a
+# `services:` block cannot run, so they are plain containers.
 #
 # Ports and the container name prefix come from the environment so this can be run on a
 # developer machine that already has something on 6334 or 3900:
 #
-#   PREFIX=vs-ci QDRANT_GRPC=56334 NATS_PORT=54222 S3_PORT=53900 KEYCLOAK_PORT=58081 \
+#   PREFIX=vs-ci QDRANT_GRPC=56334 S3_PORT=53900 KEYCLOAK_PORT=58081 \
 #     .github/scripts/services.sh
 #
 # With a non-default KEYCLOAK_PORT, also export VS_KEYCLOAK_ISSUER: the test that asks the
@@ -23,7 +23,6 @@ set -euo pipefail
 PREFIX="${PREFIX:-vs-ci}"
 QDRANT_REST="${QDRANT_REST:-6333}"
 QDRANT_GRPC="${QDRANT_GRPC:-6334}"
-NATS_PORT="${NATS_PORT:-4222}"
 S3_PORT="${S3_PORT:-3900}"
 KEYCLOAK_PORT="${KEYCLOAK_PORT:-8081}" # 8080 is vs-api's own default
 
@@ -40,7 +39,6 @@ S3_ACCESS_KEY="${AWS_ACCESS_KEY_ID:-GK0123456789abcdef01234567}"
 S3_SECRET_KEY="${AWS_SECRET_ACCESS_KEY:-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef}"
 
 QDRANT_IMAGE="qdrant/qdrant:v1.20.0"
-NATS_IMAGE="nats:2-alpine"
 GARAGE_IMAGE="dxflrs/garage:v1.0.1"
 KEYCLOAK_IMAGE="quay.io/keycloak/keycloak:26.4"
 
@@ -104,12 +102,6 @@ run "$PREFIX-qdrant" \
   -p "127.0.0.1:$QDRANT_REST:6333" -p "127.0.0.1:$QDRANT_GRPC:6334" \
   -e QDRANT__TELEMETRY_DISABLED=true "$QDRANT_IMAGE"
 wait_port "$QDRANT_GRPC" qdrant
-echo "::endgroup::"
-
-echo "::group::NATS"
-# JetStream is not on by default, and vs-infra creates its streams at startup.
-run "$PREFIX-nats" -p "127.0.0.1:$NATS_PORT:4222" "$NATS_IMAGE" -js
-wait_port "$NATS_PORT" nats
 echo "::endgroup::"
 
 echo "::group::Garage"

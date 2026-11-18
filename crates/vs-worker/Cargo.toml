@@ -43,3 +43,6 @@ uuid.workspace = true
 # re-executes for rendering now lives.
 chrono.workspace = true
 object_store.workspace = true
+# `test-util` for paused time: the retry tests assert the number of attempts, and would
+# otherwise sit through the real backoff.
+tokio = { workspace = true, features = ["test-util"] }

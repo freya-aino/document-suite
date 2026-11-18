@@ -1,4 +1,4 @@
-//! Worker roles as a library. See `SPEC.md`.
+//! The document pipeline as a library. See `SPEC.md`.
 //!
 //! The role handlers and their wiring live here rather than in `main.rs` so that a test
 //! can build the same handler a deployment runs. Without that, "nothing has run end to
@@ -11,7 +11,7 @@ pub mod doc;
 pub mod images;
 pub mod ingest;
 pub mod page;
-pub mod runtime;
+pub mod pipeline;
 
 use std::str::FromStr;
 use std::sync::Arc;
@@ -19,8 +19,11 @@ use std::time::Duration;
 
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 
-use vs_infra::queue::{Role, TaskBus};
 use vs_infra::{Config, ObjectBlobStore};
+
+mod error;
+pub use error::TaskError;
+pub use pipeline::{Pipeline, PipelineConfig, Stage};
 use vs_models::{Embedder, ModelRegistry, OpenAiClient, OpenAiEmbedder};
 use vs_vault::{ops::Ops, PgCorpusResolver, PgOntologyStore, PgVault};
 use vs_vectors::{QdrantConfig, QdrantStore, VectorStore};
@@ -30,7 +33,6 @@ pub const MAX_PAGES: u32 = 5_000;
 
 /// Everything a handler needs that does not come out of the config file.
 pub struct Deps {
-    pub bus: Arc<dyn TaskBus>,
     pub pool: sqlx::PgPool,
     /// The command the `ingest` role spawns per render child. In production this binary
     /// with `render-child` (`self_render_command`); a test has to pass the built
@@ -62,111 +64,115 @@ impl Models {
     }
 }
 
-/// Builds the handler for `role`, validating everything it needs up front: a missing
-/// model, an unreachable Qdrant or a wrong embedding dimension is a startup failure and
-/// not a per-document one.
-pub async fn build_handler(cfg: &Config, role: Role, deps: Deps) -> anyhow::Result<Arc<dyn runtime::Handler>> {
-    let Deps { bus, pool, render_command } = deps;
-    let blob = Arc::new(ObjectBlobStore::s3(&cfg.blob)?);
+/// Builds the pipeline, validating everything it needs up front: a missing model, an
+/// unreachable Qdrant or a wrong embedding dimension is a startup failure and not a
+/// per-document one.
+///
+/// All three stages are built, because one process runs all three. That is stricter than
+/// the old per-role build: a copy that only rasterized used to need no models and no
+/// Qdrant, and now every copy needs both. It is also why the failure is at startup —
+/// a service that accepted uploads and could not finish them would be worse.
+pub async fn build_pipeline(cfg: &Config, deps: Deps) -> anyhow::Result<Pipeline> {
+    let Deps { pool, render_command } = deps;
+    let blob: Arc<dyn vs_infra::BlobStore> = Arc::new(ObjectBlobStore::s3(&cfg.blob)?);
     let ops = Arc::new(Ops { pool: pool.clone() });
-    let vault = Arc::new(PgVault { pool });
+    let vault: Arc<dyn vs_vault::VaultWriter> = Arc::new(PgVault { pool });
+    let models = Models::load(cfg, blob.clone())?;
+    let steps = Arc::new(vs_steps::production_registry(models.client.clone()));
+    let classify = classify_config(cfg)?;
 
-    Ok(match role {
-        Role::Ingest => Arc::new(ingest::IngestHandler {
-            blob,
-            bus,
-            vault,
-            ops,
-            pool: Arc::new(render_pool(cfg, render_command)?),
-            scratch_dir: cfg.worker.scratch_dir.clone().unwrap_or_else(std::env::temp_dir),
-            bucket: cfg.blob.bucket.clone(),
-            render_dpi: cfg.worker.render_dpi,
-            // From `[classify]`, not a constant here: ingest renders the thumbnail and
-            // the `page` role consumes it, so the size has to come from one place or the
-            // two roles can disagree about what they are passing each other.
-            thumbnail_px: classify_config(cfg)?.thumbnail_long_side_px,
-            max_pages: MAX_PAGES,
-        }),
-        Role::Page => {
-            let models = Models::load(cfg, blob.clone())?;
-            let steps = Arc::new(vs_steps::production_registry(models.client.clone()));
-            let classify = classify_config(cfg)?;
-            let vision: Option<Arc<dyn vs_classify::VisionClassifier>> = match &cfg.stage2.classifier_model {
-                Some(model) => {
-                    models.client.spec(model)?; // fail at startup, not per page
-                    Some(Arc::new(vs_models::classifier::VlmPageClassifier { client: models.client.clone(), model: model.clone() }))
-                }
-                None => {
-                    tracing::warn!("no stage2.classifier_model configured; pages are classified by rules only");
-                    None
-                }
-            };
-            let refresh = Duration::from_secs(cfg.stage2.dag_list_refresh_s);
-            Arc::new(page::PageHandler {
-                blob,
-                bus,
-                vault,
-                dags: Arc::new(dags::DagLists::new(ops.clone(), steps.clone(), refresh)),
-                ops,
-                steps,
-                classify,
-                vision,
-                bucket: cfg.blob.bucket.clone(),
-                render_dpi: cfg.worker.render_dpi,
-            })
-        }
-        Role::Doc => {
-            let models = Models::load(cfg, blob.clone())?;
-            let s2 = &cfg.stage2;
-            for m in [&s2.extraction_model, &s2.verify_model].into_iter().chain(s2.judge_model.as_ref()) {
-                models.client.spec(m)?;
-            }
-            let embedder = Arc::new(OpenAiEmbedder::new(models.client.clone(), &s2.embedding_model, s2.embed_batch_size)?);
-            let vectors: Arc<dyn VectorStore> = Arc::new(QdrantStore::new(&QdrantConfig {
-                url: cfg.qdrant.url.clone(),
-                api_key: cfg.qdrant.api_key_env.as_deref().and_then(|v| std::env::var(v).ok()),
-                collection_prefix: cfg.qdrant.collection_prefix.clone(),
-                batch_size: cfg.qdrant.batch_size,
-            })?);
-            // Collections are sized by the embedder, so this must happen after it is
-            // built and before the first document: a wrong dimension is unrecoverable
-            // once points are written.
-            vectors.ensure_ready(embedder.dimensions()).await?;
+    let ingest = ingest::IngestHandler {
+        blob: blob.clone(),
+        vault: vault.clone(),
+        ops: ops.clone(),
+        pool: Arc::new(render_pool(cfg, render_command)?),
+        scratch_dir: cfg.worker.scratch_dir.clone().unwrap_or_else(std::env::temp_dir),
+        bucket: cfg.blob.bucket.clone(),
+        render_dpi: cfg.worker.render_dpi,
+        // From `[classify]`, not a constant here: the ingest stage renders the thumbnail
+        // and the page stage consumes it, so the size comes from one place or the two
+        // disagree about what they are passing each other.
+        thumbnail_px: classify.thumbnail_long_side_px,
+        max_pages: MAX_PAGES,
+    };
 
-            let doc_classifier: Option<Arc<dyn vs_classify::DocumentClassifier>> = match &s2.doc_classifier_model {
-                Some(model) => {
-                    models.client.spec(model)?; // fail at startup, not per document
-                    Some(Arc::new(vs_models::classifier::VlmDocumentClassifier {
-                        client: models.client.clone(),
-                        model: model.clone(),
-                        max_pages: 3,
-                    }))
-                }
-                None => {
-                    tracing::info!("no doc_classifier_model: document type comes from the weighted page vote");
-                    None
-                }
-            };
-            let mut resolver = PgCorpusResolver::new(ops.pool.clone(), vectors.clone(), embedder.clone())
-                .with_thresholds(s2.link_threshold, s2.judge_band);
-            if let Some(judge) = &s2.judge_model {
-                resolver = resolver.with_judge(models.client.clone(), judge.clone());
-            }
-            Arc::new(doc::DocHandler {
-                blob,
-                vault,
-                ontology: Arc::new(PgOntologyStore::new(ops.pool.clone())),
-                vectors,
-                ops,
-                client: models.client,
-                embedder,
-                resolver: Arc::new(resolver),
-                doc_classifier,
-                stage2: s2.clone(),
-                max_failed_page_fraction: cfg.worker.max_failed_page_fraction,
-            })
+    let vision: Option<Arc<dyn vs_classify::VisionClassifier>> = match &cfg.stage2.classifier_model {
+        Some(model) => {
+            models.client.spec(model)?; // fail at startup, not per page
+            Some(Arc::new(vs_models::classifier::VlmPageClassifier { client: models.client.clone(), model: model.clone() }))
         }
-    })
+        None => {
+            tracing::warn!("no stage2.classifier_model configured; pages are classified by rules only");
+            None
+        }
+    };
+    let page = page::PageHandler {
+        blob: blob.clone(),
+        vault: vault.clone(),
+        dags: Arc::new(dags::DagLists::new(ops.clone(), steps.clone(), Duration::from_secs(cfg.stage2.dag_list_refresh_s))),
+        ops: ops.clone(),
+        steps,
+        classify,
+        vision,
+        bucket: cfg.blob.bucket.clone(),
+        render_dpi: cfg.worker.render_dpi,
+    };
+
+    let s2 = &cfg.stage2;
+    for m in [&s2.extraction_model, &s2.verify_model].into_iter().chain(s2.judge_model.as_ref()) {
+        models.client.spec(m)?;
+    }
+    let embedder = Arc::new(OpenAiEmbedder::new(models.client.clone(), &s2.embedding_model, s2.embed_batch_size)?);
+    let vectors: Arc<dyn VectorStore> = Arc::new(QdrantStore::new(&QdrantConfig {
+        url: cfg.qdrant.url.clone(),
+        api_key: cfg.qdrant.api_key_env.as_deref().and_then(|v| std::env::var(v).ok()),
+        collection_prefix: cfg.qdrant.collection_prefix.clone(),
+        batch_size: cfg.qdrant.batch_size,
+    })?);
+    // Collections are sized by the embedder, so this must happen after it is built and
+    // before the first document: a wrong dimension is unrecoverable once points exist.
+    vectors.ensure_ready(embedder.dimensions()).await?;
+
+    let doc_classifier: Option<Arc<dyn vs_classify::DocumentClassifier>> = match &s2.doc_classifier_model {
+        Some(model) => {
+            models.client.spec(model)?; // fail at startup, not per document
+            Some(Arc::new(vs_models::classifier::VlmDocumentClassifier { client: models.client.clone(), model: model.clone(), max_pages: 3 }))
+        }
+        None => {
+            tracing::info!("no doc_classifier_model: document type comes from the weighted page vote");
+            None
+        }
+    };
+    let mut resolver = PgCorpusResolver::new(ops.pool.clone(), vectors.clone(), embedder.clone())
+        .with_thresholds(s2.link_threshold, s2.judge_band);
+    if let Some(judge) = &s2.judge_model {
+        resolver = resolver.with_judge(models.client.clone(), judge.clone());
+    }
+    let doc = doc::DocHandler {
+        blob,
+        vault,
+        ontology: Arc::new(PgOntologyStore::new(ops.pool.clone())),
+        vectors,
+        ops: ops.clone(),
+        client: models.client,
+        embedder,
+        resolver: Arc::new(resolver),
+        doc_classifier,
+        stage2: s2.clone(),
+        max_failed_page_fraction: cfg.worker.max_failed_page_fraction,
+    };
+
+    Ok(Pipeline::new(
+        ingest,
+        page,
+        doc,
+        ops,
+        PipelineConfig {
+            max_pages_in_flight: cfg.worker.max_in_flight,
+            interactive_share: cfg.worker.interactive_share,
+            page_attempts: cfg.worker.page_attempts,
+        },
+    ))
 }
 
 /// The `[classify]` section. Read by the `ingest` role for the thumbnail size and by the

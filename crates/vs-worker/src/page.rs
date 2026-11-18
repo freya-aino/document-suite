@@ -3,24 +3,21 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use bytes::Bytes;
 
 use vs_classify::{combine, tier0, ClassifyConfig, PageSignals, VisionClassifier};
-use vs_core::{Block, BlockContent, DocType, HashKey, JobSpec, PageProfile, PageResult, RunId, Task};
+use vs_core::{Block, BlockContent, DocType, HashKey, JobSpec, PageProfile, PageResult, RunId};
 use vs_dag::{Artifact, BlockDraft, ExecError, ExecOutput, Executor, PageImage, StepContext, StepError, StepRegistry, TextLayer};
 use vs_infra::blob::{key_from_uri, keys, BlobError, BlobStore};
-use vs_infra::queue::{Lane, Role, TaskBus};
 use vs_models::steps::crop_png;
-use vs_vault::ops::{Ops, PageOutcome, PageProgress};
+use vs_vault::ops::{Ops, PageOutcome};
 use vs_vault::VaultWriter;
 
 use crate::dags::DagLists;
-use crate::runtime::{Handler, TaskError};
+use crate::TaskError;
 
 pub struct PageHandler {
     pub blob: Arc<dyn BlobStore>,
-    pub bus: Arc<dyn TaskBus>,
     pub vault: Arc<dyn VaultWriter>,
     pub ops: Arc<Ops>,
     pub dags: Arc<DagLists>,
@@ -32,55 +29,18 @@ pub struct PageHandler {
     pub render_dpi: u32,
 }
 
-#[async_trait]
-impl Handler for PageHandler {
-    async fn handle(&self, task: &Task) -> Result<(), TaskError> {
-        let Task::Page { job_id, run_id, document_hk, page_no, page_image_uri, text_layer_uri, spec } = task else {
-            return Err(TaskError::permanent(anyhow::anyhow!("page worker received {task:?}")));
-        };
-        let page = PageTask {
-            job_id: *job_id,
-            run_id: *run_id,
-            document_hk,
-            page_no: *page_no,
-            page_image_uri,
-            text_layer_uri: text_layer_uri.as_deref(),
-            spec,
-        };
-        self.process(&page).await
-    }
-
-    /// A page that exhausted its attempts counts as failed; the same completion check
-    /// runs so a failed last page still enqueues the doc task.
-    async fn give_up(&self, task: &Task, error: &str) {
-        let Task::Page { job_id, page_no, spec, .. } = task else {
-            return;
-        };
-        match self.ops.page_finished(*job_id, *page_no, PageOutcome::Failed, None, None, Some(error)).await {
-            Ok(progress) => {
-                if let Err(e) = self.maybe_enqueue_doc(task, progress).await {
-                    tracing::error!(%job_id, error = %format!("{:#}", e.error), "could not enqueue doc task after failed page");
-                }
-            }
-            Err(e) => {
-                tracing::error!(%job_id, page_no, tenant = spec.tenant.as_str(), error = %e, "could not mark page failed")
-            }
-        }
-    }
-}
-
-struct PageTask<'a> {
-    job_id: uuid::Uuid,
-    run_id: RunId,
-    document_hk: &'a HashKey,
-    page_no: u32,
-    page_image_uri: &'a str,
-    text_layer_uri: Option<&'a str>,
-    spec: &'a JobSpec,
+pub(crate) struct PageTask<'a> {
+    pub(crate) job_id: uuid::Uuid,
+    pub(crate) run_id: RunId,
+    pub(crate) document_hk: &'a HashKey,
+    pub(crate) page_no: u32,
+    pub(crate) page_image_uri: &'a str,
+    pub(crate) text_layer_uri: Option<&'a str>,
+    pub(crate) spec: &'a JobSpec,
 }
 
 impl PageHandler {
-    async fn process(&self, t: &PageTask<'_>) -> Result<(), TaskError> {
+    pub(crate) async fn process(&self, t: &PageTask<'_>) -> Result<(), TaskError> {
         self.ops.page_started(t.job_id, t.page_no).await?;
         let router = self.dags.router_for(&t.spec.tenant, t.spec.dag_list_version.as_deref()).await?;
         let doc = t.document_hk.as_str();
@@ -132,8 +92,11 @@ impl PageHandler {
         self.blob.put(&keys::page_result(doc, &t.run_id.to_string(), t.page_no), body.into(), "application/json").await?;
         self.vault.write_page(&result, rule_id.as_deref()).await?;
 
-        let progress = self.ops.page_finished(t.job_id, t.page_no, PageOutcome::Done, Some(&dag_ref), rule_id.as_deref(), None).await?;
-        self.maybe_enqueue_doc_spec(t.job_id, t.run_id, t.document_hk, t.spec, progress).await
+        // Recorded for the status endpoints and for the doc stage's failure threshold;
+        // what used to follow — publishing the doc task when the last page landed — is
+        // now simply the pipeline awaiting every page before it calls that stage.
+        self.ops.page_finished(t.job_id, t.page_no, PageOutcome::Done, Some(&dag_ref), rule_id.as_deref(), None).await?;
+        Ok(())
     }
 
     /// Tier 0 rules, then the vision classifier when configured and needed.
@@ -165,35 +128,7 @@ impl PageHandler {
         Ok(combine(t.spec.language.clone(), signals, t0, vision.as_ref(), known, &self.classify))
     }
 
-    async fn maybe_enqueue_doc(&self, task: &Task, progress: PageProgress) -> Result<(), TaskError> {
-        let Task::Page { job_id, run_id, document_hk, spec, .. } = task else {
-            return Ok(());
-        };
-        self.maybe_enqueue_doc_spec(*job_id, *run_id, document_hk, spec, progress).await
-    }
 
-    /// Publishes the doc task once every page is final. `all_finished()` rather than
-    /// `completed_job()`: a redelivered page task whose earlier attempt counted the page
-    /// but died before publishing must still publish, or the job never leaves
-    /// `pages_processing`. The duplicate publish of a healthy retry is absorbed by the
-    /// JetStream de-dup id (`<job_id>:doc`); beyond the de-dup window Stage 2 is
-    /// idempotent per run.
-    async fn maybe_enqueue_doc_spec(
-        &self,
-        job_id: uuid::Uuid,
-        run_id: RunId,
-        document_hk: &HashKey,
-        spec: &JobSpec,
-        progress: PageProgress,
-    ) -> Result<(), TaskError> {
-        if !progress.all_finished() {
-            return Ok(());
-        }
-        tracing::info!(%job_id, done = progress.done, failed = progress.failed, counted = progress.counted, "all pages finished; enqueueing doc task");
-        let task = Task::Doc { job_id, run_id, document_hk: document_hk.clone(), spec: spec.clone() };
-        self.bus.publish(Role::Doc, Lane::from(spec.priority), &task, &format!("{job_id}:doc")).await?;
-        Ok(())
-    }
 }
 
 /// Missing or unreadable page assets: ingest wrote them before publishing the task, so

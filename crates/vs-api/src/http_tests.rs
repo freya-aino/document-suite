@@ -19,59 +19,53 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use futures::stream::BoxStream;
 use serde_json::{json, Value};
 use sqlx::PgPool;
 use tower::ServiceExt;
 
-use vs_core::{Task, TenantId};
-use vs_infra::queue::{Delivery, Exhausted, Lane, QueueError, Role, TaskBus};
+use vs_core::{JobSpec, RunId, TenantId};
 use vs_infra::{BlobStore, ObjectBlobStore};
 use vs_vault::ops::Ops;
 
 use super::auth_tests::{admin_claims, claims, token, verifier, ORG, SUBJECT};
-use super::{router, ApiConfig, AppState};
+use super::{router, ApiConfig, AppState, Dispatch};
 
 /// The organization in the test token, which is therefore the tenant.
 const TENANT: &str = ORG;
 const BUCKET: &str = "visual-suite";
 
-/// Records publishes and reports whatever backlog the test asked for.
-pub(crate) struct FakeBus {
-    published: Mutex<Vec<Task>>,
-    pending: u64,
+/// Records what was dispatched and reports whatever in-flight count the test asked for.
+pub(crate) struct FakeDispatch {
+    dispatched: Mutex<Vec<(uuid::Uuid, RunId, JobSpec)>>,
+    in_flight: u64,
 }
 
-impl FakeBus {
-    /// A bus with no backlog, for the tests that never look at it.
+impl FakeDispatch {
+    /// A dispatcher carrying nothing, for the tests that never look at it.
     pub(crate) fn idle() -> Self {
-        Self { published: Mutex::new(Vec::new()), pending: 0 }
+        Self { dispatched: Mutex::new(Vec::new()), in_flight: 0 }
+    }
+
+    fn count(&self) -> usize {
+        self.dispatched.lock().expect("lock").len()
     }
 }
 
 #[async_trait]
-impl TaskBus for FakeBus {
-    async fn publish(&self, _role: Role, _lane: Lane, task: &Task, _dedup_id: &str) -> Result<(), QueueError> {
-        self.published.lock().expect("lock").push(task.clone());
+impl Dispatch for FakeDispatch {
+    async fn dispatch(&self, job_id: uuid::Uuid, run_id: RunId, spec: JobSpec) -> anyhow::Result<()> {
+        self.dispatched.lock().expect("lock").push((job_id, run_id, spec));
         Ok(())
     }
-    async fn subscribe(&self, _role: Role, _lane: Lane) -> Result<BoxStream<'static, Box<dyn Delivery>>, QueueError> {
-        Ok(Box::pin(futures::stream::empty()))
-    }
-    async fn dead_letter(&self, _role: Role, _task: &Task, _reason: &str) -> Result<(), QueueError> {
-        Ok(())
-    }
-    async fn subscribe_exhausted(&self, _role: Role) -> Result<BoxStream<'static, Box<dyn Exhausted>>, QueueError> {
-        Ok(Box::pin(futures::stream::empty()))
-    }
-    async fn pending(&self, _role: Role, _lane: Lane) -> Result<u64, QueueError> {
-        Ok(self.pending)
+
+    fn in_flight(&self) -> u64 {
+        self.in_flight
     }
 }
 
 /// `state(pool, backlog)` plus the objects the tests reference as `source_uri`.
-async fn state(pool: PgPool, pending: u64) -> (AppState, Arc<FakeBus>) {
-    let bus = Arc::new(FakeBus { published: Mutex::new(Vec::new()), pending });
+async fn state(pool: PgPool, in_flight: u64) -> (AppState, Arc<FakeDispatch>) {
+    let dispatch = Arc::new(FakeDispatch { dispatched: Mutex::new(Vec::new()), in_flight });
     let blob = Arc::new(ObjectBlobStore::new(Arc::new(object_store::memory::InMemory::new())));
     for key in ["originals/t1/a", "originals/t1/b", "inbox/t1/c", "originals/t2/secret"] {
         blob.put(key, bytes::Bytes::from_static(b"%PDF-1.7 fake"), "application/pdf").await.expect("seed blob");
@@ -79,7 +73,7 @@ async fn state(pool: PgPool, pending: u64) -> (AppState, Arc<FakeBus>) {
     let s = AppState {
         ops: Arc::new(Ops { pool }),
         auth: verifier(),
-        bus: bus.clone(),
+        dispatch: dispatch.clone(),
         blob,
         bucket: BUCKET.into(),
         api: ApiConfig { interactive_max_pending: 10, ..Default::default() },
@@ -88,7 +82,7 @@ async fn state(pool: PgPool, pending: u64) -> (AppState, Arc<FakeBus>) {
         steps: None,
         metrics: metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder().handle(),
     };
-    (s, bus)
+    (s, dispatch)
 }
 
 async fn send(state: &AppState, req: Request<Body>) -> (StatusCode, Value) {
@@ -117,7 +111,7 @@ fn with_key(mut req: Request<Body>, key: &str) -> Request<Body> {
 #[sqlx::test(migrator = "vs_vault::MIGRATOR")]
 #[ignore = "needs Postgres from `devenv up`"]
 async fn a_replayed_request_returns_the_first_answer_and_creates_no_second_job(pool: PgPool) {
-    let (s, bus) = state(pool.clone(), 0).await;
+    let (s, dispatch) = state(pool.clone(), 0).await;
     let body = json!({ "language": "en", "source_uri": "originals/t1/a" });
 
     let (first_status, first) = send(&s, with_key(post("/v1/documents", body.clone()), "k1")).await;
@@ -140,7 +134,7 @@ async fn a_replayed_request_returns_the_first_answer_and_creates_no_second_job(p
         sqlx::query_as("SELECT spec->>'tenant', spec->'owner'->>'subject' FROM ops.jobs").fetch_one(&pool).await.expect("owner");
     assert_eq!(tenant, TENANT, "the tenant must be the token's organization");
     assert_eq!(subject.as_deref(), Some(SUBJECT), "the job does not say who asked for it");
-    assert_eq!(bus.published.lock().expect("lock").len(), 1, "the replay published a second ingest task");
+    assert_eq!(dispatch.count(), 1, "the replay dispatched the document twice");
 
     // A different key is a different request, even with an identical body.
     let (status, other) = send(&s, with_key(post("/v1/documents", body.clone()), "k2")).await;
@@ -160,7 +154,7 @@ async fn a_replayed_request_returns_the_first_answer_and_creates_no_second_job(p
 #[ignore = "needs Postgres from `devenv up`"]
 async fn an_interactive_request_is_refused_while_the_lane_is_backed_up(pool: PgPool) {
     // Backlog above `interactive_max_pending` (10).
-    let (s, bus) = state(pool.clone(), 11).await;
+    let (s, dispatch) = state(pool.clone(), 11).await;
 
     let (status, body) = send(&s, post("/v1/documents", json!({ "language": "en", "priority": "interactive", "source_uri": "originals/t1/a" }))).await;
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
@@ -170,7 +164,7 @@ async fn an_interactive_request_is_refused_while_the_lane_is_backed_up(pool: PgP
     let (status, body) = send(&s, post("/v1/documents", json!({ "language": "en", "priority": "batch", "source_uri": "originals/t1/a" }))).await;
     assert_eq!(status, StatusCode::ACCEPTED, "{body}");
 
-    assert_eq!(bus.published.lock().expect("lock").len(), 1, "the refused request must not have been enqueued");
+    assert_eq!(dispatch.count(), 1, "the refused request must not have been dispatched");
     let jobs: i64 = sqlx::query_scalar("SELECT count(*) FROM ops.jobs").fetch_one(&pool).await.expect("count jobs");
     assert_eq!(jobs, 1, "a refused request must leave no job row behind");
 
@@ -184,7 +178,7 @@ async fn an_interactive_request_is_refused_while_the_lane_is_backed_up(pool: PgP
 #[sqlx::test(migrator = "vs_vault::MIGRATOR")]
 #[ignore = "needs Postgres from `devenv up`"]
 async fn a_source_uri_outside_the_tenants_own_prefix_is_refused(pool: PgPool) {
-    let (s, bus) = state(pool.clone(), 0).await;
+    let (s, dispatch) = state(pool.clone(), 0).await;
 
     // The object exists and belongs to another tenant. This is the one check standing
     // between two tenants' documents while there is no auth, so it is asserted against
@@ -203,13 +197,13 @@ async fn a_source_uri_outside_the_tenants_own_prefix_is_refused(pool: PgPool) {
         let (status, body) = send(&s, post("/v1/documents", json!({ "language": "en", "source_uri": uri }))).await;
         assert_eq!(status, StatusCode::ACCEPTED, "{uri} was refused: {body}");
     }
-    assert_eq!(bus.published.lock().expect("lock").len(), 2);
+    assert_eq!(dispatch.count(), 2);
 }
 
 #[sqlx::test(migrator = "vs_vault::MIGRATOR")]
 #[ignore = "needs Postgres from `devenv up`"]
 async fn a_batch_is_validated_whole_and_then_enqueued_whole(pool: PgPool) {
-    let (s, bus) = state(pool.clone(), 0).await;
+    let (s, dispatch) = state(pool.clone(), 0).await;
 
     // One bad document rejects the batch and writes nothing: a partially accepted batch
     // is the worst outcome for a caller, who then has to work out which half ran.
@@ -222,7 +216,7 @@ async fn a_batch_is_validated_whole_and_then_enqueued_whole(pool: PgPool) {
     assert!(body["text"].as_str().unwrap_or_default().contains("documents[1]"), "the response must say which one: {body}");
     let jobs: i64 = sqlx::query_scalar("SELECT count(*) FROM ops.jobs").fetch_one(&pool).await.expect("count jobs");
     assert_eq!(jobs, 0, "a refused batch must create no jobs");
-    assert!(bus.published.lock().expect("lock").is_empty());
+    assert!(dispatch.count() == 0);
 
     let good = json!({
         "options": { "language": "en", "priority": "batch" },
@@ -235,7 +229,7 @@ async fn a_batch_is_validated_whole_and_then_enqueued_whole(pool: PgPool) {
     assert_eq!(status, StatusCode::ACCEPTED, "{body}");
     assert_eq!(body["job_ids"].as_array().map(Vec::len), Some(2), "{body}");
     assert_eq!(body["failed_job_ids"].as_array().map(Vec::len), Some(0), "{body}");
-    assert_eq!(bus.published.lock().expect("lock").len(), 2);
+    assert_eq!(dispatch.count(), 2);
 
     // Every job carries the batch, so `GET /v1/batches/{id}` can report on it, and the
     // per-document language overrides the batch's.

@@ -1,14 +1,11 @@
-# vs-infra: how the suite reaches the task bus and the blob store.
+# vs-infra: how the suite reaches the blob store.
 #
-# The NATS and Garage *services* are in `devenv-stack.nix` (the `stack` profile). What
-# stays here is the configuration pointing at them, because that is the part an external
-# deployment replaces: `VS__BUS__NATS_URL` for the bus, and the `AWS_*` variables
-# `object_store` reads for anything S3-compatible.
+# The Garage *service* is in `devenv-stack.nix` (the `stack` profile). What stays here is
+# the configuration pointing at it, because that is the part an external deployment
+# replaces: the `AWS_*` variables `object_store` reads for anything S3-compatible.
 { pkgs, ... }:
 
 {
-  packages = [ pkgs.natscli ]; # `nats stream ls`, `nats consumer info VS_TASKS ...`
-
   env = {
     # Defaults to the `stack` profile's Garage.
     AWS_ACCESS_KEY_ID = "GK0123456789abcdef01234567";

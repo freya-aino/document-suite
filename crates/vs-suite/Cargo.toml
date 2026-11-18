@@ -21,11 +21,13 @@ vs-vault.workspace = true
 vs-worker.workspace = true
 vs-core.workspace = true
 anyhow.workspace = true
+async-trait.workspace = true
 axum.workspace = true
 clap.workspace = true
 sqlx.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+uuid.workspace = true
 metrics-exporter-prometheus.workspace = true
 
 [dev-dependencies]

@@ -3,7 +3,6 @@ use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
-    pub bus: BusConfig,
     pub blob: BlobConfig,
     pub postgres: PostgresConfig,
     pub qdrant: QdrantConfig,
@@ -26,11 +25,6 @@ pub struct Config {
     /// Stage 2 (`doc` role) and page-classifier models; `page` and `doc` workers only.
     #[serde(default)]
     pub stage2: Stage2Config,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct BusConfig {
-    pub nats_url: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -104,6 +98,14 @@ pub struct WorkerConfig {
     pub render_processes: Option<usize>,
     /// A page that takes longer fails its document permanently.
     pub page_render_timeout_s: u64,
+    /// Documents processed at once. Each holds a render child and a spooled original
+    /// through its ingest stage, so this bounds disk and memory; pages inside them
+    /// contend for `max_in_flight` either way.
+    pub max_documents: usize,
+    /// Attempts per page before it is recorded failed. Replaces the queue's
+    /// `max_deliver`: a transient failure (a busy model endpoint) is retried in process,
+    /// and nothing redelivers the page later. 1 disables retrying.
+    pub page_attempts: u32,
     /// Address-space limit per render child.
     pub render_mem_limit_mb: Option<u64>,
 }
@@ -118,6 +120,8 @@ impl Default for WorkerConfig {
             scratch_dir: None,
             render_processes: None,
             page_render_timeout_s: 60,
+            max_documents: 4,
+            page_attempts: 3,
             render_mem_limit_mb: None,
         }
     }

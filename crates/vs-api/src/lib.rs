@@ -30,11 +30,10 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 
-use vs_core::{HashKey, JobSpec, JobState, LanguageTag, Owner, Priority, Profile, RunId, Task, TenantId};
+use vs_core::{HashKey, JobSpec, JobState, LanguageTag, Owner, Priority, Profile, RunId, TenantId};
 use vs_dag::StepRegistry;
 use vs_infra::blob::{key_from_uri, keys, BlobError, BlobStore};
 use vs_infra::config::ApiConfig;
-use vs_infra::queue::{Lane, Role, TaskBus};
 use vs_vault::ops::{NewJob, Ops};
 
 pub mod auth;
@@ -54,7 +53,9 @@ pub struct AppState {
     pub ops: Arc<Ops>,
     /// Token verification. Every route but `/healthz` and `/readyz` goes through it.
     pub auth: Arc<Auth>,
-    pub bus: Arc<dyn TaskBus>,
+    /// Where an accepted upload goes. No queue: this hands it to the pipeline running in
+    /// this same process.
+    pub dispatch: Arc<dyn Dispatch>,
     pub blob: Arc<dyn BlobStore>,
     pub bucket: String,
     pub api: ApiConfig,
@@ -98,6 +99,24 @@ type ApiError = (StatusCode, String);
 fn internal(e: impl std::fmt::Display) -> ApiError {
     tracing::error!(error = %e, "request failed");
     (StatusCode::INTERNAL_SERVER_ERROR, "internal error".into())
+}
+
+/// How an accepted upload reaches the pipeline.
+///
+/// A trait because these routes must not depend on the pipeline: this crate is a library
+/// and [`vs-suite`] is what owns both halves. It is also the seam a test substitutes.
+///
+/// `dispatch` returns when the document is *accepted*, not when it is finished — the
+/// response is a `202` and a job id either way. There is no queue behind it any more, so
+/// the implementation is what bounds concurrency, and `in_flight` is what admission
+/// control reads.
+///
+/// [`vs-suite`]: https://example.invalid
+#[async_trait::async_trait]
+pub trait Dispatch: Send + Sync {
+    async fn dispatch(&self, job_id: uuid::Uuid, run_id: RunId, spec: JobSpec) -> anyhow::Result<()>;
+    /// Documents accepted and not yet finished in this process.
+    fn in_flight(&self) -> u64;
 }
 
 /// Deletes expired idempotency keys, hourly.
@@ -242,33 +261,31 @@ async fn check_backpressure(s: &AppState, priority: Priority) -> Result<(), Resp
     if priority != Priority::Interactive {
         return Ok(());
     }
-    match s.bus.pending(Role::Ingest, Lane::Interactive).await {
-        Ok(n) if n > s.api.interactive_max_pending => {
-            metrics::counter!("vs_api_backpressure_total").increment(1);
-            Err((
-                StatusCode::TOO_MANY_REQUESTS,
-                [(header::RETRY_AFTER, HeaderValue::from_static(RETRY_AFTER_S))],
-                format!("interactive lane has {n} pending tasks (limit {}); retry later or use priority=batch", s.api.interactive_max_pending),
-            )
-                .into_response())
-        }
-        Ok(_) => Ok(()),
-        Err(e) => {
-            tracing::warn!(error = %e, "cannot read lane backlog; accepting");
-            Ok(())
-        }
+    // The depth is local now: the documents this process has accepted and not finished,
+    // rather than a queue every copy can see. Admission is therefore per copy — which is
+    // also where the work will run, so it is the number that matters.
+    let n = s.dispatch.in_flight();
+    if n > s.api.interactive_max_pending {
+        metrics::counter!("vs_api_backpressure_total").increment(1);
+        return Err((
+            StatusCode::TOO_MANY_REQUESTS,
+            [(header::RETRY_AFTER, HeaderValue::from_static(RETRY_AFTER_S))],
+            format!("{n} documents in flight (limit {}); retry later or use priority=batch", s.api.interactive_max_pending),
+        )
+            .into_response());
     }
+    Ok(())
 }
 
 /// Creates the job row and publishes the ingest task.
 async fn enqueue(s: &AppState, spec: JobSpec, document_hk: Option<HashKey>) -> Result<Accepted, ApiError> {
     let (job_id, run_id) = (uuid::Uuid::now_v7(), RunId::new());
     s.ops.create_job_for_document(job_id, None, run_id, &spec, document_hk.as_ref()).await.map_err(internal)?;
-    let task = Task::Ingest { job_id, run_id, spec: spec.clone() };
-    if let Err(e) = s.bus.publish(Role::Ingest, Lane::from(spec.priority), &task, &format!("{job_id}:ingest")).await {
-        let _ = s.ops.set_state(job_id, JobState::Failed, Some("could not enqueue ingest")).await;
-        tracing::error!(%job_id, error = %e, "enqueue failed");
-        return Err((StatusCode::SERVICE_UNAVAILABLE, "task bus unavailable, retry later".into()));
+    if let Err(e) = s.dispatch.dispatch(job_id, run_id, spec.clone()).await {
+        // The job row exists, so it must not be left looking accepted.
+        let _ = s.ops.set_state(job_id, JobState::Failed, Some("could not start processing")).await;
+        tracing::error!(%job_id, error = %e, "dispatch failed");
+        return Err((StatusCode::SERVICE_UNAVAILABLE, "cannot accept work, retry later".into()));
     }
     metrics::counter!("vs_api_jobs_created_total", "priority" => vs_vault::enum_name(&spec.priority)).increment(1);
     Ok(Accepted { job_id, document_hk: document_hk.map(|h| h.to_string()), run_id: run_id.0, status_url: format!("/v1/jobs/{job_id}") })
@@ -652,20 +669,18 @@ async fn create_batch(
         s.ops.create_batch(batch_id, &tenant, jobs.len() as u32).await.map_err(internal)?;
         s.ops.create_jobs(Some(batch_id), &jobs).await.map_err(internal)?;
 
-        let tasks: Vec<(uuid::Uuid, Lane, Task)> = jobs
-            .iter()
-            .map(|j| (j.job_id, Lane::from(j.spec.priority), Task::Ingest { job_id: j.job_id, run_id: j.run_id, spec: j.spec.clone() }))
-            .collect();
-        let failed: Vec<uuid::Uuid> = futures::stream::iter(tasks)
-            .map(|(job_id, lane, task)| {
-                let (bus, ops) = (s.bus.clone(), s.ops.clone());
+        // Each document is dispatched on its own: one that cannot be accepted is
+        // reported in `failed_job_ids` and marked failed, and the rest still run.
+        let failed: Vec<uuid::Uuid> = futures::stream::iter(jobs.clone())
+            .map(|j| {
+                let (dispatch, ops) = (s.dispatch.clone(), s.ops.clone());
                 async move {
-                    match bus.publish(Role::Ingest, lane, &task, &format!("{job_id}:ingest")).await {
+                    match dispatch.dispatch(j.job_id, j.run_id, j.spec.clone()).await {
                         Ok(()) => None,
                         Err(e) => {
-                            tracing::error!(%job_id, error = %e, "enqueue failed");
-                            let _ = ops.set_state(job_id, JobState::Failed, Some("could not enqueue ingest")).await;
-                            Some(job_id)
+                            tracing::error!(job_id = %j.job_id, error = %e, "dispatch failed");
+                            let _ = ops.set_state(j.job_id, JobState::Failed, Some("could not start processing")).await;
+                            Some(j.job_id)
                         }
                     }
                 }

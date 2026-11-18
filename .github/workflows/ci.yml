@@ -62,11 +62,11 @@ jobs:
       - run: cargo test --workspace
 
   integration:
-    name: tests that need Postgres, Qdrant, NATS, S3 and Keycloak
+    name: tests that need Postgres, Qdrant, S3 and Keycloak
     runs-on: ubuntu-latest
     services:
       # The one service with a health check and nothing to provision beyond a role.
-      # Qdrant, NATS and Garage are started by the script below, which can pass the
+      # Qdrant, Garage and Keycloak are started by the script below, which can run the
       # arguments and run the setup commands a `services:` block cannot.
       postgres:
         image: postgres:17-alpine
@@ -87,7 +87,6 @@ jobs:
       DATABASE_URL: postgres://vs:vs@127.0.0.1:5432/visual_suite
       VS__POSTGRES__PASSWORD: vs_app
       VS__QDRANT__URL: http://127.0.0.1:6334 # gRPC, not the 6333 REST port
-      VS__BUS__NATS_URL: nats://127.0.0.1:4222
       AWS_ENDPOINT: http://127.0.0.1:3900
       AWS_REGION: garage
       AWS_ALLOW_HTTP: "true"
@@ -102,7 +101,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Start Qdrant, NATS, Garage and Keycloak
+      - name: Start Qdrant, Garage and Keycloak
         run: .github/scripts/services.sh
       - name: Create the runtime role
         # Migration 0003 refuses to run without it, by design: the grants it makes are
@@ -114,4 +113,4 @@ jobs:
       - run: cargo test --workspace -- --include-ignored
       - name: Service logs
         if: failure()
-        run: for c in vs-ci-qdrant vs-ci-nats vs-ci-garage vs-ci-keycloak; do echo "== $c"; docker logs "$c" 2>&1 | tail -40; done
+        run: for c in vs-ci-qdrant vs-ci-garage vs-ci-keycloak; do echo "== $c"; docker logs "$c" 2>&1 | tail -40; done

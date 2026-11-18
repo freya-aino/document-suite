@@ -9,11 +9,10 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use serde::Serialize;
 
 use vs_classify::{DocumentClassifier, PageVote};
-use vs_core::{DocType, HashKey, JobSpec, JobState, PageResult, RunId, Task, TenantId};
+use vs_core::{DocType, HashKey, JobSpec, JobState, PageResult, RunId, TenantId};
 use vs_dag::PageImage;
 use vs_extract::{CorpusResolver, DocProfile, EmbeddingTypeNormalizer, ExtractConfig, ExtractError, ExtractionOutput, Extractor, LlmExtractor};
 use vs_graph::{DocGraph, EmbedTarget, RunInfo, Vectors};
@@ -26,7 +25,7 @@ use vs_vault::ops::Ops;
 use vs_vault::{PgOntologyStore, RunMeta, VaultWriter};
 use vs_vectors::VectorStore;
 
-use crate::runtime::{Handler, TaskError};
+use crate::TaskError;
 
 /// Concurrent corpus-resolution calls per document.
 const RESOLVE_CONCURRENCY: usize = 8;
@@ -50,25 +49,8 @@ pub struct DocHandler {
     pub max_failed_page_fraction: f32,
 }
 
-#[async_trait]
-impl Handler for DocHandler {
-    async fn handle(&self, task: &Task) -> Result<(), TaskError> {
-        let Task::Doc { job_id, run_id, document_hk, spec } = task else {
-            return Err(TaskError::permanent(anyhow::anyhow!("doc worker received {task:?}")));
-        };
-        self.process(*job_id, *run_id, document_hk, spec).await
-    }
-
-    async fn give_up(&self, task: &Task, error: &str) {
-        let job_id = crate::runtime::job_id(task);
-        if let Err(e) = self.ops.set_state(job_id, JobState::Failed, Some(error)).await {
-            tracing::error!(%job_id, error = %e, "could not mark job failed");
-        }
-    }
-}
-
 impl DocHandler {
-    async fn process(&self, job_id: uuid::Uuid, run_id: RunId, document_hk: &HashKey, spec: &JobSpec) -> Result<(), TaskError> {
+    pub(crate) async fn process(&self, job_id: uuid::Uuid, run_id: RunId, document_hk: &HashKey, spec: &JobSpec) -> Result<(), TaskError> {
         let job = self.ops.get_job(&spec.tenant, job_id).await?.ok_or_else(|| TaskError::permanent(anyhow::anyhow!("job {job_id} not found")))?;
         let pages_total =
             job.pages_total.filter(|n| *n > 0).ok_or_else(|| TaskError::permanent(anyhow::anyhow!("job {job_id} has no pages")))? as u32;
@@ -400,6 +382,7 @@ fn model_error(e: ModelError) -> TaskError {
 
 #[cfg(test)]
 mod tests {
+    use async_trait::async_trait;
     use super::*;
     use vs_core::{BBox, Block, BlockContent, BlockKind, ClassifierTier, LanguageTag, PageProfile, Profile, Provenance};
     use vs_extract::{DocEntity, Mention, Resolution};

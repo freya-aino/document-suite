@@ -3,7 +3,7 @@
 # devenv has no Qdrant module, and `pkgs.qdrant` is **not** usable: nixpkgs builds it from
 # source and its 1.18.2 fails to compile with the current toolchain — an LLVM intrinsic
 # signature mismatch in its AVX-512 quantization code. Worse, naming it in `packages`
-# makes the whole dev shell unbuildable, so Postgres and NATS stop starting too.
+# makes the whole dev shell unbuildable, so Postgres and Garage stop starting too.
 #
 # So this runs the official image. `docker` comes from the host rather than nixpkgs, which
 # keeps a multi-minute source build out of the shell; if it is missing, `devenv up` will

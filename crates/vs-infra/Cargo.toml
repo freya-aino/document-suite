@@ -10,7 +10,6 @@ publish.workspace = true
 [dependencies]
 vs-core.workspace = true
 anyhow.workspace = true
-async-nats.workspace = true
 async-trait.workspace = true
 bytes.workspace = true
 futures.workspace = true

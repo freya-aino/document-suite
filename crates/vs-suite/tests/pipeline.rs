@@ -1,13 +1,12 @@
 //! One document through the whole pipeline: ingest → Stage 1 per page → Stage 2 →
 //! Postgres + Qdrant.
 //!
-//! This is the test every checklist in this repo has been pointing at. Until the roles
-//! became a library it could not be written at all, and so the handover between stages —
-//! the `Task` one role publishes being the one the next role can act on — was covered
-//! only by fakes on both sides of it.
+//! This is the test every checklist in this repo has been pointing at. It drives
+//! `Pipeline::run` — the same call the service makes for an accepted upload — so the
+//! handover between stages is the real one and not a fake on either side of it.
 //!
-//! What is real here: the blob store, Postgres, Qdrant, the three role handlers exactly as
-//! `build_handler` wires them for a deployment, rasterisation, classification, routing,
+//! What is real here: the blob store, Postgres, Qdrant, the pipeline exactly as
+//! `build_pipeline` wires it for a deployment, rasterisation, classification, routing,
 //! DAG execution, stitching, extraction, grounding, verification, corpus resolution, the
 //! vault's write path and the vector writes.
 //!
@@ -20,26 +19,23 @@
 //!   and quotes that block's own text back. That matters: a canned answer would be
 //!   dropped by grounding, so this is the only shape of fake that exercises the grounding
 //!   path rather than skipping it.
-//! - **The task bus.** An in-process queue, so the test drives the stages in a defined
-//!   order instead of racing three `run_loop`s and polling for a terminal state. The
-//!   `Task` values crossing it are the real ones, serialised and deserialised as
-//!   JetStream would; the transport itself is covered by `vs-infra/tests/nats.rs`.
+//!
+//! And that is all that is substituted. There used to be a second entry here for the
+//! task bus, an in-process queue standing in for JetStream while the stages were three
+//! processes. The bus is gone, so the stages are function calls and there is nothing
+//! left to fake between them.
 //!
 //! `cargo test -p vs-suite -- --ignored`, with `devenv up` or the `vs-test-*` containers.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
 
-use async_trait::async_trait;
-use futures::stream::BoxStream;
 use serde_json::{json, Value};
 use sqlx::PgPool;
 
-use vs_core::{HashKey, JobSpec, JobState, LanguageTag, Priority, Profile, RunId, Task, TenantId};
-use vs_infra::queue::{Delivery, Exhausted, Lane, QueueError, Role, TaskBus};
+use vs_core::{HashKey, JobSpec, JobState, LanguageTag, Priority, Profile, RunId, TenantId};
 use vs_infra::{BlobStore, Config, ObjectBlobStore};
 use vs_vault::ops::Ops;
-use vs_worker::{build_handler, runtime::Handler, Deps};
+use vs_worker::{build_pipeline, Deps};
 
 const DIMS: usize = 8;
 const TENANT: &str = "t_pipeline";
@@ -223,43 +219,6 @@ batch_size = 16
 
 // ───────────────────────── the in-process bus ─────────────────────────
 
-/// Records what each role published, round-tripping through JSON so a task that would not
-/// survive JetStream does not survive this either.
-#[derive(Default)]
-struct QueueBus {
-    published: Mutex<Vec<(Role, Task)>>,
-    dead: Mutex<Vec<(Role, String)>>,
-}
-
-impl QueueBus {
-    fn take(&self, role: Role) -> Vec<Task> {
-        let mut all = self.published.lock().expect("lock");
-        let (mine, rest): (Vec<_>, Vec<_>) = all.drain(..).partition(|(r, _)| *r == role);
-        *all = rest;
-        mine.into_iter().map(|(_, t)| t).collect()
-    }
-}
-
-#[async_trait]
-impl TaskBus for QueueBus {
-    async fn publish(&self, role: Role, _lane: Lane, task: &Task, _dedup_id: &str) -> Result<(), QueueError> {
-        let wire = serde_json::to_vec(task).expect("a task must serialise");
-        let back: Task = serde_json::from_slice(&wire).expect("a task must round-trip");
-        self.published.lock().expect("lock").push((role, back));
-        Ok(())
-    }
-    async fn subscribe(&self, _role: Role, _lane: Lane) -> Result<BoxStream<'static, Box<dyn Delivery>>, QueueError> {
-        Ok(Box::pin(futures::stream::empty()))
-    }
-    async fn dead_letter(&self, role: Role, _task: &Task, reason: &str) -> Result<(), QueueError> {
-        self.dead.lock().expect("lock").push((role, reason.to_string()));
-        Ok(())
-    }
-    async fn subscribe_exhausted(&self, _role: Role) -> Result<BoxStream<'static, Box<dyn Exhausted>>, QueueError> {
-        Ok(Box::pin(futures::stream::empty()))
-    }
-}
-
 // ───────────────────────── the document ─────────────────────────
 
 /// A two-page TIFF, so the `doc` role's fan-in is exercised: the `doc` task must be
@@ -350,39 +309,20 @@ async fn a_document_goes_from_upload_to_both_stores(pool: PgPool) {
         .expect("insert dag list");
     assert!(ops.dag_list_activate("pipeline-1", None).await.expect("activate"), "the dag list must activate");
 
-    let bus = Arc::new(QueueBus::default());
     let spec = spec(source_uri);
     // v7, like the API's own ids: the workspace does not enable uuid's v4 feature.
     let (job_id, run_id) = (uuid::Uuid::now_v7(), RunId::new());
     ops.create_job(job_id, None, run_id, &spec).await.expect("create job");
 
-    // ── ingest ──
-    let ingest = handler(&cfg, Role::Ingest, bus.clone(), pool.clone()).await;
-    ingest
-        .handle(&Task::Ingest { job_id, run_id, spec: spec.clone() })
-        .await
-        .unwrap_or_else(|e| panic!("ingest failed: {:#}", e.error));
+    // One call, which is the point: ingest, both pages concurrently, then Stage 2. What
+    // used to be three handler invocations with a queue between them is now the same
+    // function the service calls when it accepts an upload.
+    let pipeline = pipeline(&cfg, pool.clone()).await;
+    pipeline.run(job_id, run_id, &spec).await.unwrap_or_else(|e| panic!("pipeline failed: {:#}", e.error));
 
-    let page_tasks = bus.take(Role::Page);
-    assert_eq!(page_tasks.len(), 2, "one page task per TIFF frame, got {page_tasks:#?}");
-    assert!(bus.take(Role::Doc).is_empty(), "the doc task is the page role's to publish, not ingest's");
-    let document_hk = match &page_tasks[0] {
-        Task::Page { document_hk, .. } => document_hk.clone(),
-        other => panic!("expected a page task, got {other:?}"),
-    };
-
-    // ── Stage 1, both pages ──
-    let page = handler(&cfg, Role::Page, bus.clone(), pool.clone()).await;
-    for task in &page_tasks {
-        page.handle(task).await.unwrap_or_else(|e| panic!("page failed: {:#}", e.error));
-    }
-
-    let doc_tasks = bus.take(Role::Doc);
-    assert_eq!(doc_tasks.len(), 1, "exactly one doc task after the last page, got {doc_tasks:#?}");
-
-    // ── Stage 2 ──
-    let doc = handler(&cfg, Role::Doc, bus.clone(), pool.clone()).await;
-    doc.handle(&doc_tasks[0]).await.unwrap_or_else(|e| panic!("doc failed: {:#}", e.error));
+    // The key the stores are addressed by. Taken from the content rather than from a
+    // message, now that there are no messages.
+    let document_hk = HashKey::document(&TenantId(TENANT.into()), &vs_core::content_sha256(&two_page_tiff()));
 
     // ── what the stores hold ──
     let tenant = TenantId(TENANT.into());
@@ -445,7 +385,7 @@ async fn a_document_goes_from_upload_to_both_stores(pool: PgPool) {
     std::fs::remove_dir_all(&dir).ok();
 }
 
-async fn handler(cfg: &Config, role: Role, bus: Arc<QueueBus>, pool: PgPool) -> Arc<dyn Handler> {
+async fn pipeline(cfg: &Config, pool: PgPool) -> vs_worker::Pipeline {
     let render_command = vs_ingest::ChildCommand {
         // The built service binary, because a test's own `current_exe` is the test binary
         // and does not speak the render-child protocol. Cargo sets this variable for an
@@ -456,9 +396,9 @@ async fn handler(cfg: &Config, role: Role, bus: Arc<QueueBus>, pool: PgPool) -> 
         args: vec!["render-child".into()],
         env: vec![],
     };
-    build_handler(cfg, role, Deps { bus, pool, render_command })
+    build_pipeline(cfg, Deps { pool, render_command })
         .await
-        .unwrap_or_else(|e| panic!("could not build the {role:?} handler: {e:#}"))
+        .unwrap_or_else(|e| panic!("could not build the pipeline: {e:#}"))
 }
 
 fn worker_toml(registry: &std::path::Path, qdrant_prefix: &str, scratch: &std::path::Path) -> String {

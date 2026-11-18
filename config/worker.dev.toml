@@ -2,9 +2,6 @@
 # (`devenv --profile stack up`). Secrets (VS__POSTGRES__PASSWORD, AWS_*) come from the
 # devenv environment. Every key and its default: deploy/README.md § Configuration.
 
-[bus]
-nats_url = "nats://127.0.0.1:4222"
-
 [blob]
 bucket = "visual-suite"
 endpoint = "http://127.0.0.1:3900"
@@ -26,6 +23,8 @@ max_in_flight = 32
 interactive_share = 0.3
 render_dpi = 200
 max_failed_page_fraction = 0.05
+max_documents = 4                  # documents processed at once in this process
+page_attempts = 3                  # per-page retries on a transient failure (1 = none)
 # Ingest: originals are spooled here and rendered by child processes.
 # scratch_dir = "/scratch"          # default: system temp dir
 # render_processes = 2              # default: available CPUs

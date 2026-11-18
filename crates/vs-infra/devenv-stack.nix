@@ -1,7 +1,6 @@
-# vs-infra's services: the task bus (NATS JetStream) and the blob store (Garage, as the
-# S3 server). Part of the `stack` profile only; the credentials and endpoint the suite
-# reads are in `devenv.nix`, so pointing it at your own NATS and S3 is a matter of
-# overriding those.
+# vs-infra's service: the blob store (Garage, as the S3 server). Part of the `stack`
+# profile only; the credentials and endpoint the suite reads are in `devenv.nix`, so
+# pointing it at your own S3 is a matter of overriding those.
 { ... }:
 
 let
@@ -15,12 +14,6 @@ let
   };
 in
 {
-  services.nats = {
-    enable = true;
-    port = 4222;
-    jetstream.enable = true; # streams/consumers are created by vs-infra at startup
-  };
-
   # devenv's garage module applies a single-node layout and creates the buckets.
   services.garage = {
     enable = true;

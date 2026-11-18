@@ -19,7 +19,7 @@ use vs_dag::StepRegistry;
 use vs_router::{DagList, Router};
 use vs_vault::ops::Ops;
 
-use crate::runtime::TaskError;
+use crate::TaskError;
 
 pub struct DagLists {
     ops: Arc<Ops>,

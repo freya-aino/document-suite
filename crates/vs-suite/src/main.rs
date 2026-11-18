@@ -1,77 +1,41 @@
-//! The service: the HTTP API and the worker roles in one process.
+//! The service: the HTTP API and the document pipeline in one process.
 //!
-//! One binary, one process, one deployable unit. The suite used to be two — `vs-api` and
-//! `vs-worker`, the latter run three times — which meant a deployment embedding this
-//! project had to know the suite's internal shape to run it at all. It does not need to:
-//! the roles are a concurrency decision, not a packaging one.
+//! One binary, one process, one deployable unit, and now one path through the work. There
+//! used to be a task bus between the stages and three roles to deploy; the per-page DAG
+//! was always executed in-process, so the queue's only unique contribution was spreading
+//! one document's pages across machines — at the cost of a service to run and a
+//! redelivery protocol to maintain. `vs_worker::Pipeline` is what replaced it: ingest,
+//! then the pages concurrently, then Stage 2, as function calls.
 //!
-//! So this process serves the routes in [`vs_api`] *and* runs the three worker loops in
-//! [`vs_worker`], over connections they share: one Postgres pool, one NATS connection,
-//! one metrics recorder. Scaling out is more copies of this service; `--roles` narrows a
-//! copy to part of the work when a deployment wants the halves scaled separately
-//! (goal G8), which is a choice it can make rather than one made for it.
+//! What that gives up, stated plainly: a single large document is now processed by one
+//! copy rather than spread over the fleet, and nothing redelivers work after a crash —
+//! a failed job is re-POSTed by the caller, which resumes rather than repeats.
 //!
 //! What must exist around it is in `deploy/README.md`.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use clap::{Parser, ValueEnum};
+use clap::Parser;
 use sqlx::postgres::PgPoolOptions;
-use tokio::sync::watch;
-use tokio::task::JoinSet;
+use tokio::sync::{watch, Semaphore};
 
 use vs_api::auth::Auth;
-use vs_infra::queue::{NatsBus, Role, TaskBus};
+use vs_api::Dispatch;
+use vs_core::{JobSpec, RunId};
 use vs_infra::{Config, ObjectBlobStore};
-use vs_worker::{build_handler, connect_pg, runtime, self_render_command, Deps};
-
-/// What a copy of the service does. All four by default.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
-enum RoleArg {
-    /// Serve the HTTP API.
-    Api,
-    /// Rasterize, extract the text layer, measure page signals.
-    Ingest,
-    /// Stage 1, per page.
-    Page,
-    /// Stage 2, per document.
-    Doc,
-}
-
-impl RoleArg {
-    fn as_str(self) -> &'static str {
-        match self {
-            RoleArg::Api => "api",
-            RoleArg::Ingest => "ingest",
-            RoleArg::Page => "page",
-            RoleArg::Doc => "doc",
-        }
-    }
-
-    /// The worker role this is, or `None` for the API.
-    fn worker(self) -> Option<Role> {
-        match self {
-            RoleArg::Api => None,
-            RoleArg::Ingest => Some(Role::Ingest),
-            RoleArg::Page => Some(Role::Page),
-            RoleArg::Doc => Some(Role::Doc),
-        }
-    }
-}
+use vs_worker::{build_pipeline, connect_pg, self_render_command, Deps, Pipeline};
 
 #[derive(Parser)]
-#[command(about = "The visual-suite service: HTTP API and worker roles in one process")]
+#[command(about = "The visual-suite service: HTTP API and document pipeline in one process")]
 struct Args {
-    /// What this copy runs. The default is everything, which is the point: one service.
-    #[arg(long, env = "VS_ROLES", value_enum, value_delimiter = ',', default_value = "api,ingest,page,doc")]
-    roles: Vec<RoleArg>,
     #[arg(long, env = "VS_CONFIG", default_value = "/etc/vs/worker.toml")]
     config: std::path::PathBuf,
-    /// Where the HTTP API listens. Ignored without the `api` role.
+    /// Where the HTTP API listens.
     #[arg(long, env = "VS_API_ADDR", default_value = "0.0.0.0:8080")]
     addr: String,
-    /// Seconds to wait for in-flight tasks on SIGTERM.
+    /// Seconds to wait for documents still being processed on SIGTERM.
     #[arg(long, env = "VS_SHUTDOWN_GRACE", default_value_t = 60)]
     shutdown_grace: u64,
     #[command(subcommand)]
@@ -89,7 +53,7 @@ enum Cmd {
 }
 
 fn main() -> anyhow::Result<()> {
-    // `vs-suite render-child`: the render process the ingest role's pool spawns, which is
+    // `vs-suite render-child`: the render process the ingest stage's pool spawns, which is
     // this binary re-executed (`self_render_command`). It speaks a binary protocol on
     // stdout, so it must not start the runtime or logging.
     if std::env::args().nth(1).as_deref() == Some("render-child") {
@@ -108,102 +72,106 @@ async fn run() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let roles = roles(&args.roles);
     let cfg = Config::load(&args.config)?;
-    let serve_api = roles.contains(&RoleArg::Api);
+    // Read before anything is built: there is no configuration in which these routes
+    // answer without verifying tokens.
+    let auth_cfg = cfg.auth.clone().ok_or_else(|| {
+        anyhow::anyhow!("vs-suite needs an [auth] section in {}: issuer and audience of the Keycloak realm", args.config.display())
+    })?;
 
-    // Read before anything is built, and only when this copy serves the API: there is no
-    // configuration in which these routes answer without verifying tokens, and no reason
-    // to demand a realm of a copy that serves none.
-    let auth_cfg = if serve_api {
-        Some(cfg.auth.clone().ok_or_else(|| {
-            anyhow::anyhow!("the api role needs an [auth] section in {}: issuer and audience of the Keycloak realm", args.config.display())
-        })?)
-    } else {
-        None
-    };
+    let telemetry = vs_infra::telemetry::init(&cfg.telemetry, "vs-suite")?;
+    tracing::info!(config = %args.config.display(), "vs-suite starting");
 
-    // One recorder and one tracer per process, whatever this copy runs. The service label
-    // says which roles, so two copies with different `--roles` stay apart in the metrics.
-    let telemetry = vs_infra::telemetry::init(&cfg.telemetry, &service_name(&roles))?;
-    tracing::info!(roles = %label(&roles), config = %args.config.display(), "vs-suite starting");
-
-    // Shared by every role in this process: one pool, one bus connection.
     let pool = connect_pg(&cfg).await?;
     vs_vault::check_migrations(&pool).await?; // migrations are a deploy step (`vs-suite migrate`)
-    let nats = NatsBus::connect(&cfg.bus.nats_url).await?;
-    nats.ensure_topology().await?;
-    let bus: Arc<dyn TaskBus> = Arc::new(nats);
 
-    let (stop_tx, stop_rx) = watch::channel(false);
+    // Every stage is built here, so a missing model or an unreachable Qdrant fails now
+    // rather than on the first document that reaches that stage.
+    let pipeline = Arc::new(build_pipeline(&cfg, Deps { pool: pool.clone(), render_command: self_render_command(&cfg)? }).await?);
+    let dispatch = Arc::new(Documents::new(pipeline, cfg.worker.max_documents));
+
+    let auth = Auth::discover(auth_cfg).await?;
+    auth.spawn_refresher();
+    let state = api_state(&cfg, pool, dispatch.clone(), auth, telemetry.metrics.clone())?;
+    vs_api::spawn_idempotency_purge(state.ops.clone());
+
+    let (stop_tx, mut stop_rx) = watch::channel(false);
     tokio::spawn(async move {
         shutdown_signal().await;
         tracing::info!("shutdown requested");
         let _ = stop_tx.send(true);
     });
 
-    let mut tasks: JoinSet<anyhow::Result<()>> = JoinSet::new();
+    let listener = tokio::net::TcpListener::bind(&args.addr).await?;
+    tracing::info!(addr = %args.addr, max_documents = cfg.worker.max_documents, max_pages = cfg.worker.max_in_flight, "http api listening");
+    let serving = axum::serve(listener, vs_api::router(state)).with_graceful_shutdown(async move {
+        let _ = stop_rx.wait_for(|stopping| *stopping).await;
+    });
+    serving.await?;
+    tracing::info!("http api stopped; draining documents");
 
-    for role in roles.iter().filter_map(|r| r.worker()) {
-        // A fresh `Deps` per role: `build_handler` consumes it, and the render command is
-        // cheap to resolve again. The pool and the bus are the shared ones.
-        let deps = Deps { bus: bus.clone(), pool: pool.clone(), render_command: self_render_command(&cfg)? };
-        let handler = build_handler(&cfg, role, deps).await?;
-        let loop_cfg = runtime::LoopConfig {
-            max_in_flight: cfg.worker.max_in_flight,
-            interactive_share: cfg.worker.interactive_share,
-            shutdown_grace: Duration::from_secs(args.shutdown_grace),
-        };
-        let (bus, stop) = (bus.clone(), stop_rx.clone());
-        tracing::info!(role = role.as_str(), max_in_flight = cfg.worker.max_in_flight, "role started");
-        tasks.spawn(async move { runtime::run_loop(role, bus, handler, loop_cfg, stop).await });
+    // Nothing will redeliver these, so they are worth waiting for. Past the grace they
+    // are abandoned mid-document and the job rows stay unfinished — a caller re-POST
+    // resumes them.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(args.shutdown_grace);
+    while dispatch.in_flight() > 0 && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(250)).await;
     }
-
-    if let Some(auth_cfg) = auth_cfg {
-        let auth = Auth::discover(auth_cfg).await?;
-        auth.spawn_refresher();
-        let state = api_state(&cfg, pool.clone(), bus.clone(), auth, telemetry.metrics.clone())?;
-        vs_api::spawn_idempotency_purge(state.ops.clone());
-
-        let listener = tokio::net::TcpListener::bind(&args.addr).await?;
-        tracing::info!(addr = %args.addr, "http api listening");
-        let app = vs_api::router(state);
-        let mut stop = stop_rx.clone();
-        tasks.spawn(async move {
-            axum::serve(listener, app)
-                .with_graceful_shutdown(async move {
-                    // The same signal the worker loops drain on, so the process stops
-                    // accepting requests and finishes its in-flight tasks together.
-                    let _ = stop.wait_for(|stopping| *stopping).await;
-                })
-                .await?;
-            tracing::info!("http api stopped");
-            Ok(())
-        });
+    let left = dispatch.in_flight();
+    if left > 0 {
+        tracing::warn!(documents = left, "grace elapsed with documents still in flight; they will need re-uploading");
     }
-
-    // The first failure wins and the rest are abandoned: a role that cannot run is not a
-    // degraded service, it is a misconfigured one, and a deployment should see it fail.
-    let mut result = Ok(());
-    while let Some(joined) = tasks.join_next().await {
-        let outcome = joined.map_err(anyhow::Error::from).and_then(|r| r);
-        if let Err(e) = outcome {
-            tracing::error!(error = %e, "a role stopped with an error");
-            if result.is_ok() {
-                result = Err(e);
-            }
-        }
-    }
-    // After the drain, so the spans of the tasks that finished during it are included.
     telemetry.shutdown();
-    result
+    Ok(())
 }
 
-/// The API's state, over the connections the worker roles in this process share.
+/// Runs accepted documents on this process, a bounded number at a time.
+///
+/// `dispatch` returns as soon as the document is accepted — the response is a `202` and a
+/// job id — and the work then waits for a slot in the spawned task rather than holding the
+/// request open. What stops that waiting set from growing without limit is the API's own
+/// admission check, which reads [`Documents::in_flight`].
+struct Documents {
+    pipeline: Arc<Pipeline>,
+    slots: Arc<Semaphore>,
+    in_flight: Arc<AtomicU64>,
+}
+
+impl Documents {
+    fn new(pipeline: Arc<Pipeline>, max: usize) -> Self {
+        Self { pipeline, slots: Arc::new(Semaphore::new(max.max(1))), in_flight: Arc::new(AtomicU64::new(0)) }
+    }
+}
+
+#[async_trait::async_trait]
+impl Dispatch for Documents {
+    async fn dispatch(&self, job_id: uuid::Uuid, run_id: RunId, spec: JobSpec) -> anyhow::Result<()> {
+        let (pipeline, slots, in_flight) = (self.pipeline.clone(), self.slots.clone(), self.in_flight.clone());
+        in_flight.fetch_add(1, Ordering::Relaxed);
+        tokio::spawn(async move {
+            let _slot = slots.acquire_owned().await.expect("document semaphore is never closed");
+            let span = tracing::info_span!("document", %job_id, tenant = spec.tenant.as_str());
+            let result = tracing::Instrument::instrument(pipeline.run(job_id, run_id, &spec), span).await;
+            in_flight.fetch_sub(1, Ordering::Relaxed);
+            if let Err(e) = result {
+                // Already recorded on the job row by the pipeline; logged here because
+                // nothing else is watching this task.
+                tracing::error!(%job_id, permanent = e.permanent, error = %format!("{:#}", e.error), "document failed");
+            }
+        });
+        Ok(())
+    }
+
+    fn in_flight(&self) -> u64 {
+        self.in_flight.load(Ordering::Relaxed)
+    }
+}
+
+/// The API's state, over the connections the pipeline in this process shares.
 fn api_state(
     cfg: &Config,
     pool: sqlx::PgPool,
-    bus: Arc<dyn TaskBus>,
+    dispatch: Arc<dyn Dispatch>,
     auth: Arc<Auth>,
     metrics: metrics_exporter_prometheus::PrometheusHandle,
 ) -> anyhow::Result<vs_api::AppState> {
@@ -219,38 +187,13 @@ fn api_state(
     Ok(vs_api::AppState {
         ops: Arc::new(vs_vault::ops::Ops { pool }),
         auth,
-        bus,
+        dispatch,
         blob: Arc::new(ObjectBlobStore::s3(&cfg.blob)?),
         bucket: cfg.blob.bucket.clone(),
         api: cfg.api.clone(),
         steps,
         metrics,
     })
-}
-
-/// Sorted and deduplicated, so `--roles doc,api,doc` is `api,doc` and the service label
-/// of two copies running the same work is the same string.
-fn roles(args: &[RoleArg]) -> Vec<RoleArg> {
-    let mut r = args.to_vec();
-    r.sort_unstable();
-    r.dedup();
-    r
-}
-
-fn label(roles: &[RoleArg]) -> String {
-    roles.iter().map(|r| r.as_str()).collect::<Vec<_>>().join(",")
-}
-
-/// `vs-suite` when this copy is the whole service, `vs-suite-<roles>` when it is a part.
-///
-/// The label joins a process's metrics and its traces (§5.5), so a copy running only the
-/// `page` role must not report under the same name as one running everything.
-fn service_name(roles: &[RoleArg]) -> String {
-    if roles.len() == 4 {
-        "vs-suite".into()
-    } else {
-        format!("vs-suite-{}", roles.iter().map(|r| r.as_str()).collect::<Vec<_>>().join("-"))
-    }
 }
 
 async fn shutdown_signal() {
@@ -265,38 +208,4 @@ async fn shutdown_signal() {
     }
     #[cfg(not(unix))]
     let _ = ctrl_c.await;
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn roles_are_deduplicated_and_ordered() {
-        assert_eq!(roles(&[RoleArg::Doc, RoleArg::Api, RoleArg::Doc]), vec![RoleArg::Api, RoleArg::Doc]);
-        assert_eq!(label(&roles(&[RoleArg::Page, RoleArg::Ingest])), "ingest,page");
-    }
-
-    #[test]
-    fn the_service_label_says_which_part_of_the_service_this_is() {
-        // The whole service reports under one name; a part says which part, because the
-        // label is what joins a process's metrics to its traces.
-        assert_eq!(service_name(&roles(&[RoleArg::Api, RoleArg::Ingest, RoleArg::Page, RoleArg::Doc])), "vs-suite");
-        assert_eq!(service_name(&roles(&[RoleArg::Page])), "vs-suite-page");
-        assert_eq!(service_name(&roles(&[RoleArg::Doc, RoleArg::Api])), "vs-suite-api-doc");
-        // Duplicates must not look like the whole service.
-        assert_eq!(service_name(&roles(&[RoleArg::Api, RoleArg::Api, RoleArg::Api, RoleArg::Api])), "vs-suite-api");
-    }
-
-    #[test]
-    fn every_role_maps_to_itself() {
-        use clap::ValueEnum;
-        for role in RoleArg::value_variants() {
-            assert_eq!(RoleArg::from_str(role.as_str(), true).expect("round trip"), *role);
-        }
-        assert_eq!(RoleArg::Api.worker(), None, "the api role is not a queue consumer");
-        for role in [RoleArg::Ingest, RoleArg::Page, RoleArg::Doc] {
-            assert_eq!(role.worker().map(|r| r.as_str()), Some(role.as_str()));
-        }
-    }
 }

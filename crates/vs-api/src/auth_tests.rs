@@ -113,7 +113,7 @@ pub(crate) fn state() -> AppState {
     AppState {
         ops: Arc::new(Ops { pool }),
         auth: verifier(),
-        bus: Arc::new(super::http_tests::FakeBus::idle()),
+        dispatch: Arc::new(super::http_tests::FakeDispatch::idle()),
         blob: Arc::new(vs_infra::ObjectBlobStore::new(Arc::new(object_store::memory::InMemory::new()))),
         bucket: "visual-suite".into(),
         api: ApiConfig::default(),

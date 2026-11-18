@@ -1,26 +1,24 @@
-//! Role `ingest`: see vs-ingest/SPEC.md "Ingest flow".
+//! Stage `ingest`: see vs-ingest/SPEC.md "Ingest flow".
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use bytes::Bytes;
 use futures::{StreamExt, TryStreamExt};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use vs_core::{HashKey, JobSpec, JobState, RunId, Task};
+use vs_core::{HashKey, JobSpec, JobState, RunId};
 use vs_infra::blob::{key_from_uri, keys, BlobStore};
-use vs_infra::queue::{Lane, Role, TaskBus};
 use vs_ingest::{detect_format, Format, IngestError, PageAssets, RenderPool};
 use vs_vault::ops::Ops;
 use vs_vault::{DocumentMeta, RunMeta, VaultWriter};
 
-use crate::runtime::{Handler, TaskError};
+use crate::pipeline::PageRef;
+use crate::TaskError;
 
 pub struct IngestHandler {
     pub blob: Arc<dyn BlobStore>,
-    pub bus: Arc<dyn TaskBus>,
     pub vault: Arc<dyn VaultWriter>,
     pub ops: Arc<Ops>,
     /// Render child processes (pdfium never runs in the worker process).
@@ -33,25 +31,9 @@ pub struct IngestHandler {
     pub max_pages: u32,
 }
 
-#[async_trait]
-impl Handler for IngestHandler {
-    async fn handle(&self, task: &Task) -> Result<(), TaskError> {
-        let Task::Ingest { job_id, run_id, spec } = task else {
-            return Err(TaskError::permanent(anyhow::anyhow!("ingest worker received {task:?}")));
-        };
-        self.ingest(*job_id, *run_id, spec).await
-    }
-
-    async fn give_up(&self, task: &Task, error: &str) {
-        let job_id = crate::runtime::job_id(task);
-        if let Err(e) = self.ops.set_state(job_id, JobState::Failed, Some(error)).await {
-            tracing::error!(%job_id, error = %e, "could not mark job failed");
-        }
-    }
-}
-
 impl IngestHandler {
-    async fn ingest(&self, job_id: uuid::Uuid, run_id: RunId, spec: &JobSpec) -> Result<(), TaskError> {
+    /// Renders the document and returns one [`PageRef`] per page for the page stage.
+    pub(crate) async fn ingest(&self, job_id: uuid::Uuid, run_id: RunId, spec: &JobSpec) -> Result<(HashKey, Vec<PageRef>), TaskError> {
         let job = self
             .ops
             .get_job(&spec.tenant, job_id)
@@ -96,20 +78,14 @@ impl IngestHandler {
         self.vault.write_document(&run, spec, &meta).await?;
         self.ops.start_pages(job_id, &document_hk, page_count).await?;
 
-        let lane = Lane::from(spec.priority);
-        for n in 1..=page_count {
-            let page = Task::Page {
-                job_id,
-                run_id,
-                document_hk: document_hk.clone(),
+        let pages = (1..=page_count)
+            .map(|n| PageRef {
                 page_no: n,
                 page_image_uri: keys::page_image(document_hk.as_str(), n, self.render_dpi),
                 text_layer_uri: (format == Format::Pdf).then(|| keys::text_layer(document_hk.as_str(), n)),
-                spec: spec.clone(),
-            };
-            self.bus.publish(Role::Page, lane, &page, &format!("{job_id}:page:{n}")).await?;
-        }
-        Ok(())
+            })
+            .collect();
+        Ok((document_hk, pages))
     }
 
     /// Streams the object to `path`, hashing on the way. Returns (sha256 hex, size).
