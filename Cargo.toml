@@ -71,12 +71,10 @@ opentelemetry = "0.33"
 opentelemetry-otlp = { version = "0.33", default-features = false, features = ["trace", "http-proto", "reqwest-blocking-client"] }
 opentelemetry_sdk = { version = "0.33", features = ["rt-tokio"] }
 metrics-exporter-prometheus = { version = "0.18", default-features = false }
-# Pinned to 9, and no longer for the MSRV reason that first pinned it (10+ declare 1.88,
-# which the declared 1.89 now allows). 10 and later route verification through a
-# pluggable `CryptoProvider` and need a backend feature chosen explicitly, so moving is a
-# change to `vs-api`'s verifier rather than a version bump. 9.3 has the JWK API that code
-# is written against.
-jsonwebtoken = "9"
+# `rust_crypto` rather than `aws_lc_rs`: verifying a token is the one place in the suite
+# where a pure-Rust implementation is both available and free (goal G9), and with exactly
+# one backend feature enabled the provider needs no installation at startup.
+jsonwebtoken = { version = "12", default-features = false, features = ["use_pem", "rust_crypto"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "tiff"] }
 # Pure-Rust image operations for the pre-processing steps (goal G9: no OpenCV bindings).
 imageproc = { version = "0.27", default-features = false }

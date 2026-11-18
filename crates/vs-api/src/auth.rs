@@ -259,6 +259,13 @@ impl Auth {
     /// requests answer 503 until one succeeds, which is recoverable without a restart.
     pub async fn discover(cfg: AuthConfig) -> anyhow::Result<Arc<Self>> {
         cfg.validate()?;
+        // `jsonwebtoken` 12 verifies through a pluggable provider, chosen here by
+        // enabling exactly one backend feature. Asked for at startup so a build with none
+        // — or both — fails now rather than on the first request that needs a signature
+        // checked.
+        if jsonwebtoken::crypto::CryptoProvider::try_get_default().is_none() {
+            anyhow::bail!("no JWT crypto provider: build vs-api with exactly one of jsonwebtoken's `rust_crypto` or `aws_lc_rs` features");
+        }
         let http = reqwest::Client::builder().timeout(Duration::from_secs(10)).build()?;
         let url = format!("{}/.well-known/openid-configuration", cfg.issuer.trim_end_matches('/'));
 

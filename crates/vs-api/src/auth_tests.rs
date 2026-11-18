@@ -267,7 +267,7 @@ async fn a_token_signed_with_the_public_key_as_an_hmac_secret_is_refused() {
     forged["organization"] = json!("some-other-org");
 
     for secret in [modulus.as_bytes().to_vec(), base64_url(&modulus)] {
-        let token = sign_with(&forged, "test-key-1", Algorithm::HS256, EncodingKey::from_secret(&secret));
+        let token = sign_with(&forged, "test-key-1", Algorithm::HS256, EncodingKey::from_secret(&secret).expect("hmac key"));
         let err = verifier().verify(&token).await.expect_err("an HMAC token was accepted");
         assert_eq!(err.reason(), "alg", "refused for the wrong reason: {err:?}");
         assert_eq!(status_of(&state(), get_with("/metrics", Some(&token))).await, StatusCode::UNAUTHORIZED);
