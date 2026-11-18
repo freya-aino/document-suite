@@ -29,14 +29,28 @@ pub enum Profile {
 /// so that read scoping *within* an organization can be enforced later without
 /// re-plumbing: a job already knows which person, department and workspaces it came
 /// from. Nothing enforces on it yet — see `vs-api/SPEC.md`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Owner {
     /// Keycloak `sub`: stable, and not an email address.
+    ///
+    /// Serialized, because the job row is what needs it; **redacted in `Debug`**, because
+    /// a `JobSpec` is printed in logs and error paths and telemetry carries no
+    /// user-specific identifier (`docs/SPEC.md` §5.6).
     pub subject: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub department: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub workspaces: Vec<String>,
+}
+
+impl std::fmt::Debug for Owner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Owner")
+            .field("subject", &"<redacted>")
+            .field("department", &self.department)
+            .field("workspaces", &self.workspaces)
+            .finish()
+    }
 }
 
 /// Per-document request accepted by the API.

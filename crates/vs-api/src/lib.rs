@@ -155,15 +155,20 @@ async fn record_metrics(req: Request, next: Next) -> Response {
     let start = Instant::now();
     let method = req.method().to_string();
     let path = req.extensions().get::<MatchedPath>().map(|p| p.as_str().to_string()).unwrap_or_else(|| "unmatched".into());
-    // The span is created here, outside the authentication layer, with the caller's
-    // fields empty: `auth::authenticate` fills them in once it knows who called, and
-    // every log line under the request then carries the organization and the person.
+    // The span is created here, outside the authentication layer, with the tenant empty:
+    // `auth::authenticate` fills it in once it knows which organization called, and every
+    // log line under the request then carries it.
+    //
+    // The *person* is deliberately absent. Telemetry carries no user-specific identifier
+    // (`docs/SPEC.md` §5.6): spans are exported to a collector and logs are shipped, both
+    // with their own retention, and a Keycloak `sub` in them is personal data in a place
+    // that was never designed to hold any. Which person made a request is answered by
+    // Keycloak's own audit log, which is the system that is allowed to know.
     let span = tracing::info_span!(
         "http_request",
         method = %method,
         path = %path,
         tenant = tracing::field::Empty,
-        subject = tracing::field::Empty,
     );
     let res = tracing::Instrument::instrument(next.run(req), span).await;
     let status = res.status().as_u16().to_string();

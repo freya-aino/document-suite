@@ -49,7 +49,7 @@ config/             example models, worker, DAG list, search space, LiteLLM
 
 ## Status
 
-All 18 crates compile together and the workspace is green: **366 tests pass, none
+All 18 crates compile together and the workspace is green: **367 tests pass, none
 ignored** — the 33 integration tests run against a live Postgres, Qdrant, NATS, Garage and
 Keycloak, one of them takes a document through the whole pipeline into both stores, and
 one asks the development realm for a token and verifies it.
@@ -188,7 +188,7 @@ isolation with. What each request is verified against is in
 
 ### Tests
 
-`cargo test --workspace` runs the 333 tests that need nothing (PDF tests need
+`cargo test --workspace` runs the 334 tests that need nothing (PDF tests need
 `PDFIUM_DYNAMIC_LIB_PATH`, set by devenv). The other 33 touch a real service and are
 `#[ignore]`d; with the stack profile running:
 

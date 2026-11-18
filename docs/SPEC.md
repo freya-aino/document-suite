@@ -213,14 +213,44 @@ Delivery is at-least-once, so **every write must be idempotent** — through has
 ### 5.5 Observability
 
 Standard span fields on every trace: `job_id`, `run_id`, `document_hk`, `page_no`,
-`node_id` — `document_hk` is the one not yet set anywhere. Exporters and the Prometheus
+`node_id`, plus `tenant` on an HTTP request — and **no identifier of a person**, which is
+a hard rule, not a default (§5.6). Exporters and the Prometheus
 endpoint: [`vs-infra`](../crates/vs-infra/SPEC.md). Each component's metric names are in
 its own spec, and both halves carry one name for the process — a `service` label on every
 series, the same string as the traces' `service.name` — so a counter and a trace from the
 same process are joinable: `vs-suite` for a copy running the whole service, and
 `vs-suite-<roles>` (`vs-suite-page`, `vs-suite-api-ingest`) for one running part of it.
 
-### 5.6 Security
+### 5.6 Security and personal data
+
+**Telemetry carries no user-specific identifier.** Not a metric label, not a span field,
+not a log line. Spans are exported to a collector and logs are shipped, each with its own
+retention and its own readers, so a Keycloak `sub` in them is personal data in a store
+that was never designed to hold any, cannot be found again, and cannot be erased —
+GDPR data minimisation (Art. 5(1)(c)) and storage limitation (Art. 5(1)(e)). The
+*organization* is present, deliberately: it identifies a tenant rather than a person, and
+without it an operator cannot tell whose work a trace belongs to. Which **person** made a
+request is answered by Keycloak's own audit log, the system that is allowed to know.
+
+Enforced rather than asked for: `Principal::subject` and `Owner::subject` are redacted in
+their `Debug` implementations, so a principal or a job spec reaching a log line cannot
+carry one, and `vs-api`'s `telemetry_carries_no_user_specific_identifier` captures
+everything a subscriber sees during two real requests and fails if a subject or a token id
+appears.
+
+Where personal data *does* live, and nowhere else:
+
+| Store | What | Retention |
+|---|---|---|
+| `ops.jobs.spec` (JSONB) | `owner`: the caller's subject, department and workspaces, from the verified token — needed for per-person access control | **none implemented** |
+| Task payloads on the bus | the same `JobSpec` | work-queue: deleted on ack. The DLQ keeps failed tasks 14 days |
+| Keycloak | the identity itself | the realm's own policy |
+
+The **Data Vault holds none of it**: no satellite stores the owner, which matters because
+the vault is insert-only by design (D5) and an erasure request cannot be served by a store
+that never forgets. Deleting a person's data therefore means `ops` rows and the DLQ, not
+the vault. Retention and an erasure path for those are **not implemented** — see
+[`deploy/README.md`](../deploy/README.md).
 
 Tenancy is part of every hash key, and the tenant never comes from a request body — nor
 from a header. **The tenant is the organization**, taken from a verified Keycloak token

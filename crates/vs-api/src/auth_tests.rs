@@ -569,6 +569,101 @@ async fn dev_realm_token(issuer: &str, client_id: &str, secret: &str) -> String 
         .to_string()
 }
 
+/// Telemetry carries no user-specific identifier.
+///
+/// GDPR, and not a style rule: spans go to a collector and logs get shipped, both with
+/// their own retention and their own readers, and a Keycloak `sub` in them is personal
+/// data in a store that was never designed to hold any. The organization *is* there, on
+/// purpose — it identifies a tenant, not a person, and without it an operator cannot tell
+/// whose work a trace belongs to.
+///
+/// Asserted by capturing what a subscriber is handed during real requests, rather than by
+/// reading the span macro: the field was set with `Span::record` from the authentication
+/// middleware, which no amount of looking at `info_span!` would show. The subscriber is
+/// global and installed once, so this also watches every *other* test in this binary —
+/// anything any of them puts in a span or an event is held to the same rule.
+#[test]
+fn telemetry_carries_no_user_specific_identifier() {
+    let seen = capturing_subscriber();
+
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
+    rt.block_on(async {
+        let admin = token(&admin_claims());
+        let res = router(state()).oneshot(get_with("/metrics", Some(&admin))).await.expect("router");
+        assert_eq!(res.status(), StatusCode::OK);
+        // The refusal path too: it used to log who was refused.
+        let plain = token(&claims());
+        let res = router(state()).oneshot(get_with("/metrics", Some(&plain))).await.expect("router");
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    });
+
+    let captured = seen.lock().expect("lock").join("\n");
+    assert!(captured.contains("http_request"), "nothing was captured, so this test proves nothing:\n{captured}");
+    assert!(
+        !captured.contains(SUBJECT),
+        "the subject reached telemetry — a user-specific identifier in a span or log line:\n{captured}"
+    );
+    assert!(!captured.contains("11111111-1111"), "the token id (jti) reached telemetry:\n{captured}");
+    // The tenant is deliberately present.
+    assert!(captured.contains(ORG), "the organization is missing, so a trace cannot be attributed to a tenant:\n{captured}");
+
+    // And a principal cannot leak one by being printed, which is how it would come back:
+    // the subject is redacted in `Debug`.
+    let p = rt.block_on(async { verifier().verify(&token(&admin_claims())).await.expect("verify") });
+    let printed = format!("{p:?}");
+    assert!(printed.contains("<redacted>"), "{printed}");
+    assert!(!printed.contains(SUBJECT), "Debug printed the subject: {printed}");
+    let owner = format!("{:?}", p.owner());
+    assert!(!owner.contains(SUBJECT), "Debug of the job's owner printed the subject: {owner}");
+}
+
+/// Installs a global capturing subscriber once and returns its sink.
+///
+/// Global rather than scoped with `with_default`, because `tracing` caches each callsite's
+/// interest against the *global* dispatcher: the sibling tests drive the same router, and
+/// whichever of them reaches `http_request` first would otherwise cache it as "of
+/// interest to nobody" and leave this test capturing nothing.
+fn capturing_subscriber() -> Arc<Mutex<Vec<String>>> {
+    use tracing_subscriber::layer::SubscriberExt;
+
+    static SINK: std::sync::OnceLock<Arc<Mutex<Vec<String>>>> = std::sync::OnceLock::new();
+    SINK.get_or_init(|| {
+        let sink: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(CaptureFields(sink.clone()));
+        tracing::subscriber::set_global_default(subscriber).expect("nothing else installs a subscriber here");
+        tracing::callsite::rebuild_interest_cache();
+        sink
+    })
+    .clone()
+}
+
+/// Records every span field and event field a subscriber is handed.
+struct CaptureFields(Arc<Mutex<Vec<String>>>);
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for CaptureFields {
+    fn on_new_span(&self, attrs: &tracing::span::Attributes<'_>, _: &tracing::span::Id, _: tracing_subscriber::layer::Context<'_, S>) {
+        self.0.lock().expect("lock").push(attrs.metadata().name().to_string());
+        attrs.record(&mut Collect(&self.0));
+    }
+    fn on_record(&self, _: &tracing::span::Id, values: &tracing::span::Record<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
+        values.record(&mut Collect(&self.0));
+    }
+    fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
+        event.record(&mut Collect(&self.0));
+    }
+}
+
+struct Collect<'a>(&'a Arc<Mutex<Vec<String>>>);
+
+impl tracing::field::Visit for Collect<'_> {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        self.0.lock().expect("lock").push(format!("{}={value:?}", field.name()));
+    }
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        self.0.lock().expect("lock").push(format!("{}={value}", field.name()));
+    }
+}
+
 #[test]
 fn a_config_that_would_weaken_verification_is_refused() {
     for (field, cfg) in [

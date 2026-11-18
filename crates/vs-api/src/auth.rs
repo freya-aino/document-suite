@@ -64,9 +64,15 @@ const REQUIRED_CLAIMS: [&str; 4] = ["exp", "iss", "aud", "sub"];
 const MAX_TENANT_LEN: usize = 64;
 
 /// A verified caller.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Principal {
     /// Keycloak `sub`: stable, and not an email address.
+    ///
+    /// **Not for telemetry.** It is a user-specific identifier, so it belongs in the job
+    /// row that needs it for access control and nowhere else — not in a span, not in a
+    /// log line, not in a metric label (`docs/SPEC.md` §5.6). `Debug` redacts it for that
+    /// reason: a principal is one `?principal` away from a log line, and a rule that
+    /// depends on everyone remembering it is not a rule.
     pub subject: String,
     /// The organization, which is the tenant and the isolation boundary.
     pub tenant: TenantId,
@@ -79,6 +85,20 @@ pub struct Principal {
     pub admin: bool,
     /// `jti`, for correlating a request with the token it used.
     pub token_id: Option<String>,
+}
+
+impl std::fmt::Debug for Principal {
+    /// Everything but the subject, which is redacted — see `subject`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Principal")
+            .field("subject", &"<redacted>")
+            .field("tenant", &self.tenant.as_str())
+            .field("department", &self.department)
+            .field("workspaces", &self.workspaces)
+            .field("roles", &self.roles)
+            .field("admin", &self.admin)
+            .finish()
+    }
 }
 
 impl Principal {
@@ -523,10 +543,9 @@ pub async fn authenticate(State(auth): State<Arc<Auth>>, mut req: Request, next:
     };
     match auth.verify(&token).await {
         Ok(principal) => {
-            // On the request's span, so every log line under it says who asked. The
-            // organization is the one that matters for reading an audit trail.
+            // The organization, on the request's span, so every log line under it says
+            // which tenant's work this was. Not the subject: see `Principal::subject`.
             tracing::Span::current().record("tenant", principal.tenant.as_str());
-            tracing::Span::current().record("subject", principal.subject.as_str());
             req.extensions_mut().insert(Arc::new(principal));
             next.run(req).await
         }
@@ -581,7 +600,9 @@ impl<S: Send + Sync> FromRequestParts<S> for Admin {
         if p.admin {
             Ok(Admin)
         } else {
-            tracing::warn!(subject = %p.subject, tenant = %p.tenant.as_str(), "admin route refused");
+            // No subject: an administrative refusal is worth a log line, and *who* was
+            // refused is Keycloak's to record, not ours.
+            tracing::warn!(tenant = %p.tenant.as_str(), "admin route refused");
             Err(AuthError::MissingRole)
         }
     }

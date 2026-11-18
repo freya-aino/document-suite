@@ -98,6 +98,15 @@ them:
 - **Tenancy**: the tenant is the organization claim of the caller's token. It is hashed
   into every document and entity key, prefixes every blob key, and partitions the Qdrant
   collections, so **changing what the claim contains re-keys the data** — pick it once.
+- **Personal data**: telemetry has none — no span field, log line or metric label
+  identifies a person, which is asserted by a test rather than a convention
+  (`docs/SPEC.md` §5.6). What does hold it is `ops.jobs.spec` (`owner`: the caller's
+  subject, department and workspaces) and the task payloads on the bus, where the DLQ
+  keeps failed tasks for 14 days. The Data Vault holds none of it, which is what makes an
+  erasure request answerable at all: the vault is insert-only and never forgets.
+  **Nothing implements retention or erasure for those `ops` rows** — if your deployment is
+  subject to GDPR, that is yours to add, and the shape it should take is a decision about
+  the identifier (keep the subject, keep a hash, or keep a mapping elsewhere).
 - **Reading the stores** directly (the RAG service's job) is
   [`docs/STORES.md`](../docs/STORES.md).
 

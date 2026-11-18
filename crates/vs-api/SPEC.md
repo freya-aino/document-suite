@@ -7,7 +7,7 @@ request rate.
 These routes are a **library**, not a binary: the suite deploys as one service
 ([`vs-suite`](../vs-suite/README.md)), which serves them in the same process as the three
 worker roles. A deployment that wants request handling scaled on its own runs a copy with
-`--roles api`. System spec: [`docs/SPEC.md`](../../docs/SPEC.md) §5.6 (security), §5.3
+`--roles api`. System spec: [`docs/SPEC.md`](../../docs/SPEC.md) §5.6 (security and personal data), §5.3
 (lanes) and §3 (decision D12).
 
 ## Status
@@ -16,7 +16,7 @@ Implemented: every endpoint below, multipart and JSON upload, `Idempotency-Key` 
 interactive back-pressure (`429` with `Retry-After`), source-URI tenant-prefix checks,
 DAG-list admin with `vs_router::Router::load` validation, `/metrics`, and
 **authentication against Keycloak** — see [Authentication](#authentication) for what it
-verifies and what it still does not. **23 tests that need no service**, 19 of them
+verifies and what it still does not. **24 tests that need no service**, 20 of them
 authentication's own and asserted against real RSA signatures and a real JWKS served over
 a socket, plus **6 `#[ignore]`d**: the five HTTP tests (`src/http_tests.rs`) driving the
 real router over the real `ops` schema with real signed tokens, an in-memory blob store
@@ -40,6 +40,12 @@ Remaining:
       adding ownership columns and a migration. Doing it half-way — private jobs, shared
       documents — would read as a working check while the documents stayed open, which
       is worse than a stated gap.
+- [ ] **No retention or erasure for `JobSpec::owner`.** The caller's subject is written to
+      `ops.jobs.spec` because per-person access control will need it, and nothing deletes
+      it, ages it out or answers an erasure request. Telemetry is clean and the vault
+      never sees it, so the exposure is bounded to `ops` rows and the 14-day DLQ — but a
+      bounded gap is still a gap, and it is a policy decision (store the subject, store a
+      hash of it, or keep a separate mapping) rather than a missing function.
 - [ ] No per-tenant rate limiting; a single tenant can still fill the batch lane, now
       with a valid token.
 - [ ] Nothing revokes a token before it expires. A token stays good for its `exp` even
@@ -99,6 +105,13 @@ is not in the cache provokes at most one fetch per 10 s: an unknown `kid` is eit
 rotation or a forgery, and without that floor a stream of junk tokens would make this
 endpoint an amplifier against Keycloak. A rotation is therefore picked up without a
 restart, which is asserted against a realm served on a real socket.
+
+**What reaches telemetry.** The `tenant` — an organization — on the request span, and
+nothing that identifies a person: no subject, no token id, in no span, log line or metric
+label (`docs/SPEC.md` §5.6). `Principal`'s `Debug` redacts the subject so that printing one
+cannot undo this, and `telemetry_carries_no_user_specific_identifier` captures a real
+request's spans and events and fails if either appears. An authentication failure is
+counted by `reason` and logged by class; *which* token failed is Keycloak's to record.
 
 **Roles.** `realm_access.roles` plus, when `auth.client_id` names one,
 `resource_access.<client_id>.roles`. Another client's roles are that client's business.

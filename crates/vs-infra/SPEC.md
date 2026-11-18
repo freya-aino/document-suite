@@ -162,7 +162,9 @@ healthy. `tests/traces.rs` runs a real socket and asserts a span arrives, becaus
 is the only kind of test that catches it.
 
 §5.5's standard fields are spread over the two spans that have them, not repeated on
-every span: `task` (a worker role) carries `role`, `job_id`, `run_id`, `document_hk`,
+every span — and never an identifier of a person, which `docs/SPEC.md` §5.6 states as a
+rule and `vs-api` enforces with a test:
+`task` (a worker role) carries `role`, `job_id`, `run_id`, `document_hk`,
 `page_no` and `attempt`, with the last two empty for the roles that have no such value
 yet; `dag_node` (`vs-dag`) carries `node_id`, `step`, `dag`, `page_no` and `run_id`.
 `dag_node` nests inside `task`, so a page's trace is the shape of the DAG that ran it,
