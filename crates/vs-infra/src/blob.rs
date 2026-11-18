@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::{BoxStream, StreamExt};
 use object_store::{
-    aws::AmazonS3Builder, path::Path, signer::Signer, Attribute, Attributes, ObjectStore, PutMultipartOpts, PutOptions, PutPayload, WriteMultipart,
+    aws::AmazonS3Builder, path::Path, signer::Signer, Attribute, Attributes, ObjectStore, ObjectStoreExt, PutMultipartOptions, PutOptions, PutPayload, WriteMultipart,
 };
 use reqwest::Method;
 use std::sync::Arc;
@@ -124,7 +124,7 @@ impl BlobStore for ObjectBlobStore {
             if self.signer.is_some() { Attributes::from_iter([(Attribute::ContentType, content_type.to_string())]) } else { Attributes::new() };
         let store_err = |e: object_store::Error| BlobError::Store(e.to_string());
         let upload =
-            self.store.put_multipart_opts(&Path::from(key), PutMultipartOpts { attributes, ..Default::default() }).await.map_err(store_err)?;
+            self.store.put_multipart_opts(&Path::from(key), PutMultipartOptions { attributes, ..Default::default() }).await.map_err(store_err)?;
         let mut w = WriteMultipart::new_with_chunk_size(upload, MULTIPART_CHUNK);
         let mut n: u64 = 0;
         while let Some(chunk) = stream.next().await {
@@ -148,7 +148,7 @@ impl BlobStore for ObjectBlobStore {
 
     async fn size(&self, key: &str) -> Result<Option<u64>, BlobError> {
         match self.store.head(&Path::from(key)).await {
-            Ok(m) => Ok(Some(m.size as u64)),
+            Ok(m) => Ok(Some(m.size)),
             Err(object_store::Error::NotFound { .. }) => Ok(None),
             Err(e) => Err(BlobError::Store(e.to_string())),
         }

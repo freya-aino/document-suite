@@ -78,7 +78,7 @@ jsonwebtoken = { version = "12", default-features = false, features = ["use_pem"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "tiff"] }
 # Pure-Rust image operations for the pre-processing steps (goal G9: no OpenCV bindings).
 imageproc = { version = "0.27", default-features = false }
-object_store = { version = "0.11", features = ["aws"] }
+object_store = { version = "0.14", features = ["aws"] }
 # `sync`: one process-wide binding shared across threads (calls are serialised).
 pdfium-render = { version = "0.8", features = ["sync"] }
 qdrant-client = "1.20"
@@ -90,7 +90,7 @@ qdrant-client = "1.20"
 reqwest = { version = "0.13", default-features = false, features = ["json", "form", "rustls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sha2 = "0.10"
+sha2 = "0.11"
 sqlx = { version = "0.8", default-features = false, features = ["postgres", "runtime-tokio", "tls-rustls", "macros", "chrono", "uuid", "json", "migrate"] }
 thiserror = "2"
 tiff = "0.11"
