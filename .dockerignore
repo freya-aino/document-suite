@@ -1,0 +1,12 @@
+# What the image build does not need. `target` alone is 15 GB, and sending it to the
+# daemon is most of the time a Docker build appears to take.
+target/
+.devenv/
+.direnv/
+.git/
+ocr/
+pre-processing/
+
+# Everything else is small and some of it is compiled in: the prompts and JSON schemas
+# under crates/*/prompts and crates/*/schemas are `include_str!`d, so the build fails
+# without them.

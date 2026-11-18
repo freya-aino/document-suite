@@ -16,7 +16,9 @@
 {
   languages.rust = {
     enable = true;
-    channel = "stable"; # workspace needs >= 1.82 (Option::is_none_or)
+    # Newest stable, which is the policy: `rust-version` in Cargo.toml follows what this
+    # provides, and nothing older is supported. See deploy/README.md.
+    channel = "stable";
   };
 
   packages = [ pkgs.cargo-nextest ];

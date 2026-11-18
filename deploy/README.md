@@ -8,6 +8,7 @@ configuration — and the local stack is a profile you can ignore:
 ```sh
 devenv shell                      # toolchain, pdfium, sqlx-cli — no services
 cargo build --release -p vs-suite
+docker build -f deploy/docker/Dockerfile -t document-suite:dev .   # or as an image
 devenv --profile stack up -d      # only if you want this repo's services too
 ```
 
@@ -45,23 +46,62 @@ can have three times that many tasks in flight.
 `vs-adapt` is the fourth binary and is never deployed: an offline tool for scoring
 candidate workflows in dev and stage.
 
-### There is no image here
+### The image
 
-This repo builds binaries, not containers: no Dockerfile for the service, and the only
-image builds under `deploy/` are the model tier's. Wrapping `vs-suite` in your own image
-is the intended path. What that image has to hold:
+[`docker/Dockerfile`](docker/Dockerfile) builds the service. Build it from the repository
+root — the context is the workspace, because the build compiles it:
 
-| | |
+```sh
+docker build -f deploy/docker/Dockerfile -t document-suite:dev .
+```
+
+| Stage | What it does |
 |---|---|
-| `vs-suite` | a glibc build (`cargo build --release -p vs-suite`) |
-| `libpdfium.so` | the rasterizer `dlopen`s it, so a static binary cannot replace this |
-| a CA bundle | for Keycloak, S3 and the model endpoints (`SSL_CERT_FILE`) |
-| `worker.toml` | may be almost empty — see [Configuration](#configuration) |
-| `models.toml` | the model registry, needed by the `page` and `doc` roles |
-| a writable scratch directory | ingest spools and renders there (`TMPDIR`, or the two `scratch_dir` keys) |
+| `pdfium` | fetches the prebuilt `libpdfium.so`, pinned by release **and** SHA-256 |
+| `build` | `cargo build --release --locked -p vs-suite` on `rust:1.89-bookworm` |
+| `runtime` | `debian:bookworm-slim`, the binary, the library, `ca-certificates`, and a minimal config |
 
-`deploy/firecracker/build-rootfs.sh` is a worked example of exactly that packaging, for
-microVMs.
+Three things about it worth knowing before you change them:
+
+- **pdfium is pinned to 8066, not "latest".** That is the version nixpkgs gives the dev
+  shell and CI, so a page renders in the image exactly as it does in the tests. The
+  release and its digest are build arguments (`PDFIUM_RELEASE`, `PDFIUM_SHA256`), so
+  moving it is deliberate and verified rather than silent.
+- **The builder is pinned to the declared MSRV** (`rust-version` in the workspace
+  `Cargo.toml`, 1.89), so the image cannot be what quietly raises it, and building the
+  image is one more check that the declaration is true.
+- **The `HEALTHCHECK` reads `VS_ROLES`**, because only the `api` role has an endpoint to
+  probe and a queue consumer reported unhealthy for having no HTTP server would be wrong.
+  A worker-only copy must therefore set `VS_ROLES` rather than pass `--roles`, or run with
+  `--no-healthcheck`.
+
+It runs as uid 10001, writes to `/scratch`, and ships `/etc/vs/worker.toml` as the
+smallest valid config: `[models]` pointing at `/etc/vs/models.toml`, and JSON logs.
+`[bus]`, `[blob]`, `[postgres]` and `[qdrant]` are deliberately absent — there is no
+sensible default for someone else's infrastructure, so the container stops with
+`missing field <section>` until they are set, which is better than coming up pointed at
+nothing. Mount your own file over `/etc/vs/worker.toml`, or set everything from the
+environment; both work.
+
+```sh
+docker run --rm -p 8080:8080 \
+  -v /path/to/models.toml:/etc/vs/models.toml:ro \
+  -e VS__BUS__NATS_URL=nats://nats:4222 \
+  -e VS__BLOB__BUCKET=visual-suite -e VS__BLOB__ENDPOINT=https://s3.internal \
+  -e VS__POSTGRES__URL=postgres://vs_app@pg:5432/visual_suite -e VS__POSTGRES__PASSWORD=… \
+  -e VS__QDRANT__URL=http://qdrant:6334 \
+  -e VS__AUTH__ISSUER=https://sso.example.org/realms/koki -e VS__AUTH__AUDIENCE=vs-api \
+  -e AWS_ACCESS_KEY_ID=… -e AWS_SECRET_ACCESS_KEY=… -e AWS_REGION=… \
+  document-suite:dev
+```
+
+`docker run … document-suite:dev migrate --database-url …` runs the deploy step from the
+same image, as the schema owner.
+
+There is **no compose file and no chart** here: how the service is wired to your Postgres,
+your NATS and your realm is your deployment's business, and this repo guessing at it would
+be a file nobody can use unchanged. `deploy/firecracker/build-rootfs.sh` is the other
+packaging that does exist, for microVMs.
 
 ## Configuration
 
@@ -232,6 +272,7 @@ as `the api role needs an [auth] section in …`.
 
 | | |
 |---|---|
+| [`docker/`](docker/Dockerfile) | the service image: multi-stage build, pinned pdfium, minimal baked config |
 | [`keycloak/`](keycloak/README.md) | the development realm, imported by the `stack` profile |
 | [`firecracker/`](firecracker/SPEC.md) | worker microVM image and the fleet it is meant to become |
 | [`gpu/`](gpu/SPEC.md) | the model serving tier: vLLM per pool, compose and k8s manifests |

@@ -2,11 +2,13 @@
 #
 # Three jobs, because they fail for three different reasons:
 #
-# - `check` is the fast one, and the one that earns its keep. Clippy with `-D warnings`
-#   has already caught a use of `Option::is_none_or` under a declared MSRV of 1.80 — code
-#   that did not build on the minimum this workspace claims to support.
-# - `msrv` builds on exactly that declared minimum, so the claim in `Cargo.toml` is
-#   checked rather than asserted.
+# - `check` is the fast one, and the one that earns its keep: clippy with `-D warnings`
+#   over everything, then the tests that need no service.
+# - `newest` updates the lockfile and runs both again. The policy is to track the newest
+#   stable Rust and the newest dependency versions, so what needs checking is not an old
+#   toolchain but what the new versions break — reported here before a routine
+#   `cargo update` does it to someone locally. Informational: it does not gate a merge,
+#   because what it catches is upstream's change and not this pull request's.
 # - `integration` runs the tests marked `#[ignore]`. They are not optional extras: the
 #   first time they were ever executed they found three real defects, two of them months
 #   old. Nothing but this job makes them run.
@@ -39,15 +41,25 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
 
-  msrv:
-    name: builds on the declared minimum Rust
+  newest:
+    name: newest toolchain and newest dependencies
     runs-on: ubuntu-latest
+    # The policy is to track the newest stable Rust and the newest dependency versions,
+    # so the job that used to check an older toolchain (`msrv`) would now be checking
+    # something nothing supports. This checks the other direction instead: it updates the
+    # lockfile and reports what the newest versions break, before a routine
+    # `cargo update` does it to someone locally.
+    #
+    # Informational on purpose. What it catches is upstream's change rather than this
+    # pull request's, so it must not be the thing that blocks a merge.
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
-      # Keep in step with `rust-version` in the workspace Cargo.toml.
-      - uses: dtolnay/rust-toolchain@1.82.0
+      - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo check --workspace --all-targets
+      - run: cargo update
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
 
   integration:
     name: tests that need Postgres, Qdrant, NATS, S3 and Keycloak

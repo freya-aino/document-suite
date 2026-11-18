@@ -23,7 +23,11 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.82"
+# Tracks the newest stable Rust, not a minimum anyone is asked to support: the policy is
+# to build on the current toolchain and the current dependency versions. It is capped by
+# what the dev shell provides (nixpkgs stable, 1.99.1 today) rather than by the newest
+# release, because a value above that makes the project unbuildable in its own shell.
+rust-version = "1.99"
 license = "UNLICENSED"
 publish = false
 
@@ -67,8 +71,11 @@ opentelemetry = "0.33"
 opentelemetry-otlp = { version = "0.33", default-features = false, features = ["trace", "http-proto", "reqwest-blocking-client"] }
 opentelemetry_sdk = { version = "0.33", features = ["rt-tokio"] }
 metrics-exporter-prometheus = { version = "0.17", default-features = false }
-# Pinned to 9: 10 and later declare rust-version 1.88, above the MSRV this workspace
-# declares and CI enforces. 9.3 is MSRV 1.73 and has the JWK API this needs.
+# Pinned to 9, and no longer for the MSRV reason that first pinned it (10+ declare 1.88,
+# which the declared 1.89 now allows). 10 and later route verification through a
+# pluggable `CryptoProvider` and need a backend feature chosen explicitly, so moving is a
+# change to `vs-api`'s verifier rather than a version bump. 9.3 has the JWK API that code
+# is written against.
 jsonwebtoken = "9"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "tiff"] }
 # Pure-Rust image operations for the pre-processing steps (goal G9: no OpenCV bindings).

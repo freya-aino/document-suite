@@ -150,6 +150,7 @@ DAG list. The five commands and their inputs and outputs are specified once, in
 | `vs-suite` | **bin** | **The service**: the API and all three roles in one process | [README](../crates/vs-suite/README.md) |
 | `vs-adapt` | bin | Workflow generation, scoring, selection | [SPEC](../crates/vs-adapt/SPEC.md) |
 | `deploy/` | ops | Embedding the suite in another deployment: binaries, the configuration surface, what must exist first | [README](../deploy/README.md) |
+| `deploy/docker` | ops | The service image: multi-stage build, pinned pdfium, minimal baked config | [Dockerfile](../deploy/docker/Dockerfile) |
 | `deploy/keycloak` | ops | The development realm `vs-api` verifies against | [README](../deploy/keycloak/README.md) |
 | `deploy/firecracker` | ops | microVM image and fleet | [SPEC](../deploy/firecracker/SPEC.md) |
 | `deploy/gpu` | ops | Model serving tier | [SPEC](../deploy/gpu/SPEC.md) |

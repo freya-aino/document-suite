@@ -40,6 +40,7 @@ crates/
   vs-suite/   [bin] the service: the API and all three roles in one process  README
   vs-adapt/   [bin] workflow generation, scoring, selection (dev/stage)     SPEC
 deploy/             embedding the suite in another deployment               README
+  docker/           the service image (multi-stage, pinned pdfium)
   keycloak/         the development realm vs-api verifies against            README
   firecracker/      microVM image + fleet                                   SPEC + README
   gpu/              model serving tier                                      SPEC + README
@@ -100,7 +101,7 @@ the text lines run along is measured, which end is up is a judgement with a marg
 | Job | What it does | Why it is separate |
 |---|---|---|
 | `check` | `cargo clippy --workspace --all-targets -- -D warnings`, then `cargo test --workspace` | the fast gate; clippy here has already caught a use of a 1.82 API under a declared MSRV of 1.80 |
-| `msrv` | `cargo check` on exactly the toolchain `Cargo.toml` declares | so the MSRV is checked rather than asserted |
+| `newest` | `cargo update`, then clippy and the tests on the newest stable | the policy is to track the newest toolchain and the newest dependencies, so this reports what upstream broke before a local `cargo update` does; informational, it does not block a merge |
 | `integration` | brings up Postgres, Qdrant, NATS and Garage, then `cargo test --workspace -- --include-ignored` | the first time these tests ever ran they found three real defects, two of them months old; this is also where the end-to-end pipeline test runs |
 
 `.github/scripts/services.sh` starts the three services that a GitHub `services:` block
@@ -124,7 +125,7 @@ the client side need, `devenv-stack.nix` for the service itself.
 
 | Default shell | Provides |
 |---|---|
-| `devenv.nix` | Rust stable toolchain (the workspace needs ≥ 1.82), cargo-nextest, `VS_CONFIG=config/worker.dev.toml` |
+| `devenv.nix` | Rust stable toolchain (newest; `rust-version` follows it), cargo-nextest, `VS_CONFIG=config/worker.dev.toml` |
 | `crates/vs-ingest/devenv.nix` | pdfium (`PDFIUM_DYNAMIC_LIB_PATH`) |
 | `crates/vs-vault/devenv.nix` | sqlx-cli, `DATABASE_URL`, `vs-migrate` |
 | `crates/vs-infra/devenv.nix` | `nats` CLI, and the `AWS_*` values the blob store reads |
