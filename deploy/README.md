@@ -58,7 +58,7 @@ docker build -f deploy/docker/Dockerfile -t document-suite:dev .
 | Stage | What it does |
 |---|---|
 | `pdfium` | fetches the prebuilt `libpdfium.so`, pinned by release **and** SHA-256 |
-| `build` | `cargo build --release --locked -p vs-suite` on `rust:1.89-bookworm` |
+| `build` | `cargo build --release --locked -p vs-suite` on `rust:1.100-bookworm` |
 | `runtime` | `debian:bookworm-slim`, the binary, the library, `ca-certificates`, and a minimal config |
 
 Three things about it worth knowing before you change them:
@@ -67,9 +67,10 @@ Three things about it worth knowing before you change them:
   shell and CI, so a page renders in the image exactly as it does in the tests. The
   release and its digest are build arguments (`PDFIUM_RELEASE`, `PDFIUM_SHA256`), so
   moving it is deliberate and verified rather than silent.
-- **The builder is pinned to the declared MSRV** (`rust-version` in the workspace
-  `Cargo.toml`, 1.89), so the image cannot be what quietly raises it, and building the
-  image is one more check that the declaration is true.
+- **The builder is the newest stable, pinned to an exact release.** The policy is to
+  track newest (`rust-version` in the workspace `Cargo.toml`); pinning the release here is
+  what keeps a given image reproducible. It may sit ahead of `rust-version`, which is
+  capped by what the dev shell provides.
 - **The `HEALTHCHECK` reads `VS_ROLES`**, because only the `api` role has an endpoint to
   probe and a queue consumer reported unhealthy for having no HTTP server would be wrong.
   A worker-only copy must therefore set `VS_ROLES` rather than pass `--roles`, or run with

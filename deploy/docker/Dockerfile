@@ -33,10 +33,11 @@ RUN curl -fsSL -o /tmp/pdfium.tgz \
  && tar xzf /tmp/pdfium.tgz -C /opt/pdfium lib/libpdfium.so
 
 # ───────────────────────────── build ─────────────────────────────
-# Pinned to the MSRV the workspace declares and CI enforces, so this image cannot be the
-# thing that quietly raises it — and building it is one more check that the declaration is
-# true.
-FROM rust:1.89-bookworm AS build
+# The newest stable, pinned: the policy is to track it (see `rust-version` in the
+# workspace Cargo.toml), and pinning the exact release here is what keeps an image
+# reproducible while the policy keeps it current. It may be ahead of `rust-version`, which
+# is capped by what the dev shell provides — newer is always allowed.
+FROM rust:1.100-bookworm AS build
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
