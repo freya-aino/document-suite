@@ -200,5 +200,5 @@ rendered page per child is held before upload.
 ## Errors
 
 - Corrupt/encrypted PDF → `ingest_failed` with reason; no retry for deterministic errors
-  (`term` + DLQ). Transient blob errors → `nak` with backoff.
+  (the page is recorded failed). Transient blob errors are retried in process.
 - Page count above `max_pages` (default 5 000) → reject.

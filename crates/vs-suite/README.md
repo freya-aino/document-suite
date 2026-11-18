@@ -1,76 +1,85 @@
 # vs-suite — the service
 
-One binary, one process, one deployable unit: it serves the HTTP API and runs all three
-worker roles. System spec: [`docs/SPEC.md`](../../docs/SPEC.md) §3 (architecture, decision
-D12). What a deployment must provide around it:
+One binary, one process, one deployable unit: it serves the HTTP API and processes the
+documents it accepts. System spec: [`docs/SPEC.md`](../../docs/SPEC.md) §3 (architecture,
+decisions D12 and D13). What a deployment must provide around it:
 [`deploy/README.md`](../../deploy/README.md).
 
 ```sh
-vs-suite                              # api + ingest + page + doc
-vs-suite --roles api                  # a copy that only serves requests
-vs-suite --roles ingest,page,doc      # a copy that only consumes the queue
+vs-suite                              # the service
 vs-suite migrate --database-url …     # deploy step, as the schema owner
 ```
 
 ## Why one process
 
-The suite was two binaries, and the second was run three times with `--role`. Nothing
-about the work required that: the roles hand tasks to each other over NATS, so whether
-they sit in one process or four changes the deployment and nothing else. It did require
-every deployment embedding this project to learn the suite's internal shape before it
-could run any of it.
+The suite was two binaries and the second was run three times with `--role`, with a NATS
+JetStream bus between the stages. Nothing about the work required that: the per-page DAG
+was always executed in-process, so the queue's only unique contribution was spreading one
+document's pages across machines. It cost a service to run, three deployable roles, a
+redelivery protocol, dead-lettering, lanes and de-duplication ids — and it required every
+deployment embedding this project to learn the suite's internal shape before it could run
+any of it.
 
-So the roles are a concurrency decision again. Scaling out is more copies of this
-service, which share the queue exactly as separate processes did. `--roles` narrows a copy
-when a deployment wants the halves scaled separately — goal G8 stays available, as that
-deployment's choice rather than a shape imposed on it. Two places use it already: the
-Firecracker CPU tier runs worker roles only, because a microVM takes no inbound
-connections, and `--roles api` is how you put request handling behind its own autoscaler.
+So an accepted upload is now processed by the process that accepted it:
+`vs_worker::Pipeline` runs ingest, then the pages concurrently, then Stage 2. Scaling out
+is more copies, each taking whole documents.
+
+**What that gives up**, stated here because it is the kind of thing a reader should not
+have to discover: a single large document is processed by one copy rather than spread
+across the fleet, and nothing redelivers work after a crash. A failed or abandoned job is
+re-POSTed by the caller and resumes rather than repeats — rendered pages are skipped when
+their signals are present, and every vault write is idempotent.
 
 ## What this crate is
 
-The CLI, the startup order, the signals, and nothing else — the same arrangement
-[`vs-worker`](../vs-worker/SPEC.md) already had internally, now covering the API too.
-The routes live in [`vs-api`](../vs-api/SPEC.md) (`vs_api::router`), the roles in
-[`vs-worker`](../vs-worker/SPEC.md) (`vs_worker::build_handler`), and both are libraries
+The CLI, the startup order, the signals, and the dispatcher — nothing else. The routes
+live in [`vs-api`](../vs-api/SPEC.md) (`vs_api::router`), the stages in
+[`vs-worker`](../vs-worker/SPEC.md) (`vs_worker::build_pipeline`), and both are libraries
 so a test can build what this binary runs. `tests/pipeline.rs` is that test: one document
-through all three roles into a live Postgres and Qdrant.
+through all three stages into a live Postgres and Qdrant, driving the same
+`Pipeline::run` the service calls.
 
-What the process shares between its roles:
+`Documents` is the dispatcher. `dispatch` returns as soon as a document is accepted — the
+response is a `202` and a job id — and the work then waits for a slot in a spawned task
+rather than holding the request open. What stops that waiting set from growing without
+limit is the API's own admission check, which reads `in_flight`.
+
+What the process shares:
 
 | | |
 |---|---|
-| Postgres pool | one, `postgres.max_connections` for the whole process rather than per role |
-| NATS connection | one, with the stream topology ensured once at startup |
-| Metrics recorder and tracer | one per process (`vs-infra` requires it), labelled by which roles this copy runs |
-| Shutdown | one signal: the API stops accepting and the role loops drain together, within `--shutdown-grace` |
+| Postgres pool | one, `postgres.max_connections` for the whole process |
+| Metrics recorder and tracer | one per process (`vs-infra` requires it), `service="vs-suite"` |
+| Page slots | `worker.max_in_flight` across every document, with `worker.interactive_share` reserved for interactive uploads |
+| Document slots | `worker.max_documents` |
+| Shutdown | one signal: the API stops accepting, then in-flight documents get `--shutdown-grace` |
 
-`vs-suite render-child` is this binary re-executed by the ingest role's render pool, which
-is why the rasterizer needs no second artifact. It speaks a binary protocol on stdout, so
-that path starts neither the runtime nor logging.
+`vs-suite render-child` is this binary re-executed by the ingest stage's render pool,
+which is why the rasterizer needs no second artifact. It speaks a binary protocol on
+stdout, so that path starts neither the runtime nor logging.
 
 ## Flags
 
 | Flag | Environment | Default |
 |---|---|---|
-| `--roles` | `VS_ROLES` | `api,ingest,page,doc` |
 | `--config` | `VS_CONFIG` | `/etc/vs/worker.toml` |
-| `--addr` | `VS_API_ADDR` | `0.0.0.0:8080` (ignored without the `api` role) |
+| `--addr` | `VS_API_ADDR` | `0.0.0.0:8080` |
 | `--shutdown-grace` | `VS_SHUTDOWN_GRACE` | `60` seconds |
 
-The `api` role requires an `[auth]` section and fails startup without one; a copy running
-no API does not need a realm at all. Config keys and their `VS__*` overrides:
+`[auth]` is required and the process fails startup without it. So is a reachable model
+tier and Qdrant: every copy runs every stage, so a missing model or a wrong embedding
+dimension is a startup failure rather than a surprise at the first document that got that
+far. Config keys and their `VS__*` overrides:
 [`config/worker.example.toml`](../../config/worker.example.toml).
 
 ## Known limitations
 
-- **`worker.max_in_flight` is per role, not per process.** A copy running all three roles
-  can have three times that many tasks in flight, which is the right default for a queue
-  that is mostly idle in two of its three subjects and the wrong one for a small VM. There
-  is no process-wide budget.
-- **A role that fails at startup fails the process.** A missing model, an unreachable
-  Qdrant or a wrong embedding dimension stops the whole service rather than the one role
-  that needed it — deliberate, since a service silently missing a stage is worse, but it
-  does mean the API will not serve while Stage 2's dependencies are down.
-- **`--roles` is not visible in the metrics beyond the `service` label.** Two copies with
-  different subsets are distinguishable, but there is no per-role `up` series.
+- **A crash abandons the documents in flight.** Their job rows stay mid-flight until the
+  caller re-POSTs. A resume sweep at startup would close it and needs a lease column so
+  two copies cannot claim the same job — a small piece of the queue that was removed, and
+  deliberately not rebuilt yet.
+- **Admission control is per copy.** `api.interactive_max_pending` counts this process's
+  documents, so a load balancer can get a `429` from one copy while another is idle.
+- **A stage that fails at startup fails the process.** Deliberate — a service that
+  accepted uploads it could not finish would be worse — but it does mean the API will not
+  serve while Stage 2's dependencies are down.

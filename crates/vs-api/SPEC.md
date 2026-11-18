@@ -1,14 +1,14 @@
 # vs-api — Specification
 
 The suite's ingress. Your existing front-end service-api calls it. **Stateless**: all state
-is in Postgres (`ops`), the object store and the task bus, so it scales horizontally on
-request rate.
+is in Postgres (`ops`) and the object store, so a copy keeps nothing another copy needs.
 
 These routes are a **library**, not a binary: the suite deploys as one service
 ([`vs-suite`](../vs-suite/README.md)), which serves them in the same process as the three
-worker roles. A deployment that wants request handling scaled on its own runs a copy with
-`--roles api`. System spec: [`docs/SPEC.md`](../../docs/SPEC.md) §5.6 (security and personal data), §5.3
-(lanes) and §3 (decision D12).
+pipeline. There is no queue between them (D13): a route accepts an upload, hands it to
+[`Dispatch`](src/lib.rs), and the document is processed by this same process. System spec:
+[`docs/SPEC.md`](../../docs/SPEC.md) §5.6 (security and personal data), §5.3 (priority)
+and §3 (decisions D12, D13).
 
 ## Status
 
@@ -20,7 +20,7 @@ verifies and what it still does not. **24 tests that need no service**, 20 of th
 authentication's own and asserted against real RSA signatures and a real JWKS served over
 a socket, plus **6 `#[ignore]`d**: the five HTTP tests (`src/http_tests.rs`) driving the
 real router over the real `ops` schema with real signed tokens, an in-memory blob store
-and a fake bus whose backlog the test sets, and one that asks a running Keycloak for a
+and a fake dispatcher whose in-flight count the test sets, and one that asks a running Keycloak for a
 token and verifies it.
 
 The header placeholder is gone. There is no configuration in which these routes answer a
@@ -43,11 +43,11 @@ Remaining:
 - [ ] **No retention or erasure for `JobSpec::owner`.** The caller's subject is written to
       `ops.jobs.spec` because per-person access control will need it, and nothing deletes
       it, ages it out or answers an erasure request. Telemetry is clean and the vault
-      never sees it, so the exposure is bounded to `ops` rows and the 14-day DLQ — but a
+      never sees it, so the exposure is bounded to `ops` rows — but a
       bounded gap is still a gap, and it is a policy decision (store the subject, store a
       hash of it, or keep a separate mapping) rather than a missing function.
-- [ ] No per-tenant rate limiting; a single tenant can still fill the batch lane, now
-      with a valid token.
+- [ ] No per-tenant rate limiting; a single tenant can still fill this copy's document
+      slots, now with a valid token.
 - [ ] Nothing revokes a token before it expires. A token stays good for its `exp` even
       if the session is ended in Keycloak; the realm's token lifetime is the window. No
       introspection call (it would put Keycloak on the path of every request) and no
@@ -62,7 +62,6 @@ Remaining:
       check and DAG-list activation. What is still untested is the multipart upload path
       (`skip_if_processed`, the body limit, the spool file's cleanup) and the read routes,
       which fail loudly rather than quietly.
-- [ ] No Kafka bus (inherited from `vs-infra`; nothing needs it yet).
 
 ## Authentication
 
@@ -245,8 +244,10 @@ anywhere). Authentication adds `vs_api_auth_failures_total` by `reason` and
   (per tenant and route) and replayed with the same status and an
   `Idempotent-Replayed: true` header. Two *concurrent* first requests with the same key
   both run (no lock); the API purges expired keys hourly.
-- Back-pressure: if the interactive ingest lane has more pending messages than
-  `api.interactive_max_pending` (JetStream `num_pending`), interactive requests get
-  `429` with `Retry-After: 30`; batch requests are always accepted (they queue). The
-  check runs before any state is written.
+- Back-pressure: if this process is already carrying more than
+  `api.interactive_max_pending` documents (`Dispatch::in_flight`), interactive requests get
+  `429` with `Retry-After: 30`; batch requests are always accepted. The check runs before
+  any state is written. The depth is per copy now rather than a queue every copy could
+  see — which is also where the work will run, so it is the number that matters, but it
+  does mean a load balancer sees a `429` from one copy and not from another.
 - No synchronous model calls in the API.

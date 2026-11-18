@@ -5,17 +5,17 @@
 #   1. mounts /proc, /sys, /dev (devtmpfs), /dev/pts, /tmp and /run;
 #   2. mounts the scratch disk (second virtio block device, /dev/vdb) at /scratch;
 #   3. configures eth0 from the kernel command line (`ip=` or `vs.ip=`/`vs.gw=`);
-#   4. reads the roles from `vs.roles=` (`vs.role=` and the VS_ROLES/VS_ROLE environment
-#      variables are accepted too, the latter from a bare `VS_ROLES=...` boot argument);
+#   4. (there is nothing to select any more: the service has no roles);
 #   5. fetches secrets from MMDS (169.254.169.254, V2 session token) and exports every
 #      `VS__SECTION__KEY=value` line of /vs/env as an environment variable;
-#   6. starts `vs-suite --roles $ROLES` as a child, forwards SIGTERM, reaps zombies
+#   6. starts `vs-suite` as a child, forwards SIGTERM, reaps zombies
 #      (orphaned render children are re-parented to PID 1), and powers the VM off when
 #      it exits (the host sees the Firecracker process end).
 #
-# The roles are always given explicitly here, and never include `api`: a microVM takes no
-# inbound connections (SPEC.md), so it runs queue consumers only. The same binary serves
-# the API in a deployment that wants it to.
+# SUPERSEDED. This init ran a queue consumer, and decision D13 removed the queue: a
+# microVM takes no inbound connections, so nothing can hand it a document any more. The
+# script is kept because `build-rootfs.sh` is still the worked example of packaging the
+# binary, and a VM booted from that image will start the service and then sit idle.
 #
 # Everything it needs beyond secrets comes from /etc/vs/worker.toml and
 # /etc/vs/models.toml baked into the image; VS__… variables override individual keys.
@@ -44,17 +44,6 @@ cmdline_value() {
     done
     return 0
 }
-
-ROLES=$(cmdline_value vs.roles)
-[ -n "$ROLES" ] || ROLES=$(cmdline_value vs.role)
-[ -n "$ROLES" ] || ROLES="${VS_ROLES:-${VS_ROLE:-}}"
-if [ -z "$ROLES" ]; then
-    log "no roles: set vs.roles=ingest|page|doc (comma-separated) on the kernel command line"
-    exec poweroff -f
-fi
-case ",$ROLES," in
-    *,api,*) log "refusing vs.roles=$ROLES: a microVM takes no inbound connections"; exec poweroff -f ;;
-esac
 
 # ── Scratch disk (required for the ingest role, harmless otherwise) ─────────
 SCRATCH_DEV=$(cmdline_value vs.scratch)
@@ -131,11 +120,10 @@ fi
 
 # ── Worker ──────────────────────────────────────────────────────────────────
 export VS_CONFIG="${VS_CONFIG:-/etc/vs/worker.toml}"
-export VS_ROLES="$ROLES"
 export SSL_CERT_FILE="${SSL_CERT_FILE:-/etc/ssl/certs/ca-certificates.crt}"
 if [ -w /scratch ]; then export TMPDIR=/scratch; else export TMPDIR=/tmp; fi
 export RUST_LOG="${RUST_LOG:-info}"
-hostname "vs-$(echo "$ROLES" | tr ',' '-')" 2>/dev/null || true
+hostname "vs-suite" 2>/dev/null || true
 
 WORKER_PID=
 on_term() {
@@ -144,8 +132,8 @@ on_term() {
 }
 trap on_term TERM INT
 
-log "starting vs-suite --roles $ROLES"
-/usr/bin/vs-suite --roles "$ROLES" &
+log "starting vs-suite"
+/usr/bin/vs-suite &
 WORKER_PID=$!
 
 # `wait` as PID 1 reaps every child, including orphans re-parented to us. It returns

@@ -6,7 +6,7 @@
 //! (`JobSpec::dag_list_version`) bypasses the active mapping.
 //!
 //! No active list at all is a *transient* error: the tenant's tasks wait (with the bus
-//! backoff) while an operator activates a list, instead of being dead-lettered.
+//! backoff) while an operator activates a list, rather than failing the page at once.
 
 use std::collections::HashMap;
 use std::sync::Arc;

@@ -2,72 +2,35 @@
 
 Thin adapters to infrastructure, behind traits so the pipeline crates never touch a
 client library directly. System spec: [`docs/SPEC.md`](../../docs/SPEC.md) — this crate
-owns the §5.3 lane, §5.4 reliability and §5.5 observability contracts.
+owns the §5.5 observability contract.
+
+It used to own the task bus as well, and with it §5.3 and §5.4. Decision D13 removed the
+bus: the stages are function calls in one process, so there is no delivery to make
+at-least-once and no lane to be fair about. What is left here is the blob store, the
+config loader and telemetry.
 
 ## Status
 
-Implemented: the NATS JetStream bus in full (stream topology, DLQ, max-deliveries
-advisories, lane fairness, message de-duplication, double acks, the exhausted-task give-up
-path), the S3/Garage blob store, TOML + environment config, and `telemetry`: structured
-logs, the one process-wide Prometheus recorder, and OTLP span export. 8 unit tests pass;
-6 integration tests, 4 of which need NATS and Garage from `devenv up`.
+Implemented: the S3/Garage blob store, TOML + environment config, and `telemetry`:
+structured logs, the one process-wide Prometheus recorder, and OTLP span export. 5 unit
+tests pass; 3 integration tests, one of which needs Garage from
+`devenv --profile stack up`.
 
 Remaining:
 - [ ] Nothing samples. Every span is exported, which is affordable at one span per task
       and per DAG node and will not stay so once the model client's per-attempt span is
       included at volume.
 - [ ] Encryption at rest for originals (§5.6) is asserted but not configured here.
-- [ ] No Kafka implementation behind `TaskBus` (A6 allows it; nothing needs it yet).
+- [ ] The blob store is the only remaining adapter with no second implementation, which
+      is fine while it is S3-compatible everywhere. Nothing here is pluggable for the sake
+      of it any more: the `TaskBus` trait and its NATS implementation were deleted with
+      the bus rather than kept for a Kafka nobody asked for.
 
 ## Assumptions this component rests on
 
 | ID | Assumption |
 |----|-----------|
-| A6 | Task bus is **NATS JetStream**; the `TaskBus` trait allows swapping in Kafka. |
 | A7 | Object storage is S3-compatible (Garage locally and in production). |
-
-## Task bus (`queue`)
-
-Trait `TaskBus`: `publish(lane, task)`, `subscribe(role, lane) -> stream of Delivery`,
-`Delivery::{ack, nak(delay), term}`.
-
-Default implementation: **NATS JetStream** (assumption A6).
-
-| Stream | Subjects | Retention | Consumer (durable, pull) |
-|--------|----------|-----------|--------------------------|
-| `VS_TASKS` | `vs.<role>.<lane>` — role ∈ `ingest, page, doc`; lane ∈ `interactive, batch` | work-queue | `w-<role>-<lane>` |
-| `VS_DLQ` | `vs.dlq.<role>` | limits (14 days) | inspected by ops |
-| `VS_ADVISORIES` | `$JS.EVENT.ADVISORY.CONSUMER.MAX_DELIVERIES.VS_TASKS.*` | work-queue (14 days) | `adv-<role>` (filters its role's two consumers) |
-
-- Messages are JSON `vs_core::Task` (references only; ≤ 16 KiB).
-- `ack_wait` per role: ingest 10 min, page 5 min, doc 30 min. Long tasks send
-  `in_progress` heartbeats every `ack_wait / 3`.
-- `max_deliver = 4` (1 + 3 retries). Retry delays `[10s, 60s, 300s]` are applied by the
-  worker's `nak`; the consumers have **no `backoff`**: with a backoff list JetStream
-  uses it instead of `ack_wait` (a 10 s ack window on the first delivery, so long tasks
-  were redelivered while still running) and ignores nak delays. A crashed worker's
-  task is redelivered after `ack_wait`.
-- On a handler error at the last attempt (or a permanent error) the worker publishes
-  to `VS_DLQ` and terminates the message.
-- If every attempt ends without a result (worker crash or hang each time), no handler
-  runs its give-up path. JetStream then emits a max-deliveries advisory, which
-  `VS_ADVISORIES` stores durably; `subscribe_exhausted(role)` yields the stuck task,
-  the role runs its give-up path, dead-letters it and deletes it from `VS_TASKS`. The
-  advisory is emitted on the next delivery attempt on that consumer, i.e. while some
-  worker of the role is pulling.
-- Message id header = `<job_id>:<role>:<page_no?>` → JetStream de-duplication window
-  (2 min) prevents duplicate fan-out on API/ingest retries.
-- Pulls fetch `pull_batch` messages per request (default 1): fetched messages count
-  against `ack_wait` while they wait in the client, and workers pull only when a slot
-  is free. Acks are double acks (server-confirmed).
-- Undecodable messages are terminated immediately (no retries).
-- `ensure_topology()` creates or updates both streams and all six consumers; every
-  worker and the API call it at startup.
-- Lane fairness: each worker pulls from `interactive` first, with at most
-  `interactive_share` (default 0.3) of its in-flight slots reserved for it.
-- Autoscaling reads consumer `num_pending` per role and lane.
-
-A Kafka implementation can be added behind the same trait (partition by `document_hk`).
 
 ## Blob store (`blob`)
 

@@ -71,7 +71,7 @@ fi
 # ── VM config from the example ────────────────────────────────────────────────
 # The boot args carry the role and the guest address for init.sh; the drives, TAP and
 # sizes are substituted into a copy of the example config.
-BOOT_ARGS="console=ttyS0 reboot=k panic=1 pci=off ro vs.roles=$ROLE vs.ip=$GUEST_IP/30 vs.gw=$HOST_IP vs.dns=$HOST_IP"
+BOOT_ARGS="console=ttyS0 reboot=k panic=1 pci=off ro vs.ip=$GUEST_IP/30 vs.gw=$HOST_IP vs.dns=$HOST_IP"
 VM_JSON=$RUN_DIR/vm-config.json
 jq --arg kernel "$(readlink -f "$KERNEL")" \
    --arg rootfs "$(readlink -f "$ROOTFS")" \

@@ -1,79 +1,83 @@
 # vs-worker — Specification
 
-Three roles (decision D2), as a **library**. The suite deploys as one service
-([`vs-suite`](../vs-suite/README.md)), which runs all three in one process alongside the
-HTTP API; `--roles` narrows a copy to a subset. CPU only — all model work goes over HTTP
-to the GPU tier.
+Three **stages**, as a library: ingest, pages, doc. They were three deployable roles
+pulling from a task bus; decision D13 removed the bus, so they are now function calls
+behind [`Pipeline::run`](src/pipeline.rs) — one document, one process, the process that
+accepted the upload. CPU only here: all model work goes over HTTP to the GPU tier.
 
-In the Firecracker CPU tier one microVM runs one role, because a microVM takes no inbound
-connections and therefore never the `api` role: the roles come from `vs.roles=` on the
-kernel command line (or `VS_ROLES`), passed by the fleet manager. System spec:
-[`docs/SPEC.md`](../../docs/SPEC.md) §5.2 and §5.4.
+The CLI, the signals and the service that calls this are
+[`vs-suite`](../vs-suite/README.md)'s. System spec:
+[`docs/SPEC.md`](../../docs/SPEC.md) §5.2, §5.3 and §5.4.
 
 ## Status
 
-Implemented: all three roles, the common pull loop over both lanes with heartbeats, retry
-with backoff, dead-lettering, the max-deliveries give-up path, graceful drain on SIGTERM,
-and the cached DAG-list provider. The roles live in `lib.rs` behind `build_handler`, so a
-test builds the same handler a deployment runs; the CLI and the signals are
-[`vs-suite`](../vs-suite/README.md)'s.
+Implemented: all three stages, the pipeline that runs them (pages concurrently, with the
+interactive reservation and bounded per-page retries), and the cached DAG-list provider.
+The stages live in `lib.rs` behind `build_pipeline`, so a test builds what a deployment
+runs.
 
-16 unit tests pass, with Stage 2 covered over fakes for the extractor, resolver and
-embedder, plus `vs-suite`'s `tests/pipeline.rs`: one document through **all three roles** into a live
-Postgres and Qdrant, asserting exact row and point counts. That test substitutes only the
-model tier (a fake OpenAI-compatible server on a real socket, answering from the prompt it
-was sent so grounding and verification actually run) and the bus (an in-process queue, so
-the stages run in a defined order rather than three `run_loop`s racing; NATS itself is
-covered by `vs-infra/tests/nats.rs`).
+17 unit tests pass, with Stage 2 covered over fakes for the extractor, resolver and
+embedder and the retry bound covered directly, plus `vs-suite`'s `tests/pipeline.rs`: one
+document through **all three stages** into a live Postgres and Qdrant, asserting exact row
+and point counts. That test now substitutes only the model tier — a fake
+OpenAI-compatible server on a real socket, answering from the prompt it was sent so
+grounding and verification actually run. There is nothing else left to fake between the
+stages.
 
 Remaining:
-- [ ] Nothing samples traces: every task span is exported. Affordable at one span per
-      task, not necessarily once the per-attempt model spans under it are counted.
-- [ ] Sizing guidance below is a starting guess, never validated by a load test, so the
-      vCPU/RAM figures and the `tasks_per_worker_target` the autoscaler would use are
-      unverified.
-- [ ] The `page` role takes `known_doc_type` from the caller's `JobSpec` and nowhere
+- [ ] Nothing samples traces: every stage span is exported. Affordable at one span per
+      stage, not necessarily once the per-attempt model spans under it are counted.
+- [ ] Sizing guidance below is a starting guess, never validated by a load test, and it
+      is now a guess about one process doing everything rather than three doing one thing
+      each.
+- [ ] **A crashed process abandons the documents it was carrying.** Nothing redelivers
+      them: the job rows stay mid-flight until the caller re-POSTs the upload, which
+      resumes. A resume sweep at startup would close this, and would need a lease column
+      so two copies cannot claim the same job — a small part of the queue that was
+      removed, deliberately not rebuilt yet.
+- [ ] The page stage takes `known_doc_type` from the caller's `JobSpec` and nowhere
       else, so the cross-page smoothing `vs-classify` provides for happens only when the
       caller already knew the type. Deliberate, and argued at `PageHandler::classify`:
       pages fan out with no shared per-document state.
 
-## Common loop
+## The pipeline
 
 ```
-connect bus, blob, postgres, vector store; load model registry; build StepRegistry
-load active DAG list → Router (refresh on registry change notification / every 60 s)
-loop:
-  pull from interactive lane (up to interactive_share of slots), then batch lane
-  run handler under a per-task tracing span; heartbeat in_progress every ack_wait/3
-  Ok  → ack
-  Err(transient) and attempt < max  → nak(backoff)
-  Err(permanent) or attempt == max  → dead_letter + term; mark page/job failed
+startup: connect blob, postgres, vector store; load model registry; build StepRegistry;
+         build all three stages (a missing model or an unreachable Qdrant fails here)
+per accepted document:
+  ingest  → render pages, write the document, return one PageRef per page
+  pages   → buffer_unordered over the process's page slots:
+              classify → route → run DAG → write page, blocks, provenance
+              transient failure → retry (page_attempts, 2/4/8 s) ; then record failed
+  doc     → stitch → extract → graph → Postgres + Qdrant, and the final job state
 ```
 
-Implementation (`src/runtime.rs`): one pull loop per lane; a loop pulls only after it
-holds a slot. `ceil(max_in_flight × interactive_share)` slots are reserved for the
-interactive lane (batch always keeps at least one); interactive tasks also use the
-shared slots. Handler errors are transient unless marked permanent (bad input,
-unsupported format); transient errors are `nak`ed with the bus backoff
-(10 s / 60 s / 300 s) until the last attempt, then dead-lettered like permanent ones,
-and the handler's `give_up` marks the job or page failed. A third loop consumes the role's exhausted tasks (vs-infra SPEC: max-deliveries
-advisories) and runs the same give-up path, so a task whose worker crashed on every
-attempt cannot leave its job stuck.
+Implementation: `src/pipeline.rs`. Pages are independent, so a failed page is *recorded*
+rather than propagated — `ops.page_tasks` holds its state and error — and the doc stage
+decides from `worker.max_failed_page_fraction` whether the document is `done`, `partial`
+or `failed`. A failure in the ingest or doc stage fails the job, because without them
+there is nothing to finish.
 
-Startup per role (`src/main.rs`): all roles connect bus, blob and Postgres. `page` and
-`doc` additionally load the model registry (`models.registry`; a missing file is a
-startup error for these roles only — `ingest` calls no model), build the
-`OpenAiClient` and check at startup that every configured `[stage2]` model exists in
-the registry. `page` builds `vs_steps::production_registry`; `doc` builds the
-`QdrantStore`, the `OpenAiEmbedder` and the `PgCorpusResolver`.
+`worker.max_in_flight` bounds pages in flight across every document this process is
+running (default 32; most of a page is spent waiting on a model call, so it is much larger
+than the vCPU count). `ceil(max_in_flight × interactive_share)` of those slots are
+reserved for documents uploaded with `priority = interactive`, which is what the two queue
+lanes used to do; batch work keeps at least one slot and may also use the shared ones.
+`worker.max_documents` (default 4) bounds how many documents are in flight at once, since
+each holds a render child and a spooled original through its ingest stage.
 
-`max_in_flight` concurrent tasks per process (default 32 for `page`; most of the time
-is spent waiting on model calls, so this is much larger than the vCPU count).
+Retries are in-process and bounded: `worker.page_attempts` (default 3) with a 2/4/8 s
+backoff, for transient errors only. A permanent error — bad page data, an unsupported
+format — is not retried, because it will not become valid on a second read. This replaces
+the queue's `max_deliver = 4` and its 10 s/60 s/300 s redelivery, which were sized for a
+different mechanism: nothing is waiting to redeliver now.
 
-Graceful shutdown on SIGTERM: stop pulling, finish in-flight tasks within
-`shutdown_grace` (default 60 s), `nak` the rest. Needed for scale-in and snapshotting.
+Graceful shutdown on SIGTERM: stop accepting requests, then wait up to `shutdown_grace`
+(default 60 s) for the documents in flight. Past the grace they are abandoned mid-document
+and their job rows stay unfinished — see the status list.
 
-## Role `ingest`
+## Stage `ingest`
 
 `Task::Ingest` → `vs-ingest` flow (see its SPEC): render pages, write text layers and
 signals, `VaultWriter::write_document`, fan out `Task::Page`.
@@ -101,13 +105,14 @@ list, else `none`.
   is immutable once uploaded, so the cache never expires.
 
 Every list is validated with `Router::load(list, &production_registry)` on first use.
-**No active list** and **a list that does not validate against this worker's step
-registry** are *transient* errors: the tasks wait with the bus backoff (and are
-dead-lettered only after `MAX_DELIVER` attempts) while an operator activates a usable
-list via `vs-api`, instead of being dead-lettered immediately. There is no fallback to
-`config/dag-list.example.json`: production routing must come from the registry.
+**No active list** and **a list that does not validate against this process's step
+registry** are *transient* errors, so a page retries `page_attempts` times while an
+operator activates a usable list via the API. That window is now seconds rather than the
+queue's minutes, which is the honest consequence of removing the redelivery: a document
+uploaded into a misconfigured deployment fails rather than waiting. There is no fallback
+to `config/dag-list.example.json` — production routing must come from the registry.
 
-## Role `page` (Stage 1)
+## Stage `page` (Stage 1)
 
 Implemented in `src/page.rs` (`PageHandler`).
 
@@ -122,18 +127,11 @@ sel      = router.select(profile, spec.profile)
 out      = Executor::run(sel.dag, StepContext{..}, page_image, text_layer)
 blocks   = drafts_to_blocks(out)                  (index, block_hk, provenance by node)
 write PageResult → blob results/<doc>/<run>/page-<n>.json; VaultWriter::write_page(result, rule_id)
-progress = ops.page_finished(job_id, page_no, Done, dag_ref, rule_id)
-if progress.all_finished() → publish Task::Doc on the spec's lane (dedup id <job_id>:doc)
+ops.page_finished(job_id, page_no, Done, dag_ref, rule_id)   (status + the doc stage's
+                                                              failure threshold)
 ```
 
-`page_finished` moves the page row to its final state and bumps the job counters in one
-statement; only the first call per page counts, so redeliveries cannot double count.
-The doc task is published whenever the counters show every page final
-(`all_finished()`), not only by the call that counted the last page
-(`completed_job()`): a page task redelivered after its earlier attempt counted the
-page but died before publishing must still publish, otherwise the job would stay in
-`pages_processing` forever. The duplicate publish of a healthy retry is absorbed by the
-JetStream de-dup id; beyond the de-dup window Stage 2 is idempotent per run.
+Stage 2 is idempotent per run, so running it twice for the same run writes nothing new.
 
 No doc-level smoothing of the classifier in v1: `known_doc_type` is always `None`.
 Without `stage2.classifier_model` pages are classified by rules only (tier 0); the
@@ -141,12 +139,13 @@ worker logs a warning at startup.
 
 Error classes: missing or unparseable page assets (signals, image, text layer, page
 image header), invalid DAGs, bad step params and unparseable model output are
-permanent; model calls, I/O, node timeouts, blob/Postgres/bus failures are transient.
+permanent; model calls, I/O, node timeouts and blob or Postgres failures are transient.
 
-`give_up` (permanent error or last attempt) calls `page_finished(.. Failed, error)` and
+A page that exhausts its attempts has `page_finished(.. Failed, error)` recorded for it by
+the pipeline, which
 runs the same completion check, so a failed last page still enqueues the doc task.
 
-## Role `doc` (Stage 2)
+## Stage `doc` (Stage 2)
 
 Implemented in `src/doc.rs` (`DocHandler`; the pure pipeline is `stage2()` over the
 `Extractor`, `CorpusResolver` and `Embedder` traits and is unit-tested with fakes).
@@ -202,30 +201,38 @@ every point and a reader can tell "SQL in, vectors pending" from "complete".
 Error classes: too many failed pages, unparseable page results, stitch errors (no
 pages / mixed runs), extraction schema violations and graph invariant violations are
 permanent; model, embedder, ontology-store, vector-store, blob and Postgres failures are
-transient. `give_up` sets the job to `Failed` with the error.
+transient. Either way the pipeline sets the job to `Failed` with the error, because a
+document whose Stage 2 did not run is not a document anyone can read.
 
 ## Metrics
 
-Served per `vs-infra`'s telemetry section; every series also carries
-`service="vs-worker-<role>"`.
+Served per `vs-infra`'s telemetry section; every series also carries `service="vs-suite"`.
 
 | Series | Kind | Notes |
 |---|---|---|
-| `worker_tasks_total{role,outcome}` | counter | `outcome` partitions every way a delivery leaves the loop: `ok`, `retried`, `permanent_error`, `attempts_exhausted`, `no_result`. A redelivered task is counted again when it comes back, which is the point — redelivery is the cost being measured. |
-| `worker_task_duration_seconds{role}` | histogram | one attempt, handler only |
-| `worker_tasks_in_flight{role}` | gauge | against `max_in_flight`; this is what the fleet autoscaler's `tasks_per_worker_target` is a target for. Released on panic as well as on return. |
+| `worker_stage_total{stage,outcome}` | counter | `outcome` is `ok` or `error`, per attempt — so a retried page is counted once per attempt, which is the cost being measured |
+| `worker_stage_duration_seconds{stage}` | histogram | one attempt of one stage |
+| `worker_stage_in_flight{stage}` | gauge | pages against `max_in_flight`, documents against `max_documents` |
 
-`no_result` is the give-up path for a task that exhausted its deliveries without any
-handler ever returning — a crash or a hang on every attempt. It is the one outcome that
-says the worker, not the document, is at fault.
+These replace `worker_tasks_*{role}`. The label is `stage` because that is what the three
+things are now, and the old `outcome` values that described deliveries (`retried`,
+`attempts_exhausted`, `no_result`) went with the queue that produced them.
 
-The steps a `page` worker runs report themselves: see
+The steps the page stage runs report themselves: see
 [`vs-dag`](../vs-dag/README.md)'s and [`vs-models`](../vs-models/SPEC.md)'s metrics.
 
 ## Sizing guidance (to validate in load tests)
 
-| Role | vCPU | RAM | `max_in_flight` |
-|------|------|-----|-----------------|
-| ingest | 2 | 2 GiB | 4 (pdfium rendering is CPU-bound) |
-| page | 1–2 | 1 GiB | 32 |
-| doc | 2 | 4 GiB | 4 (large documents in memory) |
+One process runs all three stages, so the figures add up rather than being chosen per
+role. A copy sized for a few documents at a time:
+
+| | |
+|---|---|
+| vCPU | 4 — rasterising is CPU-bound and runs in render children; the rest waits on the model tier |
+| RAM | 6 GiB — Stage 2 holds a whole document, and `max_documents` of them may be in flight |
+| `max_in_flight` | 32 pages |
+| `max_documents` | 4 |
+
+The old per-role table (ingest 2 vCPU/2 GiB, page 1–2/1 GiB, doc 2/4 GiB) is what these
+were before one process did all three; it is kept here only as the provenance of the
+numbers. All of it is still a guess: no load test has run.

@@ -39,7 +39,7 @@ produced it, and the exact model and prompt version used.
 | G5 | Document-level graph, not flat extraction. Scientific papers set the bar for relation extraction quality. |
 | G6 | Open-schema extraction with automatic type normalisation. |
 | G7 | Full provenance: block bbox + character span, run, DAG, step, model, prompt. |
-| G8 | Frontend/API and backend scale independently. Batch first; small batches get a faster lane. |
+| G8 | ~~Frontend/API and backend scale independently~~ — **withdrawn** by D13. There is nothing between them to scale across: a copy takes whole documents. Batch first, and interactive work still gets reserved capacity, now within a copy rather than in its own queue lane. |
 | G9 | Everything in Rust. Workers run in Firecracker microVMs. |
 
 ### Non-goals (v1)
@@ -56,18 +56,13 @@ produced it, and the exact model and prompt version used.
             ┌───────────────────────────────────────────────────────────────┐
             │  vs-suite  — one binary, one process, one deployable service  │
             │                                                               │
- clients ──▶│  api    : upload, status, DAG-list admin  ──jobs──┐           │
- (your      │                                                   │           │
- service-   │  ingest : detect, rasterize, text layer   ◀──┐    │           │
- api)       │  page   : classify → route → run DAG      ◀──┤    │           │
-            │  doc    : stitch → extract → graph        ◀──┤    │           │
-            └───────────────────┬──────────────────────────┼────┼───────────┘
-                                │                          │    ▼
-                                │              ┌───────────┴─────────────────┐
-                                │              │ Task bus (NATS JetStream)   │
-                                │              │ lanes: interactive | batch  │
-                                │              │ subjects: ingest|page|doc   │
-                                │              └─────────────────────────────┘
+ clients ──▶│  api    : upload, status, DAG-list admin                      │
+ (your      │     │                                                         │
+ service-   │     └─▶ pipeline, per accepted document:                      │
+ api)       │          ingest : detect, rasterize, text layer               │
+            │          pages  : classify → route → run DAG   (concurrent)   │
+            │          doc    : stitch → extract → graph                    │
+            └───────────────────┬───────────────────────────────────────────┘
                                 │ HTTP (OpenAI-compatible)
                                 ▼
                        ┌──────────────────────┐        ┌──────────────────┐
@@ -87,13 +82,19 @@ produced it, and the exact model and prompt version used.
                   └──────────── RAG service reads ───────────────┘
 ```
 
-**One service** (decision D12): the four roles are concurrency, not packaging. A
-deployment adds one service and scales it by running more copies; `--roles` narrows a
-copy to part of the work when the halves should scale separately (goal G8), which is then
-a choice that deployment makes rather than one the suite makes for it. The roles still
-hand work to each other over the bus, so two copies of the whole service share the queue
-exactly as a split deployment would. In the Firecracker CPU tier a microVM runs worker
-roles only, because it takes no inbound connections.
+**No task bus** (decision D13). There was one — NATS JetStream, one message per page,
+drained by a fleet of `page` workers. The per-page DAG is executed in-process either way,
+so the queue's only unique contribution was spreading a single document's pages across
+machines, and it cost a service, three deployable roles and a redelivery protocol. The
+stages are now function calls inside the process that accepted the upload; pages still run
+concurrently, bounded by `worker.max_in_flight` and by the model tier they share with
+every other copy.
+
+**One service** (decision D12): a deployment adds one unit and scales it by running more
+copies. Each copy takes whole documents, so scaling is per document rather than per page
+— the trade decision D13 made. In the Firecracker CPU tier nothing can be given work any
+more, which is why that tier is superseded (see
+[`deploy/firecracker`](../deploy/firecracker/SPEC.md)).
 
 **Key decision D1:** Firecracker has no GPU passthrough, so microVMs run CPU work only
 (I/O, rendering, classification rules, orchestration, parsing model output, writes).
@@ -185,28 +186,32 @@ in its own `SPEC.md`.
 
 ### 5.2 Scaling and throughput
 
-Page tasks are the unit of parallelism, and **skipping work is the main lever** — the
-routing table encodes which pages may skip which steps. The suite is one service
-(D12), so the default is to scale copies of it; what each part scales on, for a
-deployment that splits them with `--roles`:
-the [`api`](../crates/vs-api/SPEC.md) role on request rate;
-the [worker roles](../crates/vs-worker/SPEC.md) and
-[`deploy/firecracker`](../deploy/firecracker/SPEC.md) on JetStream lag per role and lane;
+Pages are the unit of parallelism *within* a document, and **skipping work is the main
+lever** — the routing table encodes which pages may skip which steps. The suite is one
+service with no queue (D12, D13), so it scales by running more copies, each taking whole
+documents: request rate and document throughput scale together, and a single document is
+as fast as one copy can make it.
 [`deploy/gpu`](../deploy/gpu/SPEC.md) on queue depth and batch fill per model pool;
 [`vs-router`](../crates/vs-router/README.md) decides what is skipped.
 
-### 5.3 Priority lanes
+### 5.3 Priority
 
-Two lanes, `interactive` and `batch`: the same code path over different streams and
-consumers. Stream topology and lane fairness:
-[`vs-infra`](../crates/vs-infra/SPEC.md). Admission and back-pressure:
+`priority` is still `interactive` or `batch` on every upload (A20), and still means the
+same thing: interactive work must not queue behind a large batch. With the two queue lanes
+gone, it is enforced by reserving a share of the process's page slots
+(`worker.interactive_share`) for interactive documents —
+[`vs-worker`](../crates/vs-worker/SPEC.md). Admission and back-pressure:
 [`vs-api`](../crates/vs-api/SPEC.md).
 
 ### 5.4 Reliability
 
-Delivery is at-least-once, so **every write must be idempotent** — through hash keys and
-`ON CONFLICT DO NOTHING`. Retries, dead-lettering and the max-deliveries give-up path:
-[`vs-infra`](../crates/vs-infra/SPEC.md). Partial-document threshold:
+**Every write is idempotent** — through hash keys and `ON CONFLICT DO NOTHING`. That was
+required when delivery was at-least-once, and it is what makes the weaker guarantee that
+replaced it usable: nothing redelivers a document now, so recovery is the caller re-POSTing
+the upload, which resumes rather than repeats (rendered pages are skipped when their
+signals are present, and no vault row is written twice). In-process retries for a transient
+page failure and the per-page give-up path:
+[`vs-worker`](../crates/vs-worker/SPEC.md). Partial-document threshold:
 [`vs-worker`](../crates/vs-worker/SPEC.md). Per-step timeouts:
 [`vs-dag`](../crates/vs-dag/README.md). Insert-only history:
 [`vs-vault`](../crates/vs-vault/SPEC.md).
@@ -244,13 +249,13 @@ Where personal data *does* live, and nowhere else:
 | Store | What | Retention |
 |---|---|---|
 | `ops.jobs.spec` (JSONB) | `owner`: the caller's subject, department and workspaces, from the verified token — needed for per-person access control | **none implemented** |
-| Task payloads on the bus | the same `JobSpec` | work-queue: deleted on ack. The DLQ keeps failed tasks 14 days |
+| ~~Task payloads on the bus~~ | — | **gone with the bus** (D13): the `JobSpec` no longer leaves the process, so there is no queue or dead-letter copy of it to age out |
 | Keycloak | the identity itself | the realm's own policy |
 
 The **Data Vault holds none of it**: no satellite stores the owner, which matters because
 the vault is insert-only by design (D5) and an erasure request cannot be served by a store
-that never forgets. Deleting a person's data therefore means `ops` rows and the DLQ, not
-the vault. Retention and an erasure path for those are **not implemented** — see
+that never forgets. Deleting a person's data therefore means `ops` rows and nothing else —
+removing the bus shrank this surface rather than growing it. Retention and an erasure path for those are **not implemented** — see
 [`deploy/README.md`](../deploy/README.md).
 
 Tenancy is part of every hash key, and the tenant never comes from a request body — nor
@@ -280,7 +285,8 @@ encryption at rest: [`vs-infra`](../crates/vs-infra/SPEC.md).
 | D9 | Vectors live in a dedicated vector store (Qdrant) behind a `VectorStore` trait, keyed by tenant and run | The vector store stays swappable; the graph stays in SQL next to its provenance |
 | D10 | Authentication is Keycloak (OIDC) access tokens verified in `vs-api`, against the realm's published keys | The SSO that already holds the identity model; verifying a signature locally keeps Keycloak off the path of every request, unlike introspection |
 | D11 | **The tenant is the organization**, from a verified claim | The isolation boundary has to be the thing that `TenantId` already is: key material in every hash key, blob prefix and vector partition. Organization also makes one corpus per company, so entity resolution and duplicate detection work across colleagues — which a per-person tenant would break, since the same file uploaded twice would be two documents with two keys. Person, department and workspace are therefore read scoping *within* a tenant, not key material |
-| D12 | **One service**: `vs-suite` serves the API and runs all three worker roles in one process | A deployment embedding the suite should add one service, not learn its internal shape. The roles already communicate over the bus, so one process or four changes nothing about the work; `--roles` keeps G8 available without making it the default. `vs-api` and `vs-worker` are libraries |
+| D12 | **One service**: `vs-suite` serves the API and runs the pipeline in one process | A deployment embedding the suite should add one service, not learn its internal shape. `vs-api` and `vs-worker` are libraries |
+| D13 | **No task bus.** The stages are function calls; an accepted upload is processed by the process that accepted it | The per-page DAG always ran in-process, so the queue's only unique contribution was spreading one document's pages across machines — paid for with a service, three deployable roles, redelivery, dead-lettering, lanes and de-duplication ids. Page work is dominated by waiting on the shared model tier, which one process can saturate. The cost, accepted knowingly: a large document is no longer spread over the fleet, and nothing redelivers after a crash — the caller re-POSTs, and the upload resumes rather than repeats (§5.4). Withdraws A6 and G8 |
 
 **D6/D9 replaced the original HelixDB decisions.** HelixDB held the current graph
 projection and the vectors. It has been removed in favour of Postgres (graph) and Qdrant
@@ -302,8 +308,7 @@ the spec of the component that rests on them, under "Assumptions this component 
 Where the rest went: A1, A2, A7 → [`vs-models`](../crates/vs-models/SPEC.md) and
 [`vs-infra`](../crates/vs-infra/SPEC.md) · A3, A4 →
 [`deploy/gpu`](../deploy/gpu/SPEC.md), [`deploy/firecracker`](../deploy/firecracker/SPEC.md)
-· A5, A10, A12 → [`vs-vault`](../crates/vs-vault/SPEC.md) · A6 →
-[`vs-infra`](../crates/vs-infra/SPEC.md) · A8 → withdrawn with HelixDB (its licensing question is moot) · A13, A15, A16 →
+· A5, A10, A12 → [`vs-vault`](../crates/vs-vault/SPEC.md) · A6 → withdrawn with the task bus (D13) · A8 → withdrawn with HelixDB (its licensing question is moot) · A13, A15, A16 →
 [`vs-adapt`](../crates/vs-adapt/SPEC.md) · A14 →
 [`vs-classify`](../crates/vs-classify/SPEC.md) · A17 →
 [`vs-extract`](../crates/vs-extract/SPEC.md) · A18 →

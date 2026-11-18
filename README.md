@@ -5,7 +5,7 @@ VLM workflows (Stage 1), document-level entity/relation graph extraction (Stage 
 traceable storage in a Postgres Data Vault 2.0 warehouse with vectors in Qdrant.
 
 It deploys as **one service** — `vs-suite`, which serves the HTTP API and runs all three
-worker roles in one process. Postgres, NATS, an S3-compatible store, Qdrant, Keycloak and
+document pipeline in one process. Postgres, an S3-compatible store, Qdrant, Keycloak and
 the model endpoints belong to the environment around it;
 [`deploy/README.md`](deploy/README.md) is what another deployment needs to know.
 
@@ -27,7 +27,7 @@ crates/
   vs-router/        routing table + DAG selection                           README
   vs-steps/         the production step catalogue                           README
   vs-graph/         document graph model + builder                          README
-  vs-infra/         task bus (NATS), blob store (S3), config, telemetry     SPEC
+  vs-infra/         blob store (S3), config, telemetry                      SPEC
   vs-api/     [bin] public HTTP API                                         SPEC
   vs-ingest/        format detection, rasterization, pre-processing         SPEC
   vs-classify/      page and document classification                        SPEC
@@ -50,8 +50,8 @@ config/             example models, worker, DAG list, search space, LiteLLM
 
 ## Status
 
-All 18 crates compile together and the workspace is green: **367 tests pass, none
-ignored** — the 33 integration tests run against a live Postgres, Qdrant, NATS, Garage and
+All 18 crates compile together and the workspace is green: **362 tests pass, none
+ignored** — the 30 integration tests run against a live Postgres, Qdrant, Garage and
 Keycloak, one of them takes a document through the whole pipeline into both stores, and
 one asks the development realm for a token and verifies it.
 `cargo clippy --workspace --all-targets -- -D warnings` is clean. No `todo!()` or
@@ -77,8 +77,15 @@ section lists what is left. The cross-cutting gaps:
   (`JobSpec::owner`), so the data is there; enforcing it on documents needs ownership
   columns in the vault and a migration — see `vs-api`'s status for why it is not
   half-done.
+- **Nothing redelivers work.** The task bus is gone (D13), so a crash abandons the
+  documents that copy was carrying: their job rows stay mid-flight until the caller
+  re-POSTs the upload, which resumes rather than repeats. A resume sweep at startup would
+  close it, and needs a lease column so two copies cannot claim the same job. The other
+  half of the same trade: one document is processed by one copy, so a 300-page document
+  is as fast as a single process can make it.
 - **Telemetry is wired but unproven in a deployment.** One recorder per process, served
-  on `telemetry.metrics_addr` for a worker and `/metrics` for `vs-api`, with the series
+  on `telemetry.metrics_addr`, or `/metrics` when you prefer the authenticated route,
+  with the series
   each component's spec names; spans batch-export to `telemetry.otlp_endpoint` over
   OTLP/HTTP. Both are tested against real sockets, and neither has run against a real
   Prometheus or collector, so the dashboards and the sampling policy are still to come.
@@ -102,14 +109,14 @@ the text lines run along is measured, which end is up is a judgement with a marg
 |---|---|---|
 | `check` | `cargo clippy --workspace --all-targets -- -D warnings`, then `cargo test --workspace` | the fast gate; clippy here has already caught a use of a 1.82 API under a declared MSRV of 1.80 |
 | `newest` | `cargo update`, then clippy and the tests on the newest stable | the policy is to track the newest toolchain and the newest dependencies, so this reports what upstream broke before a local `cargo update` does; informational, it does not block a merge |
-| `integration` | brings up Postgres, Qdrant, NATS and Garage, then `cargo test --workspace -- --include-ignored` | the first time these tests ever ran they found three real defects, two of them months old; this is also where the end-to-end pipeline test runs |
+| `integration` | brings up Postgres, Qdrant, Garage and Keycloak, then `cargo test --workspace -- --include-ignored` | the first time these tests ever ran they found three real defects, two of them months old; this is also where the end-to-end pipeline test runs |
 
 `.github/scripts/services.sh` starts the three services that a GitHub `services:` block
-cannot (NATS needs an argument, Garage needs provisioning). It takes ports from the
+cannot (Garage needs provisioning, Keycloak needs a realm imported). It takes ports from the
 environment, so the same script brings them up locally:
 
 ```sh
-PREFIX=vs-ci QDRANT_GRPC=56334 NATS_PORT=54222 S3_PORT=53900 .github/scripts/services.sh
+PREFIX=vs-ci QDRANT_GRPC=56334 S3_PORT=53900 KEYCLOAK_PORT=58081 .github/scripts/services.sh
 ```
 
 ## Development environment
@@ -128,7 +135,7 @@ the client side need, `devenv-stack.nix` for the service itself.
 | `devenv.nix` | Rust stable toolchain (newest; `rust-version` follows it), cargo-nextest, `VS_CONFIG=config/worker.dev.toml` |
 | `crates/vs-ingest/devenv.nix` | pdfium (`PDFIUM_DYNAMIC_LIB_PATH`) |
 | `crates/vs-vault/devenv.nix` | sqlx-cli, `DATABASE_URL`, `vs-migrate` |
-| `crates/vs-infra/devenv.nix` | `nats` CLI, and the `AWS_*` values the blob store reads |
+| `crates/vs-infra/devenv.nix` | the `AWS_*` values the blob store reads |
 | `crates/vs-vectors/devenv.nix` | `VS__QDRANT__URL` |
 | `crates/vs-worker/devenv.nix` | `vs-worker-release` |
 
@@ -136,7 +143,7 @@ the client side need, `devenv-stack.nix` for the service itself.
 |---|---|
 | `devenv-stack.nix` | collects the five below; nothing else is in the profile |
 | `crates/vs-vault/devenv-stack.nix` | PostgreSQL 17 (:5432, db/user/pass `visual_suite`/`vs`/`vs`), and the `vs`/`vs_app` roles |
-| `crates/vs-infra/devenv-stack.nix` | NATS with JetStream (:4222), Garage S3 (:3900, bucket `visual-suite`, fixed dev key) |
+| `crates/vs-infra/devenv-stack.nix` | Garage S3 (:3900, bucket `visual-suite`, fixed dev key) |
 | `crates/vs-vectors/devenv-stack.nix` | Qdrant (gRPC :6334, REST :6333) |
 | `crates/vs-models/devenv-stack.nix` | LiteLLM; `vs-litellm-up` / `vs-litellm-check` (scripts, not processes) |
 | `deploy/keycloak/devenv.nix` | Keycloak (:8081) with the `koki` realm imported, and `vs-token` |
@@ -146,7 +153,7 @@ the client side need, `devenv-stack.nix` for the service itself.
 
 ```sh
 devenv shell                     # build and unit-test the workspace; starts nothing
-devenv --profile stack up -d     # postgres, nats, garage, qdrant, keycloak
+devenv --profile stack up -d     # postgres, garage, qdrant, keycloak
 devenv --profile stack shell     # the same, plus vs-token and the model-tier scripts
 vs-migrate                       # apply vs-vault migrations as the schema owner
 devenv --profile stack down
@@ -164,9 +171,9 @@ tier at all the `ingest` role still runs on its own.
 devenv --profile stack up -d && devenv --profile stack shell
 cargo build -p vs-suite
 cargo run -p vs-ingest --example sample_pdf -- sample.pdf
-# One service: the API and all three roles in one process. `page` and `doc` need model
-# endpoints from config/models.*.toml, so with no model tier at all, start the two roles
-# that do not call one: --roles api,ingest
+# One service: the API and the pipeline in one process. It needs model endpoints from
+# config/models.*.toml at startup — every copy runs every stage — so bring up the model
+# tier first (vs-litellm-up) or point [models] at one that exists.
 VS_API_ADDR=127.0.0.1:8080 ./target/debug/vs-suite &
 curl -X PUT --upload-file sample.pdf --aws-sigv4 "aws:amz:$AWS_REGION:s3" \
   --user "$AWS_ACCESS_KEY_ID:$AWS_SECRET_ACCESS_KEY" "$AWS_ENDPOINT/visual-suite/inbox/t1/sample.pdf"
@@ -189,8 +196,8 @@ isolation with. What each request is verified against is in
 
 ### Tests
 
-`cargo test --workspace` runs the 334 tests that need nothing (PDF tests need
-`PDFIUM_DYNAMIC_LIB_PATH`, set by devenv). The other 33 touch a real service and are
+`cargo test --workspace` runs the 332 tests that need nothing (PDF tests need
+`PDFIUM_DYNAMIC_LIB_PATH`, set by devenv). The other 30 touch a real service and are
 `#[ignore]`d; with the stack profile running:
 
 ```sh
@@ -214,7 +221,6 @@ and 6333, and will not start if something else holds them:
 export DATABASE_URL=postgres://vs:vs@127.0.0.1:55432/visual_suite
 export VS__POSTGRES__PASSWORD=vs_app          # the vs_app role must exist (see devenv.nix)
 export VS__QDRANT__URL=http://127.0.0.1:56334 # gRPC, not the 6333 REST port
-export VS__BUS__NATS_URL=nats://127.0.0.1:54222
 export AWS_ENDPOINT=http://127.0.0.1:53900 AWS_REGION=garage AWS_ALLOW_HTTP=true
 export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=...
 cargo test --workspace -- --include-ignored

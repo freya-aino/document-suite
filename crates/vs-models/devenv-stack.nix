@@ -18,7 +18,7 @@
       exit 1
     fi
     echo "litellm proxy on :4000 — point the suite at config/models.litellm.toml"
-    echo "  cargo run -p vs-suite -- --roles page   # with VS_MODELS or --models"
+    echo "  cargo run -p vs-suite          # point [models] registry at config/models.litellm.toml"
     exec ${pkgs.litellm}/bin/litellm --config "$config" --port 4000 "$@"
   '';
 

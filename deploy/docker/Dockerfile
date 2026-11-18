@@ -80,11 +80,9 @@ EXPOSE 8080
 USER vs
 WORKDIR /scratch
 
-# Only the `api` role has an endpoint to probe; a copy that consumes the queue has no HTTP
-# server, and reporting it unhealthy for that would be wrong. This reads `VS_ROLES`, so a
-# worker-only copy must set that variable rather than passing `--roles`, or run with
-# `--no-healthcheck`.
+# Every copy serves the API, so there is always an endpoint to probe. (This used to branch
+# on `VS_ROLES`, for copies that only consumed the queue; there is no queue and no roles.)
 HEALTHCHECK --interval=15s --timeout=3s --start-period=20s --retries=3 \
-  CMD ["/bin/sh", "-c", "case \",${VS_ROLES:-api,ingest,page,doc},\" in *,api,*) curl -fsS \"http://127.0.0.1:${VS_API_ADDR##*:}/healthz\" >/dev/null || exit 1 ;; *) exit 0 ;; esac"]
+  CMD ["/bin/sh", "-c", "curl -fsS \"http://127.0.0.1:${VS_API_ADDR##*:}/healthz\" >/dev/null || exit 1"]
 
 ENTRYPOINT ["/usr/local/bin/vs-suite"]

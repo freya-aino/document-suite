@@ -24,7 +24,8 @@ Remaining:
       `kube-metrics-adapter` annotation; it needs porting to whichever adapter the target
       cluster runs (prometheus-adapter or KEDA).
 - [ ] No reserved replica set for the interactive lane, so a large batch can starve
-      interactive requests at the GPU even though the task bus keeps the lanes separate.
+      interactive requests at the GPU, even though the service reserves page slots for
+      them on its own side.
 - [ ] Add a local-development path (a LiteLLM proxy in front of one small model), so Stage 1
       can be exercised without this tier.
 - [ ] No sparse-embedding pool. Lexical search is planned as Qdrant sparse vectors computed

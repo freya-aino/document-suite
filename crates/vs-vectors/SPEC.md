@@ -30,7 +30,7 @@ Remaining:
       image and needs `docker` on the host. nixpkgs builds Qdrant from source and its 1.18.2
       fails on an LLVM intrinsic signature mismatch in its AVX-512 quantization code;
       naming it in `packages` made the entire dev shell unbuildable, taking Postgres and
-      NATS down with it.
+      Garage down with it.
 - [ ] Sparse vectors are written but nothing queries them, so the lexical half is stored
       and unproven: no test fuses dense and sparse, because fusion belongs to the reader.
 - [ ] No hybrid-search helper. Dense and sparse points are both written, but fusing them

@@ -402,15 +402,12 @@ async fn pipeline(cfg: &Config, pool: PgPool) -> vs_worker::Pipeline {
 }
 
 fn worker_toml(registry: &std::path::Path, qdrant_prefix: &str, scratch: &std::path::Path) -> String {
-    let nats = std::env::var("VS__BUS__NATS_URL").unwrap_or_else(|_| "nats://127.0.0.1:4222".into());
     let endpoint = std::env::var("AWS_ENDPOINT").unwrap_or_else(|_| "http://127.0.0.1:3900".into());
     let qdrant = std::env::var("VS__QDRANT__URL").unwrap_or_else(|_| "http://127.0.0.1:6334".into());
     let bucket = std::env::var("VS_TEST_BUCKET").unwrap_or_else(|_| "visual-suite".into());
     let region = std::env::var("AWS_REGION").unwrap_or_else(|_| "garage".into());
     format!(
         r#"
-[bus]
-nats_url = "{nats}"
 
 [blob]
 bucket = "{bucket}"

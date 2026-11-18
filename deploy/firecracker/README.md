@@ -1,5 +1,9 @@
 # deploy/firecracker — build and boot a vs-worker microVM
 
+> **Superseded** by decision D13, which removed the task bus: nothing can hand a document
+> to a microVM any more. Kept as the worked example of packaging `vs-suite` with its
+> shared-library closure. See `SPEC.md` next to this file.
+
 One microVM runs one `vs-worker` process in one role (`ingest`, `page`, `doc`).
 Design and sizing: [SPEC.md](SPEC.md). Files here:
 

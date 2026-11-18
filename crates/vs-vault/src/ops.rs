@@ -53,7 +53,7 @@ impl PageProgress {
     /// Every page of the job is in a final state. Unlike `completed_job` this is also
     /// true on a repeated call for an already-final page (redelivery of a page task
     /// whose earlier attempt finished the page but died before it could publish the doc
-    /// task), so the caller can re-publish; JetStream de-dup absorbs the duplicate.
+    /// page), so the caller can retry it; the write itself is idempotent either way.
     pub fn all_finished(&self) -> bool {
         self.total > 0 && self.done + self.failed == self.total
     }

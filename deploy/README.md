@@ -1,7 +1,7 @@
 # Embedding the suite in another deployment
 
-The default devenv shell builds the suite and **starts nothing**: no Postgres, no NATS, no
-S3, no Keycloak. That is deliberate. Another project embedding this one wants the
+The default devenv shell builds the suite and **starts nothing**: no Postgres, no S3, no
+Qdrant, no Keycloak. That is deliberate. Another project embedding this one wants the
 binaries, not this repo's idea of where a database should live, so every endpoint is
 configuration — and the local stack is a profile you can ignore:
 
@@ -14,36 +14,40 @@ devenv --profile stack up -d      # only if you want this repo's services too
 
 ## The service
 
-**One binary, one process, one service.** `vs-suite` serves the HTTP API and runs all
-three worker roles together, so a deployment adds one unit and scales it by running more
-copies. They coordinate through the task bus, so two copies divide the work the same way
-separate processes would.
+**One binary, one process, one service.** `vs-suite` serves the HTTP API and processes the
+documents it accepts: ingest, then the pages concurrently, then Stage 2, in the same
+process. A deployment adds one unit and scales it by running more copies, each taking
+whole documents.
 
 | | |
 |---|---|
 | Listens | `VS_API_ADDR`, default `0.0.0.0:8080` |
-| Needs | Postgres, NATS, S3, Keycloak — and, for Stage 1 and Stage 2, model endpoints and Qdrant |
-| Stop | SIGTERM: stops accepting requests and drains in-flight tasks within `--shutdown-grace` (60 s) |
+| Needs | Postgres, S3, Qdrant, Keycloak and model endpoints — all of them, in every copy |
+| Stop | SIGTERM: stops accepting requests, then gives in-flight documents `--shutdown-grace` (60 s) |
+
+There is **no queue**. That is decision D13: the per-page DAG always ran in-process, so a
+bus only spread one document's pages across machines, at the price of a service to run and
+a redelivery protocol to maintain. The consequences are worth knowing before you plan
+capacity — a single large document is as fast as one copy can make it, and a crash
+abandons the documents that copy was carrying until the caller re-POSTs them (which
+resumes rather than repeats, since rendered pages are skipped and vault writes are
+idempotent).
 
 Two other invocations of the same binary are not services: `vs-suite migrate` is a deploy
 step (schema **owner** credentials, not the runtime role's), and `vs-suite render-child` is
 what the ingest role re-executes per render — you never run it yourself.
 
-### Splitting it, if you want to
+### Scaling it
 
-`--roles` (`VS_ROLES`) narrows a copy, which is how the halves get scaled separately —
-goal G8 as your choice rather than the default shape:
+More copies. Each one takes whole documents, so request capacity and document throughput
+grow together; within a copy, `worker.max_documents` bounds documents in flight and
+`worker.max_in_flight` bounds pages across them, with `worker.interactive_share` reserved
+for uploads sent as `priority = interactive`.
 
-| Copy | Inbound port | Scales on |
-|---|---|---|
-| `vs-suite --roles api` | yes | request rate |
-| `vs-suite --roles ingest` / `page` / `doc` | **none** — it pulls from NATS | JetStream lag for that role and lane |
+What you cannot do any more is scale the halves separately — there are no roles to split,
+and `--roles` is gone. Nor can you spread one document over several copies.
 
-A copy with no `api` role needs no `[auth]` section and no realm. A copy with it fails
-startup without one. `worker.max_in_flight` applies per role, so a copy running all three
-can have three times that many tasks in flight.
-
-`vs-adapt` is the fourth binary and is never deployed: an offline tool for scoring
+`vs-adapt` is the other binary and is never deployed: an offline tool for scoring
 candidate workflows in dev and stage.
 
 ### The image
@@ -71,10 +75,8 @@ Three things about it worth knowing before you change them:
   track newest (`rust-version` in the workspace `Cargo.toml`); pinning the release here is
   what keeps a given image reproducible. It may sit ahead of `rust-version`, which is
   capped by what the dev shell provides.
-- **The `HEALTHCHECK` reads `VS_ROLES`**, because only the `api` role has an endpoint to
-  probe and a queue consumer reported unhealthy for having no HTTP server would be wrong.
-  A worker-only copy must therefore set `VS_ROLES` rather than pass `--roles`, or run with
-  `--no-healthcheck`.
+- **The `HEALTHCHECK` probes `/healthz`** unconditionally, because every copy serves the
+  API. It used to branch on `VS_ROLES` for copies that only drained the queue.
 
 It runs as uid 10001, writes to `/scratch`, and ships `/etc/vs/worker.toml` as the
 smallest valid config: `[models]` pointing at `/etc/vs/models.toml`, and JSON logs.
@@ -87,7 +89,6 @@ environment; both work.
 ```sh
 docker run --rm -p 8080:8080 \
   -v /path/to/models.toml:/etc/vs/models.toml:ro \
-  -e VS__BUS__NATS_URL=nats://nats:4222 \
   -e VS__BLOB__BUCKET=visual-suite -e VS__BLOB__ENDPOINT=https://s3.internal \
   -e VS__POSTGRES__URL=postgres://vs_app@pg:5432/visual_suite -e VS__POSTGRES__PASSWORD=… \
   -e VS__QDRANT__URL=http://qdrant:6334 \
@@ -100,7 +101,7 @@ docker run --rm -p 8080:8080 \
 same image, as the schema owner.
 
 There is **no compose file and no chart** here: how the service is wired to your Postgres,
-your NATS and your realm is your deployment's business, and this repo guessing at it would
+your Qdrant and your realm is your deployment's business, and this repo guessing at it would
 be a file nobody can use unchanged. `deploy/firecracker/build-rootfs.sh` is the other
 packaging that does exist, for microVMs.
 
@@ -115,7 +116,6 @@ annotated file to copy; below is the complete list, with every default.
 
 | Flag | Environment | Default |
 |---|---|---|
-| `--roles` | `VS_ROLES` | `api,ingest,page,doc` — any comma-separated subset |
 | `--config` | `VS_CONFIG` | `/etc/vs/worker.toml`; the file must exist, even if empty |
 | `--addr` | `VS_API_ADDR` | `0.0.0.0:8080`; ignored without the `api` role |
 | `--shutdown-grace` | `VS_SHUTDOWN_GRACE` | `60` seconds to drain on SIGTERM |
@@ -126,7 +126,7 @@ roles open none.
 
 ### The config file
 
-**Required sections**: `[bus]`, `[blob]`, `[postgres]`, `[qdrant]`, `[models]`. A missing
+**Required sections**: `[blob]`, `[postgres]`, `[qdrant]`, `[models]`. A missing
 one is a startup error (`Error: missing field 'qdrant'`). `[qdrant]` is required even for a
 copy that never reaches Stage 2, on purpose: a misconfigured deployment should fail at
 startup, not at the first document that gets that far.
@@ -136,7 +136,6 @@ startup, not at the first document that gets that far.
 
 | Key | Default | |
 |---|---|---|
-| `bus.nats_url` | **required** | |
 | `blob.bucket` | **required** | nothing creates it |
 | `blob.endpoint` | none | an `http://` endpoint enables plain HTTP by itself |
 | `blob.region` | none | |
@@ -158,12 +157,14 @@ startup, not at the first document that gets that far.
 | `auth.jwks_refresh_s` | `300` | how long a fetched JWKS is reused |
 | `auth.leeway_s` | `30` | clock skew allowed on `exp` and `nbf` |
 | `api.max_upload_bytes` | `2147483648` | 413 above it |
-| `api.interactive_max_pending` | `1000` | 429 for interactive above this lane backlog |
+| `api.interactive_max_pending` | `1000` | 429 for interactive above this many documents in flight |
 | `api.scratch_dir` | system temp | upload spool while hashing |
 | `worker.max_in_flight` | `32` | **per role**: all three in one copy is three times this |
-| `worker.interactive_share` | `0.3` | slots reserved for the interactive lane |
+| `worker.interactive_share` | `0.3` | page slots reserved for interactive-priority documents |
 | `worker.render_dpi` | `200` | |
 | `worker.max_failed_page_fraction` | `0.05` | above it the document fails |
+| `worker.max_documents` | `4` | documents in flight in this process; each holds a render child and a spooled original |
+| `worker.page_attempts` | `3` | in-process retries of a page on a *transient* failure; replaces the queue's `max_deliver`, with a 2/4/8 s backoff |
 | `worker.scratch_dir` | system temp | where ingest spools originals |
 | `worker.render_processes` | available CPUs | render children per ingest role |
 | `worker.page_render_timeout_s` | `60` | a slower page fails its document permanently |
@@ -214,7 +215,6 @@ Read outside that scheme:
 
 ```sh
 VS_CONFIG=/etc/vs/worker.toml            # may be empty
-VS__BUS__NATS_URL=nats://nats:4222
 VS__BLOB__BUCKET=visual-suite
 VS__BLOB__ENDPOINT=https://s3.internal
 VS__POSTGRES__URL=postgres://vs_app@pg:5432/visual_suite
@@ -252,16 +252,16 @@ as `the api role needs an [auth] section in …`.
   copy without the `api` role has no HTTP server, and serves its metrics on
   `telemetry.metrics_addr` instead; that port has no authentication, so bind it to an
   internal interface and never `0.0.0.0`. Setting both gives you both.
-- **Scaling**: more copies of the service. Within a copy, the roles share one Postgres
-  pool and one NATS connection, so `postgres.max_connections` is a per-process budget.
+- **Scaling**: more copies of the service. Within a copy every stage shares one Postgres
+  pool, so `postgres.max_connections` is a per-process budget.
 - **Tenancy**: the tenant is the organization claim of the caller's token. It is hashed
   into every document and entity key, prefixes every blob key, and partitions the Qdrant
   collections, so **changing what the claim contains re-keys the data** — pick it once.
 - **Personal data**: telemetry has none — no span field, log line or metric label
   identifies a person, which is asserted by a test rather than a convention
   (`docs/SPEC.md` §5.6). What does hold it is `ops.jobs.spec` (`owner`: the caller's
-  subject, department and workspaces) and the task payloads on the bus, where the DLQ
-  keeps failed tasks for 14 days. The Data Vault holds none of it, which is what makes an
+  subject, department and workspaces) — and, since the task bus went away with D13, nothing
+  else: the spec no longer leaves the process. The Data Vault holds none of it, which is what makes an
   erasure request answerable at all: the vault is insert-only and never forgets.
   **Nothing implements retention or erasure for those `ops` rows** — if your deployment is
   subject to GDPR, that is yours to add, and the shape it should take is a decision about
@@ -275,7 +275,7 @@ as `the api role needs an [auth] section in …`.
 |---|---|
 | [`docker/`](docker/Dockerfile) | the service image: multi-stage build, pinned pdfium, minimal baked config |
 | [`keycloak/`](keycloak/README.md) | the development realm, imported by the `stack` profile |
-| [`firecracker/`](firecracker/SPEC.md) | worker microVM image and the fleet it is meant to become |
+| [`firecracker/`](firecracker/SPEC.md) | **superseded**: worker microVMs had work pushed to them by the queue, and there is no queue |
 | [`gpu/`](gpu/SPEC.md) | the model serving tier: vLLM per pool, compose and k8s manifests |
 
 `firecracker` and `gpu` are how *this* project intends to run. Neither is a prerequisite

@@ -1,5 +1,14 @@
 # deploy/firecracker — Specification
 
+> **Superseded.** This tier existed to run queue consumers: a microVM takes no inbound
+> connections, so work could only reach it by being pushed from a task bus. Decision D13
+> removed the bus — an accepted upload is processed by the process that accepted it — so
+> there is now no way to give a microVM a document. Nothing here has been deleted,
+> because `build-rootfs.sh` is still the worked example of packaging the binary with its
+> shared-library closure, and because a future design that gives these VMs an inbound
+> interface (or a pull mechanism of their own) would start from this. Read it as history
+> and as a packaging reference, not as a deployment path.
+
 CPU tier: `vs-worker` processes in Firecracker microVMs. One microVM = one worker
 process = one role. System spec: [`docs/SPEC.md`](../../docs/SPEC.md) — decision D1.
 
