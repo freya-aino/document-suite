@@ -15,6 +15,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use serde_json::{json, Value};
+use sqlx::AssertSqlSafe;
 use sqlx::PgPool;
 
 use vs_core::{split_ref, DocumentType, Evidence, HashKey, JobSpec, JobState, PageResult, RunId};
@@ -165,6 +166,15 @@ pub(crate) fn enum_str<T: Serialize>(v: &T) -> String {
 const LATEST_DIFFERS: &str = "NOT EXISTS (SELECT 1 FROM (SELECT s.hash_diff FROM {table} s WHERE s.{parent} = v.{parent} \
      ORDER BY s.load_dts DESC LIMIT 1) l WHERE l.hash_diff = v.hash_diff)";
 
+/// The one source of dynamic SQL in this crate, and the reason every `sqlx::query` call
+/// that uses it is wrapped in `AssertSqlSafe`.
+///
+/// sqlx 0.9 refuses a non-`'static` SQL string unless it is asserted safe, which is an
+/// audit rather than a cast. The audit: `table` and `parent` are string literals at every
+/// call site — satellite and key column names fixed at compile time — and every *value*
+/// reaches the statement through `.bind()`. No request data is ever interpolated into SQL
+/// text here. If a caller ever passes something it did not spell out itself, that
+/// assertion stops being true and this comment stops being an explanation.
 pub(crate) fn latest_differs(table: &str, parent: &str) -> String {
     LATEST_DIFFERS.replace("{table}", table).replace("{parent}", parent)
 }
@@ -191,14 +201,14 @@ impl VaultWriter for PgVault {
         .await?;
 
         let desc = json!([spec.external_ref, meta.filename, meta.size_bytes, meta.format, spec.language.as_str(), meta.page_count]);
-        sqlx::query(&format!(
+        sqlx::query(AssertSqlSafe(format!(
             "INSERT INTO vault.sat_document_meta
                (document_hk, load_dts, hash_diff, record_source, external_ref, filename, size_bytes, format, language_hint, page_count)
              SELECT v.document_hk, $2, v.hash_diff, $4, $5, $6, $7, $8, $9, $10
              FROM (SELECT $1::text AS document_hk, $3::text AS hash_diff) v
              WHERE {}",
             latest_differs("vault.sat_document_meta", "document_hk")
-        ))
+        )))
         .bind(doc_hk)
         .bind(now)
         .bind(hash_diff(&desc))
@@ -275,14 +285,14 @@ impl VaultWriter for PgVault {
 
         let profile = serde_json::to_value(&page.profile).unwrap_or(Value::Null);
         let desc = json!([page.run_id.0, profile, page.dag_ref, rule_id, page.render_width_px, page.render_height_px]);
-        sqlx::query(&format!(
+        sqlx::query(AssertSqlSafe(format!(
             "INSERT INTO vault.sat_page_profile
                (page_hk, load_dts, hash_diff, record_source, run_id, profile, dag_ref, rule_id, render_width_px, render_height_px)
              SELECT v.page_hk, $2, v.hash_diff, $4, $5, $6, $7, $8, $9, $10
              FROM (SELECT $1::text AS page_hk, $3::text AS hash_diff) v
              WHERE {}",
             latest_differs("vault.sat_page_profile", "page_hk")
-        ))
+        )))
         .bind(page.page_hk.as_str())
         .bind(now)
         .bind(hash_diff(&desc))
@@ -355,7 +365,7 @@ impl VaultWriter for PgVault {
         .execute(&mut *tx)
         .await?;
 
-        sqlx::query(&format!(
+        sqlx::query(AssertSqlSafe(format!(
             "INSERT INTO vault.sat_block_content
                (block_hk, load_dts, hash_diff, record_source, kind, bbox, reading_order, global_order, text, content, level, confidence, furniture)
              SELECT v.block_hk, $1, v.hash_diff, v.record_source, v.kind, v.bbox, v.reading_order, NULL, v.text, v.content, v.level, v.confidence, false
@@ -363,7 +373,7 @@ impl VaultWriter for PgVault {
                AS v(block_hk, hash_diff, record_source, kind, bbox, reading_order, text, content, level, confidence)
              WHERE {}",
             latest_differs("vault.sat_block_content", "block_hk")
-        ))
+        )))
         .bind(now)
         .bind(&b.block_hk)
         .bind(&b.content_hash_diff)
@@ -378,13 +388,13 @@ impl VaultWriter for PgVault {
         .execute(&mut *tx)
         .await?;
 
-        sqlx::query(&format!(
+        sqlx::query(AssertSqlSafe(format!(
             "INSERT INTO vault.sat_block_provenance (block_hk, load_dts, hash_diff, record_source, provenance)
              SELECT v.block_hk, $1, v.hash_diff, v.record_source, v.provenance
              FROM UNNEST($2::text[], $3::text[], $4::text[], $5::jsonb[]) AS v(block_hk, hash_diff, record_source, provenance)
              WHERE {}",
             latest_differs("vault.sat_block_provenance", "block_hk")
-        ))
+        )))
         .bind(now)
         .bind(&b.block_hk)
         .bind(&b.provenance_hash_diff)
@@ -443,13 +453,13 @@ impl VaultWriter for PgVault {
         .bind(&src)
         .execute(&mut *tx)
         .await?;
-        sqlx::query(&format!(
+        sqlx::query(AssertSqlSafe(format!(
             "INSERT INTO vault.sat_stitch_link (lnk_hk, load_dts, hash_diff, record_source, run_id, confidence)
              SELECT v.lnk_hk, $1, v.hash_diff, $4, $5, v.confidence
              FROM UNNEST($2::text[], $3::text[], $6::real[]) AS v(lnk_hk, hash_diff, confidence)
              WHERE {}",
             latest_differs("vault.sat_stitch_link", "lnk_hk")
-        ))
+        )))
         .bind(now)
         .bind(&s2.link_hk)
         .bind(&s2.link_hash_diff)
@@ -473,14 +483,14 @@ impl VaultWriter for PgVault {
         .bind(&src)
         .execute(&mut *tx)
         .await?;
-        sqlx::query(&format!(
+        sqlx::query(AssertSqlSafe(format!(
             "INSERT INTO vault.sat_entity_label (entity_hk, load_dts, hash_diff, record_source, name, type_id, raw_type, aliases, review_status, context)
              SELECT v.entity_hk, $1, v.hash_diff, $4, v.name, v.type_id, v.raw_type, v.aliases, v.review_status, v.context
              FROM UNNEST($2::text[], $3::text[], $5::text[], $6::text[], $7::text[], $8::jsonb[], $9::text[], $10::text[])
                AS v(entity_hk, hash_diff, name, type_id, raw_type, aliases, review_status, context)
              WHERE {}",
             latest_differs("vault.sat_entity_label", "entity_hk")
-        ))
+        )))
         .bind(now)
         .bind(&s2.entity_hk)
         .bind(&s2.entity_hash_diff)
@@ -508,14 +518,14 @@ impl VaultWriter for PgVault {
         .bind(&src)
         .execute(&mut *tx)
         .await?;
-        sqlx::query(&format!(
+        sqlx::query(AssertSqlSafe(format!(
             "INSERT INTO vault.sat_mention (lnk_hk, load_dts, sub_seq, hash_diff, record_source, run_id, char_start, char_end, surface, confidence)
              SELECT v.lnk_hk, $1, v.sub_seq, v.hash_diff, $4, $5, v.char_start, v.char_end, v.surface, v.confidence
              FROM UNNEST($2::text[], $3::text[], $6::int[], $7::int[], $8::int[], $9::text[], $10::real[])
                AS v(lnk_hk, hash_diff, sub_seq, char_start, char_end, surface, confidence)
              WHERE {}",
             latest_differs("vault.sat_mention", "lnk_hk")
-        ))
+        )))
         .bind(now)
         .bind(&s2.sm_lnk_hk)
         .bind(&s2.sm_hash_diff)
@@ -544,7 +554,7 @@ impl VaultWriter for PgVault {
         .bind(&src)
         .execute(&mut *tx)
         .await?;
-        sqlx::query(&format!(
+        sqlx::query(AssertSqlSafe(format!(
             "INSERT INTO vault.sat_assertion_detail
                (assertion_hk, load_dts, hash_diff, record_source, predicate_raw, predicate_id, kind, qualifiers, literals, confidence, verified, provenance)
              SELECT v.assertion_hk, $1, v.hash_diff, v.record_source, v.predicate_raw, v.predicate_id, v.kind, v.qualifiers, v.literals,
@@ -553,7 +563,7 @@ impl VaultWriter for PgVault {
                AS v(assertion_hk, hash_diff, record_source, predicate_raw, predicate_id, kind, qualifiers, literals, confidence, verified, provenance)
              WHERE {}",
             latest_differs("vault.sat_assertion_detail", "assertion_hk")
-        ))
+        )))
         .bind(now)
         .bind(&s2.assertion_hk)
         .bind(&s2.assertion_hash_diff)
@@ -599,14 +609,14 @@ impl VaultWriter for PgVault {
         .bind(&src)
         .execute(&mut *tx)
         .await?;
-        sqlx::query(&format!(
+        sqlx::query(AssertSqlSafe(format!(
             "INSERT INTO vault.sat_evidence (lnk_hk, load_dts, sub_seq, hash_diff, record_source, char_start, char_end, bbox)
              SELECT v.lnk_hk, $1, v.sub_seq, v.hash_diff, $4, v.char_start, v.char_end, v.bbox
              FROM UNNEST($2::text[], $3::text[], $5::int[], $6::int[], $7::int[], $8::jsonb[])
                AS v(lnk_hk, hash_diff, sub_seq, char_start, char_end, bbox)
              WHERE {}",
             latest_differs("vault.sat_evidence", "lnk_hk")
-        ))
+        )))
         .bind(now)
         .bind(&s2.se_lnk_hk)
         .bind(&s2.se_hash_diff)
@@ -941,13 +951,13 @@ async fn insert_sat_run(
     // partial) still versions, because `state` is in the diff, and `load_dts` already
     // says when each row was written.
     let desc = json!([dag_list_version, profile, priority, state, started_at]);
-    sqlx::query(&format!(
+    sqlx::query(AssertSqlSafe(format!(
         "INSERT INTO vault.sat_run (run_hk, load_dts, hash_diff, record_source, dag_list_version, profile, priority, state, started_at, finished_at)
          SELECT v.run_hk, $2, v.hash_diff, $4, $5, $6, $7, $8, $9, $10
          FROM (SELECT $1::text AS run_hk, $3::text AS hash_diff) v
          WHERE {}",
         latest_differs("vault.sat_run", "run_hk")
-    ))
+    )))
     .bind(run_hk.as_str())
     .bind(now)
     .bind(hash_diff(&desc))

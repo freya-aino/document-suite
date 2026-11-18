@@ -544,7 +544,7 @@ async fn row_counts(pool: &PgPool, document_hk: &HashKey, run_id: RunId) -> Hash
         ),
     ];
     for (name, sql) in scoped {
-        let n: i64 = sqlx::query_scalar(sql).bind(doc).fetch_one(pool).await.unwrap_or_else(|e| panic!("counting {name}: {e}"));
+        let n: i64 = sqlx::query_scalar(*sql).bind(doc).fetch_one(pool).await.unwrap_or_else(|e| panic!("counting {name}: {e}"));
         out.insert((*name).to_string(), n);
     }
 
@@ -562,7 +562,7 @@ async fn row_counts(pool: &PgPool, document_hk: &HashKey, run_id: RunId) -> Hash
         ),
     ];
     for (name, sql) in by_run {
-        let n: i64 = sqlx::query_scalar(sql).bind(run_id.0).fetch_one(pool).await.unwrap_or_else(|e| panic!("counting {name}: {e}"));
+        let n: i64 = sqlx::query_scalar(*sql).bind(run_id.0).fetch_one(pool).await.unwrap_or_else(|e| panic!("counting {name}: {e}"));
         out.insert((*name).to_string(), n);
     }
     // Entities are corpus-scoped, not document-scoped: they outlive the run by design.

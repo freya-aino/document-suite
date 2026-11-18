@@ -5,6 +5,7 @@
 use std::collections::HashSet;
 
 use chrono::Utc;
+use sqlx::AssertSqlSafe;
 use sqlx::PgPool;
 use uuid::Uuid;
 use vs_core::*;
@@ -51,7 +52,7 @@ fn run() -> RunMeta {
 }
 
 async fn count(pool: &PgPool, table: &str) -> i64 {
-    sqlx::query_scalar(&format!("SELECT count(*) FROM {table}"))
+    sqlx::query_scalar(AssertSqlSafe(format!("SELECT count(*) FROM {table}")))
         .fetch_one(pool)
         .await
         .unwrap()
@@ -703,7 +704,9 @@ async fn satellite_rows(pool: &PgPool) -> Vec<(String, i64)> {
         if name == "sat_run" {
             continue;
         }
-        let n: i64 = sqlx::query_scalar(&format!("SELECT count(*) FROM vault.{name}")).fetch_one(pool).await.unwrap();
+        // `name` comes from the catalogue query above, not from anything a caller sent,
+        // which is what makes the assertion below safe to make.
+        let n: i64 = sqlx::query_scalar(AssertSqlSafe(format!("SELECT count(*) FROM vault.{name}"))).fetch_one(pool).await.unwrap();
         out.push((name, n));
     }
     out

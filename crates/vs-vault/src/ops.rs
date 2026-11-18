@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use serde_json::Value;
+use sqlx::AssertSqlSafe;
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
@@ -245,7 +246,7 @@ impl Ops {
 
     /// Tenant-scoped: another tenant's job is reported as missing.
     pub async fn get_job(&self, tenant: &TenantId, job_id: Uuid) -> Result<Option<JobRow>, VaultError> {
-        let row = sqlx::query(&format!("SELECT {JOB_COLUMNS} FROM ops.jobs WHERE job_id = $1 AND tenant_id = $2"))
+        let row = sqlx::query(AssertSqlSafe(format!("SELECT {JOB_COLUMNS} FROM ops.jobs WHERE job_id = $1 AND tenant_id = $2")))
             .bind(job_id)
             .bind(tenant.as_str())
             .fetch_optional(&self.pool)
@@ -305,7 +306,7 @@ impl Ops {
             counts.insert(r.try_get::<String, _>("state")?, n);
         }
         let page_size = page_size.clamp(1, 1000);
-        let jobs = sqlx::query(&format!("SELECT {JOB_COLUMNS} FROM ops.jobs WHERE batch_id = $1 ORDER BY created_at, job_id LIMIT $2 OFFSET $3"))
+        let jobs = sqlx::query(AssertSqlSafe(format!("SELECT {JOB_COLUMNS} FROM ops.jobs WHERE batch_id = $1 ORDER BY created_at, job_id LIMIT $2 OFFSET $3")))
             .bind(batch_id)
             .bind(page_size as i64)
             .bind(page as i64 * page_size as i64)

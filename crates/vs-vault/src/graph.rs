@@ -17,6 +17,7 @@
 
 use chrono::{DateTime, Utc};
 use serde_json::json;
+use sqlx::AssertSqlSafe;
 use sqlx::{Postgres, Transaction};
 
 use vs_core::{DocTypeSource, DocumentType, HashKey, RunId};
@@ -253,7 +254,7 @@ pub(crate) async fn write_graph_layer(
              WHERE {}",
             latest_differs("vault.sat_section", "section_hk")
         );
-        sqlx::query(&sat)
+        sqlx::query(AssertSqlSafe(sat))
             .bind(now)
             .bind(&c.section_hk)
             .bind(&c.section_hash_diff)
@@ -322,7 +323,7 @@ pub(crate) async fn write_graph_layer(
              WHERE {}",
             latest_differs("vault.sat_related", "lnk_hk")
         );
-        sqlx::query(&sat)
+        sqlx::query(AssertSqlSafe(sat))
             .bind(now)
             .bind(&c.related_lnk_hk)
             .bind(&c.related_hash_diff)
@@ -374,7 +375,7 @@ pub(crate) async fn write_graph_layer(
              WHERE {}",
             latest_differs("vault.sat_cell", "cell_hk")
         );
-        sqlx::query(&sat)
+        sqlx::query(AssertSqlSafe(sat))
             .bind(now)
             .bind(&c.cell_hk)
             .bind(&c.cell_hash_diff)
@@ -412,7 +413,7 @@ pub(crate) async fn write_graph_layer(
              WHERE {}",
             latest_differs("vault.sat_image_text", "image_text_hk")
         );
-        sqlx::query(&sat)
+        sqlx::query(AssertSqlSafe(sat))
             .bind(now)
             .bind(&c.img_hk)
             .bind(&c.img_hash_diff)

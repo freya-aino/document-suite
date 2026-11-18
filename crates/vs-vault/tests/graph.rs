@@ -13,6 +13,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::Utc;
 use serde_json::{json, Value};
+use sqlx::AssertSqlSafe;
 use sqlx::PgPool;
 
 use vs_core::{
@@ -207,7 +208,7 @@ async fn write_graph(pool: &PgPool, r: &RunMeta, m: &DocumentMeta, f: &Fixture) 
 }
 
 async fn count(pool: &PgPool, table: &str) -> i64 {
-    sqlx::query_scalar(&format!("SELECT count(*) FROM {table}")).fetch_one(pool).await.unwrap()
+    sqlx::query_scalar(AssertSqlSafe(format!("SELECT count(*) FROM {table}"))).fetch_one(pool).await.unwrap()
 }
 
 #[sqlx::test(migrator = "vs_vault::MIGRATOR")]
