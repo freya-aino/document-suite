@@ -79,8 +79,17 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 # Pure-Rust image operations for the pre-processing steps (goal G9: no OpenCV bindings).
 imageproc = { version = "0.27", default-features = false }
 object_store = { version = "0.14", features = ["aws"] }
-# `sync`: one process-wide binding shared across threads (calls are serialised).
-pdfium-render = { version = "0.8", features = ["sync"] }
+# `thread_safe` (was `sync` in 0.8): one process-wide binding shared across threads, with
+# calls serialised.
+#
+# The ABI feature is pinned deliberately. 0.9's default is `pdfium_latest`, whose bindings
+# are generated for pdfium 8125 and therefore resolve `FPDF_StructElement_GetRawType` at
+# load time — a symbol neither pdfium 8066 we run exports (checked with `nm` against both
+# nixpkgs' build and the prebuilt one the container uses; they export 28 other
+# `FPDF_StructElement_*` functions and not that one). Binding then fails outright, so
+# every page fails to render. `pdfium_7543` is the newest API surface the crate knows that
+# our library actually has, and nothing here calls anything newer.
+pdfium-render = { version = "0.9", default-features = false, features = ["pdfium_7543", "image_latest", "thread_safe"] }
 qdrant-client = "1.20"
 # 0.13 renamed the TLS features: `rustls` is now the aws-lc-rs provider plus
 # `rustls-platform-verifier`, so certificates come from the system trust store instead of

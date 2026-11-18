@@ -14,9 +14,12 @@
 # package for it, so it comes from the usual prebuilt release, pinned by digest.
 #
 # 8066 is deliberate rather than "latest": it is the version nixpkgs gives the dev shell
-# and CI, so a page renders in this image exactly as it does in the tests. The library
-# needs only glibc, libm, libpthread and libgcc_s — no libstdc++, no X — which is why the
-# runtime stage below installs nothing for it.
+# and CI, so a page renders in this image exactly as it does in the tests, and it exports
+# the symbols the ABI feature pinned in the workspace Cargo.toml
+# (`pdfium-render`/`pdfium_7543`) expects. Moving one without the other is how rendering
+# breaks at load time rather than at build time. The library needs only glibc, libm,
+# libpthread and libgcc_s — no libstdc++, no X — which is why the runtime stage below
+# installs nothing for it.
 FROM debian:bookworm-slim AS pdfium
 ARG PDFIUM_RELEASE=chromium%2F8066
 ARG PDFIUM_SHA256=0b43f405477cf2cfc4dbff06905093c3309756c6bca1fb9da99234a2ca97fed2

@@ -222,7 +222,7 @@ fn render(page: &PdfPage, geom: &PageGeom, page_no: u32, scale: f32) -> Result<(
     let bitmap = page
         .render_with_config(&config)
         .map_err(|e| IngestError::Render { page: page_no, reason: e.to_string() })?;
-    let img = bitmap.as_image();
+    let img = bitmap.as_image().map_err(|e| IngestError::Render { page: page_no, reason: e.to_string() })?;
     let dpi = (img.width() as f32 * 72.0 / geom.width.max(1.0)).round() as u32;
     Ok((img, dpi))
 }
@@ -233,7 +233,8 @@ fn thumbnail(page: &PdfPage, geom: &PageGeom, page_no: u32, long_side_px: u32) -
     let bitmap = page
         .render_with_config(&config)
         .map_err(|e| IngestError::Render { page: page_no, reason: e.to_string() })?;
-    Ok((bitmap.as_image(), (72.0 * scale).round() as u32))
+    let img = bitmap.as_image().map_err(|e| IngestError::Render { page: page_no, reason: e.to_string() })?;
+    Ok((img, (72.0 * scale).round() as u32))
 }
 
 fn text_layer(page: &PdfPage, geom: &PageGeom, page_no: u32) -> Result<TextLayer, IngestError> {
