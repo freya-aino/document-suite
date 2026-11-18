@@ -1,5 +1,6 @@
-# Local development config: points at the devenv services (`devenv up`).
-# Secrets (VS__POSTGRES__PASSWORD, AWS_*) come from the devenv environment.
+# Local development config: points at the devenv services
+# (`devenv --profile stack up`). Secrets (VS__POSTGRES__PASSWORD, AWS_*) come from the
+# devenv environment. Every key and its default: deploy/README.md § Configuration.
 
 [bus]
 nats_url = "nats://127.0.0.1:4222"

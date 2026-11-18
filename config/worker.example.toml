@@ -1,5 +1,8 @@
-# vs-worker / vs-api configuration. Secrets come from the environment (VS__SECTION__KEY)
-# or MMDS, never from this file.
+# vs-suite configuration. Secrets come from the environment (VS__SECTION__KEY) or MMDS,
+# never from this file.
+#
+# Every key with its default, which sections are required, and what an environment
+# override can and cannot carry: deploy/README.md § Configuration.
 
 [bus]
 nats_url = "nats://nats.internal:4222"
