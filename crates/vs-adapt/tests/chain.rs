@@ -100,6 +100,18 @@ async fn fake_models() -> (String, tokio::task::JoinHandle<()>) {
     (format!("http://127.0.0.1:{port}/v1"), handle)
 }
 
+/// Whether pdfium can be bound at all. Without it nothing here can render a page, and
+/// the test says so and returns rather than failing — the same convention
+/// `vs-ingest`'s own tests use, so a machine without pdfium gets a skip and a machine
+/// with it gets a real failure.
+fn pdfium_or_skip() -> bool {
+    if std::env::var_os("PDFIUM_DYNAMIC_LIB_PATH").is_some() {
+        return true;
+    }
+    eprintln!("skipping: PDFIUM_DYNAMIC_LIB_PATH is unset, so no page can be rendered");
+    false
+}
+
 /// The render child, next to the test binary.
 fn render_child() -> std::path::PathBuf {
     let exe = std::env::current_exe().expect("test binary path");
@@ -154,6 +166,9 @@ fn candidates() -> Vec<vs_dag::Dag> {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "renders pages; needs PDFIUM_DYNAMIC_LIB_PATH from devenv"]
 async fn the_whole_chain_runs_on_a_generated_corpus() {
+    if !pdfium_or_skip() {
+        return;
+    }
     let dir = std::env::temp_dir().join(format!("vs-adapt-chain-{}", vs_core::RunId::new()));
     let corpus = dir.join("corpus");
     let out = dir.join("run");
@@ -268,6 +283,9 @@ async fn the_whole_chain_runs_on_a_generated_corpus() {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "renders pages; needs PDFIUM_DYNAMIC_LIB_PATH from devenv"]
 async fn the_classifier_is_scored_against_the_corpus_labels() {
+    if !pdfium_or_skip() {
+        return;
+    }
     let dir = std::env::temp_dir().join(format!("vs-adapt-classify-{}", vs_core::RunId::new()));
     let corpus = dir.join("corpus");
     let out = dir.join("run");

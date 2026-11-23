@@ -20,8 +20,16 @@ caller's responsibility**, and all three are easy to forget:
 2. **Filter to the current run.** The vault is insert-only and keeps *every* run of a
    document. A query that forgets this returns the union of every reprocessing. Use
    `vault.v_current_run` (see below).
-3. **Fuse dense and sparse results yourself.** Qdrant returns them separately;
-   reciprocal rank fusion is the expected default.
+3. **Decide which lanes to search, and whether to fuse them.** `VectorStore::search` will
+   do it for you — dense, lexical, or both fused inside Qdrant with reciprocal rank fusion
+   in one request — and a reader querying Qdrant directly can do the same with a `prefetch`
+   on each named vector and `fusion: rrf`. Two separate top-k lists cannot be fused back
+   into the ranking the union would have given, so do it in the query.
+4. **Check who may read what, if you are answering a person.** The vault says which
+   *organization* a document belongs to and nothing about which of its members may see it:
+   that is `ops.document_access` and `ops.document_grants` (decision D14), and
+   `vs_vault::access::Reader::may_read` is the rule. A reader that joins the vault alone
+   will happily return a colleague's private document.
 
 ## Keys
 
@@ -189,7 +197,10 @@ a plain query without the `LIMIT`.
 ### Components inside a block
 
 A table is stored both as HTML (`sat_block_content.content`) and cell by cell, so one
-number can be cited rather than "that table":
+number can be cited rather than "that table" — and an assertion's evidence *does* cite a
+cell: `vault.sat_evidence` carries `row_idx` and `col_idx` where a table value is the
+evidence, in place of `char_start`/`char_end`. One evidence row holds exactly one shape
+(span, region or cell), enforced by a constraint.
 
 ```sql
 SELECT c.row_idx, c.col_idx, s.text, s.header, s.column_header
@@ -237,6 +248,12 @@ Each point carries two named vectors:
 Point ids are UUIDs derived from the node key, so writing the same run twice is an upsert
 of the same points.
 
+**Collection names are aliases.** The configured name (`vs_blocks`) points at a collection
+carrying its vector dimension (`vs_blocks__d1024`), so a change of embedding model is an
+alias move rather than a rebuild under the reader's feet — a reader always uses the
+configured name. A deployment that predates the alias has a real collection under that
+name instead, which works identically.
+
 **Multitenancy is by payload filter.** `tenant` is a keyword index flagged `is_tenant`,
 and the collections are built with `m = 0` / `payload_m = 16` so HNSW builds a subgraph
 per tenant rather than one global graph. This is only correct because every query filters
@@ -256,8 +273,13 @@ tenants while doing it.
   it is the target every other document in the corpus was matched against, so moving it
   would silently change past decisions.
 - **IDF statistics are shared across tenants.** Payload-filter multitenancy means one
-  collection, so the sparse half's IDF is computed over every tenant's text. Acceptable
-  at this scale; it would need a collection per tenant to fix.
+  collection, so the sparse half's IDF is computed over every tenant's text. No content
+  crosses the boundary — the filter is an index, not a post-pass — but a ranking that
+  depends on other organizations' corpora is a statistical side channel, which is why
+  `[qdrant].idf = false` exists: it drops the modifier and the lexical half becomes
+  saturated term frequencies computed from the document alone. A deployment that has set
+  it reads *worse* lexical rankings on purpose, and a reader cannot tell from the data
+  which choice was made — ask the operator.
 - **A run can be `writing`.** Postgres rows and Qdrant points are not written in one
   transaction — nothing can span two stores. The vault records `writing` when its own
   rows are in and `done` or `partial` only once the vectors are too, so a run in state
@@ -265,3 +287,8 @@ tenants while doing it.
   absent: the SQL is there and correct.
 - **`crop_uri` is a key, not a URL.** So is `page_image_uri`. Resolve them against the
   configured bucket.
+- **Derived objects expire; the vault's rows do not.** `[blob.retention]` prunes page
+  images, results, crops and the scratch images handed to models on a schedule, while
+  every row describing them stays. So a `crop_uri` or a `page_image_uri` from an old run
+  may 404, and the fix is to re-run the document rather than to treat the row as wrong.
+  Originals are kept forever by default, so a re-run is always possible.

@@ -19,8 +19,15 @@ This crate is load-bearing — it is the single structure both stores are writte
 it is tested before it is extended.
 
 Also implemented: **table cells and in-image text as nodes** (`page`), the `Cites` edge,
-and the intra-page relations `vs-stitch` derives (`EnclosesRegion`, `ValueOf`). 23 tests,
-12 of them against a whole built document — the builder had none before.
+and the intra-page relations `vs-stitch` derives (`EnclosesRegion`, `ValueOf`,
+`FootnoteOf`). 23 tests, 12 of them against a whole built document — the builder had none
+before.
+
+**A table value's evidence points at its cell.** `Evidence::Cell { block_hk, row, col }`
+becomes an `Evidence` edge to the `Cell` node for that row and column, so "which number is
+this claim about" resolves to one cell rather than to a table. A character span into the
+table's flattened text could not do that: `92.1` twice in a results table gives two
+identical spans.
 
 ## Known limitations
 
@@ -37,11 +44,15 @@ and the intra-page relations `vs-stitch` derives (`EnclosesRegion`, `ValueOf`). 
   it therefore misses inflections and
   any term the model transcribed differently from the body text.
 - `validate()` leaves `Evidence`, `MatchesText` and `HasSection` endpoint-kind
-  unconstrained, because each legitimately has two shapes. Those three could take a
-  pair-of-alternatives rule instead of being exempt.
+  unconstrained, because each legitimately has more than one shape — `Evidence` now points
+  at a block, a page or a cell. Those three could take a set-of-alternatives rule instead
+  of being exempt.
 - Cell nodes come from re-parsing the table HTML, so a table the recognition model got
-  structurally wrong yields confidently wrong cells. Nothing cross-checks the parse
-  against the block's plain-text projection.
+  structurally wrong yields confidently wrong cells, and an assertion citing one cites a
+  cell that is wrong in the same way. Nothing cross-checks the parse against the block's
+  plain-text projection. The parse itself is at least *one* parse —
+  `vs_extract::tables::parse_html_table`, shared with result-table mining — so the cell a
+  citation names and the cell the graph holds cannot disagree.
 
 ## Node kinds
 

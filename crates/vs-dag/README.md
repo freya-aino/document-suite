@@ -9,7 +9,9 @@ by `vs-adapt` and selected per page by `vs-router`. System spec:
 
 Holds the DAG model, load-time validation with unreachable-node pruning, the
 level-parallel executor with per-node timeouts and optional-node fallback, the artefact
-kinds steps exchange, and the `NodeTrace` that records what each node did.
+kinds steps exchange, the `PageSource` capability a step uses to ask for a finer render of
+its page, and the `NodeTrace` that records what each node did and what it reported about
+doing it.
 
 ## Known limitations
 
@@ -19,6 +21,10 @@ kinds steps exchange, and the `NodeTrace` that records what each node did.
   which is not built — see `vs-stitch`'s post-v1 note for why that stays out of v1.
 - No artefact kind carries region relationships; `LayoutRegion` has no id and no
   parent, so a step cannot express that one region contains another.
+- `StepContext::pages` is the only capability a step has beyond its inputs, and it is
+  deliberately narrow: "this page at this DPI", for one document, with no way to name
+  another. A step that needed the *original bytes* — to read embedded attachments, say —
+  would need a second capability rather than a wider version of this one.
 
 ## Data model
 
@@ -70,6 +76,16 @@ pub trait Step: Send + Sync {
   output), apart from model non-determinism. Model steps use temperature 0.
 - A step reports `model_ref` and `prompt_ref` in `StepOutput`; the executor builds the
   `Provenance` (it owns timing, run id, node id and params hash).
+- A step may also report **`StepOutput::metrics`**: a handful of named scalars about *how*
+  it produced the output, which travel into the `NodeTrace` and from there to `vs-adapt`
+  and the vault. It exists because of one concrete case — the `auto` output family tries
+  several parsers and which one won is the single most useful fact about the call, and
+  there was nowhere to put it, so it went to a `tracing` target an operator could read and
+  the scorer could not. Never the output itself: this is metadata, and a step putting its
+  blocks here would store them twice.
+- A step may ask `ctx.pages` for its page at a finer DPI (`crop_dpi`). It is `None` in an
+  offline run and wherever a deployment disables re-rendering, so a step **must** fall back
+  to the page image it was given rather than fail.
 - Step implementations live in `vs-ingest` (CPU steps) and `vs-models` (model steps), and
   are registered in a `StepRegistry` at worker start.
 
@@ -106,7 +122,8 @@ earlier levels). Nodes in one level run concurrently.
 - Failure of a non-optional node fails the page with `ExecError::Node { node_id, .. }`.
   Retrying is the worker's job (whole page), not the executor's.
 - Output: final `Vec<BlockDraft>` plus a `NodeTrace` per node (provenance, duration,
-  outcome). The worker turns drafts into `vs_core::Block` with hash keys.
+  outcome, and whatever the step reported in `metrics`). The worker turns drafts into
+  `vs_core::Block` with hash keys.
 - Unused branches: nodes not on a path to `output` are skipped (pruned at validation).
 
 ## Step catalogue (v1 kinds)

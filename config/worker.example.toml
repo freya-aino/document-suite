@@ -8,6 +8,25 @@
 bucket = "visual-suite"
 endpoint = "https://s3.internal"
 region = "eu-west-1"
+# Server-side encryption for everything written here: none | aes256 | aws:kms |
+# aws:kms:dsse | sse-c. A mode whose key is missing is a startup error rather than a
+# silent write in plaintext. `none` is right where the bucket has its own default rule,
+# or where the store is Garage or MinIO encrypting at the volume.
+sse = "none"
+# sse_kms_key_id = "arn:aws:kms:eu-west-1:…:key/…"   # aws:kms and aws:kms:dsse
+# sse_customer_key_env = "VS_SSE_C_KEY"              # sse-c: the variable's *name*
+
+[blob.retention]
+# Days to keep each class of object; 0 = forever. Derived objects can be rebuilt by
+# re-running the document, so keeping them indefinitely is storage spent on a cache.
+# Originals are the tenant's input: deleting them is a decision for the deployment.
+page_images_days = 30
+results_days = 90
+text_layers_days = 30
+crops_days = 7
+model_images_days = 1
+originals_days = 0
+sweep_interval_h = 6              # 0 disables the sweep entirely
 
 [postgres]
 url = "postgres://vs_app@pgbouncer.internal:6432/visual_suite"   # password: VS__POSTGRES__PASSWORD
@@ -19,6 +38,11 @@ url = "http://qdrant.internal:6334"
 # api_key_env = "QDRANT_API_KEY"
 collection_prefix = "vs"
 batch_size = 256
+# Whether Qdrant applies IDF to the lexical half of a hybrid search. True is the better
+# ranking; the statistics are the collection's, so they span organizations. Set false for
+# a deployment that will not have one organization's ranking depend on another's corpus —
+# it is a property of the collection, so changing it means a new one.
+idf = true
 
 [models]
 registry = "/etc/vs/models.toml"
@@ -35,11 +59,29 @@ page_attempts = 3                  # per-page retries on a transient failure (1 
 # render_processes = 2              # default: available CPUs
 page_render_timeout_s = 60
 # render_mem_limit_mb = 1536
+max_crop_dpi = 600                 # finest DPI a DAG may ask for with `crop_dpi`; 0 disables
+# A document is leased by the copy working on it. A lease that stops being renewed is what
+# a crash looks like from outside, and any copy's sweep then claims the document and runs
+# it again — resuming rather than repeating.
+lease_ttl_s = 120
+resume_interval_s = 60             # 0 disables recovery entirely
+resume_batch = 4                   # abandoned documents claimed per sweep
+max_resumes = 3                    # past this the job is failed, so one bad document cannot loop
 
 [api]
 max_upload_bytes = 2147483648      # 2 GiB; multipart uploads above this get 413
-interactive_max_pending = 1000     # 429 for interactive requests above this lane backlog
+interactive_max_pending = 1000     # 429 for interactive requests above this many documents in flight
 # scratch_dir = "/scratch"         # upload spool while hashing; default: system temp dir
+# How wide a new upload is open inside its organization: private | department | workspace
+# | organization. `private` is the identity model's answer — the uploader and an
+# administrator, nobody else until it is shared. `organization` is what this API did
+# before per-person scoping existed.
+default_visibility = "private"
+admin_reads_all = true             # does the admin role imply reading every document? (never re-sharing one)
+tenant_rate_per_s = 50             # per organization, **per process**; 0 disables
+tenant_rate_burst = 100
+job_retention_days = 90            # then the caller's subject is scrubbed from finished jobs
+revocation_refresh_s = 30          # also the window in which a revoked token still works here
 
 [auth]
 # Required by vs-api: it refuses to start without this section. Keycloak realm issuer,
@@ -55,8 +97,10 @@ client_id = "vs-api"
 # Claim holding the organization, which becomes the tenant: the isolation boundary.
 # A dotted path reads a nested claim (`koki.org`).
 org_claim = "organization"
-department_claim = "department"       # recorded on the job; not yet enforced
-workspaces_claim = "workspaces"      # recorded on the job; not yet enforced
+# Recorded on the job, and what `visibility = department` / `= workspace` are evaluated
+# against.
+department_claim = "department"
+workspaces_claim = "workspaces"
 # Realm or client role required by /v1/dag-lists and /metrics.
 admin_role = "vs-admin"
 jwks_refresh_s = 300                 # how long a fetched JWKS is reused
@@ -67,17 +111,30 @@ born_digital_min_chars = 50
 born_digital_min_coverage = 0.8
 trust_ocr_layer = false
 skip_vision_for_text_only_digital = true
+# Raster-only measurements: a page with this many long ruled lines is a form or a table,
+# and one with this much mid-grey is a photograph. Both are 0 for a PDF, which means "not
+# measured" rather than "none".
+ruled_min_lines = 6
+photo_min_tone_continuity = 0.35
+# What a rules-only page reports when nothing determined its document type. Below the
+# routing table's `min_classifier_confidence` on purpose, so such a page takes the
+# low-confidence DAG — which is what that DAG is for.
+unknown_doc_type_confidence = 0.3
 
 [stage2]
-# `page` and `doc` roles. Model names are ids from [models].registry.
+# Stage 1's classifier and all of Stage 2. Model names are ids from [models].registry.
 extraction_model = "extract-llm"
 verify_model = "extract-llm"
 embedding_model = "embed-text"
 classifier_model = "page-classifier"   # omit for rules-only page classification
 # judge_model = "extract-llm"            # LLM judge for ambiguous corpus-resolution candidates
-# Document-level classifier: one VLM call over the opening page thumbnails. Unset means
-# the document type is the weighted page vote alone.
+# Document-level classifier: one VLM call over the opening page thumbnails. Set, it is
+# called **once per document during ingest**, before the pages fan out, so every page is
+# routed knowing what document it belongs to — the cross-page smoothing the page stage
+# cannot do for itself. Unset, the document type is the weighted page vote alone and each
+# page routes on its own class.
 # doc_classifier_model = "page-classifier"
+# doc_classifier_pages = 3
 window_chars = 12000
 type_match_threshold = 0.85
 link_threshold = 0.92
@@ -89,7 +146,11 @@ dag_list_refresh_s = 60                # how long a worker trusts its cached act
 # OTLP over HTTP/protobuf, so port 4318 and not gRPC's 4317. Give the bare origin;
 # `/v1/traces` is appended.
 otlp_endpoint = "http://otel-collector.internal:4318"
-# Prometheus scrape endpoint. Bind the microVM's internal interface, never 0.0.0.0:
-# a worker has no auth of any kind in front of it.
+# Prometheus scrape endpoint. Bind the internal interface, never 0.0.0.0: this port has no
+# authentication, unlike the API's own /metrics route.
 metrics_addr = "10.0.0.2:9464"
 json_logs = true
+# Fraction of traces exported, parent-based so a trace is never exported in pieces. 1.0
+# exports everything, which is affordable at one span per stage and per DAG node and stops
+# being so once the model client's per-attempt spans are counted at volume.
+sample_ratio = 1.0

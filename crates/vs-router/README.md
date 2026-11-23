@@ -13,9 +13,10 @@ decides which pages skip which steps.
 
 ## Known limitations
 
-- Routing decisions are not counted by rule id, so there is no way to see in
-  production which rules actually fire (the metric is specified below but the
-  telemetry exporter it would feed is itself a stub — see `vs-infra`).
+- Nothing ships a routing table that uses the rotation conditions. The router can match
+  on them and `vs-adapt` has rotation in its class ladder, so the question is answerable —
+  but whether a sideways page class wants a DAG with `page.orient` is a measurement nobody
+  has made.
 
 ## DAG list (the deployable bundle)
 
@@ -67,9 +68,22 @@ result for later analysis (routing hit rates per rule are a key metric).
 | `languages` | list of primary subtags | `profile.language.primary()` is in the list |
 | `doc_types` | list of `DocType` | page doc type is in the list |
 | `born_digital`, `has_handwriting`, `has_images`, `has_tables`, `has_formulas`, `has_charts` | bool | equal to the profile flag |
+| `rotated` | bool | the page is turned away from upright at all (`rotation_deg != 0`) |
+| `rotated_deg` | list of degrees | the page's exact rotation is one of them: `[90, 270]` is the sideways case, `[180]` the inverted one |
 
 Each set field counts 1 towards specificity. An empty `when` matches everything
 (specificity 0) and acts as a profile-specific default.
+
+The two rotation conditions are the newest and the reason is worth stating: the signal was
+measured for PDFs and then for rasters, and until these existed no rule could *ask* about
+it — so a sideways page was routed exactly like an upright one and was only straightened
+if the DAG it happened to land on included `page.orient`. `rotated` is the question a
+routing table usually has ("does this need straightening before anything reads it?"), and
+`rotated_deg` is for the rule that treats a quarter turn, which is unreadable, differently
+from an inverted page, which is merely upside down.
+
+Note what `rotation_deg` means: how far the *source* page is turned, not a correction to
+apply. See `PageSignals::rotation_deg`.
 
 ## Load-time validation (`DagList::load`)
 

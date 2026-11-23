@@ -30,11 +30,23 @@ page_attempts = 3                  # per-page retries on a transient failure (1 
 # render_processes = 2              # default: available CPUs
 page_render_timeout_s = 60
 # render_mem_limit_mb = 1536
+# Recovery is on locally too, and fast, because a crash during development is how you find
+# out whether it works.
+lease_ttl_s = 60
+resume_interval_s = 30
 
 [api]
 max_upload_bytes = 2147483648      # 2 GiB; multipart uploads above this get 413
-interactive_max_pending = 1000     # 429 for interactive requests above this lane backlog
+interactive_max_pending = 1000     # 429 for interactive requests above this many in flight
 # scratch_dir = "/scratch"         # upload spool while hashing; default: system temp dir
+# Local development reads what it uploads from a second token more often than it tests
+# isolation, so this is `organization` here and `private` in the example: a document
+# uploaded by `vs-token` is readable by `vs-token other-person` without sharing it first.
+# Set it to `private` to exercise the scoping the API ships with.
+default_visibility = "organization"
+# Off locally: a tight loop of curl against one organization is a development habit, not
+# abuse, and a 429 in the middle of it wastes an afternoon.
+tenant_rate_per_s = 0
 
 [auth]
 # vs-api refuses to start without this. `devenv --profile stack up` starts a Keycloak
