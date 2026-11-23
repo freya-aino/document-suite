@@ -26,6 +26,39 @@ pub struct StepOutput {
     pub model_ref: Option<String>,
     /// `prompt_id@hash` if a prompt was used.
     pub prompt_ref: Option<String>,
+    /// Anything a step learned about *how* it produced this, for the node's trace.
+    ///
+    /// Flat `{name: value}`, small, and never the output itself — this travels into the
+    /// `NodeTrace` and from there into the vault's `sat_node_metrics`, so a step that put
+    /// its blocks in here would store them twice.
+    ///
+    /// It exists because of one concrete gap: the `auto` output family tries several
+    /// parsers and the one that wins is the single most useful fact about the call, and
+    /// there was nowhere to put it. It was logged to a `tracing` target instead, which an
+    /// operator could read and `vs-adapt` could not, so "which parse path did this model
+    /// take" was unscoreable — and that is the question `auto` exists to answer.
+    pub metrics: Metrics,
+}
+
+/// Per-node metadata: a handful of named scalars.
+pub type Metrics = std::collections::BTreeMap<String, serde_json::Value>;
+
+impl StepOutput {
+    /// An artifact with no model and no metadata behind it: the CPU steps.
+    pub fn plain(artifact: Artifact) -> Self {
+        Self { artifact, model_ref: None, prompt_ref: None, metrics: Metrics::new() }
+    }
+
+    /// An artifact a model produced.
+    pub fn from_model(artifact: Artifact, model_ref: String, prompt_ref: String) -> Self {
+        Self { artifact, model_ref: Some(model_ref), prompt_ref: Some(prompt_ref), metrics: Metrics::new() }
+    }
+
+    /// Records one named fact about how this output was produced.
+    pub fn with_metric(mut self, name: impl Into<String>, value: impl Into<serde_json::Value>) -> Self {
+        self.metrics.insert(name.into(), value.into());
+        self
+    }
 }
 
 #[derive(Debug, thiserror::Error)]

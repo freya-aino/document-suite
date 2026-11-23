@@ -98,10 +98,10 @@ impl Rasterizer for ImageRasterizer {
 /// A raster page is one full-page image without a text layer.
 ///
 /// The zeroes are honest rather than lazy: a scan genuinely has no text layer and no
-/// embedded image objects, it *is* one image. Ink coverage and orientation are the two
-/// things that can actually be measured, and both are measured on a downscaled copy —
-/// telling a blank page from a dense one, or a portrait page from a sideways one, does
-/// not need full resolution.
+/// embedded image objects, it *is* one image. What *can* be measured is measured — ink
+/// coverage, orientation, ruled lines and tone continuity — all on one downscaled copy,
+/// because telling a blank page from a dense one, a portrait page from a sideways one, or
+/// a form from a photograph does not need full resolution.
 fn image_signals(img: &DynamicImage) -> PageSignals {
     const INK_ANALYSIS_LONG_SIDE: u32 = 600;
     let gray = img.thumbnail(INK_ANALYSIS_LONG_SIDE, INK_ANALYSIS_LONG_SIDE).to_luma8();
@@ -120,6 +120,12 @@ fn image_signals(img: &DynamicImage) -> PageSignals {
         image_area_ratio: 1.0,
         rotation_deg: (360 - correction) % 360,
         ink_coverage: crate::preprocess::ink_coverage(&gray),
+        // The two signals that tell tier 0 what *kind* of page this is, rather than only
+        // how much is on it: ruled lines mean a form or a table, mid-tones mean a
+        // photograph. Before these, every raster page reached the vision tier with
+        // nothing but a thumbnail.
+        ruling_lines: crate::preprocess::ruling_lines(&gray),
+        tone_continuity: crate::preprocess::tone_continuity(&gray),
     }
 }
 

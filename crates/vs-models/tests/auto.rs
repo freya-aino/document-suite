@@ -141,3 +141,28 @@ fn auto_is_a_registered_family() {
     assert!(vs_models::parsers::FAMILIES.contains(&"auto"));
     assert_eq!(parser_for("auto").unwrap().family(), "auto");
 }
+
+/// `auto` must *read* grounded-tag output, not split it as prose. This is the case the
+/// family was added for: before it, a model in this shape reached the Markdown splitter
+/// and every bounding box on the page was lost.
+#[test]
+fn auto_reads_grounded_tag_output_structurally() {
+    let raw = include_str!("fixtures/grounded_tags/page.txt");
+    let auto = Auto::default();
+    let (blocks, path) = auto.parse_reporting(raw, &page(1000, 1000), (1000, 1000), "n");
+    assert_eq!(path, AutoPath::Family("grounded_tags"), "auto fell back instead of reading the tags");
+    assert!(blocks.len() >= 5);
+    // Boxes, not one paragraph per line: the difference the family makes.
+    assert!(blocks.iter().any(|b| b.bbox.x0 > 0.0 && b.bbox.y1 < 1.0));
+}
+
+/// And MinerU's tagged output must still go to MinerU: the two conventions share the
+/// `<|ref_start|>` spelling, so whichever parser finds its own box tag has to win.
+#[test]
+fn minerus_tags_are_not_mistaken_for_the_grounded_convention() {
+    let raw = "<|ref_start|>text<|ref_end|><|box_start|>100 200 900 300<|box_end|><|md_start|>Hello<|md_end|>";
+    let auto = Auto::default();
+    let (blocks, path) = auto.parse_reporting(raw, &page(1000, 1000), (1000, 1000), "n");
+    assert_eq!(path, AutoPath::Family("mineru"), "got {path:?}");
+    assert_eq!(blocks.len(), 1);
+}

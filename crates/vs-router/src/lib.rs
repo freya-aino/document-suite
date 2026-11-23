@@ -16,6 +16,19 @@ pub struct Match {
     pub has_tables: Option<bool>,
     pub has_formulas: Option<bool>,
     pub has_charts: Option<bool>,
+    /// Whether the source page is turned away from upright at all
+    /// (`PageProfile::rotation_deg != 0`).
+    ///
+    /// The signal was measured for PDFs and then for rasters too, and no rule could ask
+    /// about it — so a sideways page was routed exactly like an upright one and only got
+    /// turned if the DAG it happened to land on included `page.orient`. A boolean rather
+    /// than the angle because that is the question a routing table has: *does this page
+    /// need straightening before anything reads it?* A rule that wants only quarter turns
+    /// can pair this with `rotated_deg`.
+    pub rotated: Option<bool>,
+    /// Exact rotations to match, for a rule that treats a quarter turn differently from
+    /// an upside-down page: `[90, 270]` is the sideways case, `[180]` the inverted one.
+    pub rotated_deg: Option<Vec<u16>>,
 }
 
 impl Match {
@@ -29,6 +42,8 @@ impl Match {
             && flag(self.has_tables, p.has_tables)
             && flag(self.has_formulas, p.has_formulas)
             && flag(self.has_charts, p.has_charts)
+            && flag(self.rotated, !p.rotation_deg.is_multiple_of(360))
+            && self.rotated_deg.as_ref().is_none_or(|ds| ds.contains(&(p.rotation_deg % 360)))
     }
 
     pub fn specificity(&self) -> u32 {
@@ -41,6 +56,8 @@ impl Match {
             self.has_tables.is_some(),
             self.has_formulas.is_some(),
             self.has_charts.is_some(),
+            self.rotated.is_some(),
+            self.rotated_deg.is_some(),
         ]
         .iter()
         .filter(|b| **b)
@@ -345,6 +362,36 @@ mod tests {
         ] {
             assert!(body.contains(expect), "missing {expect}\n{body}");
         }
+    }
+
+    /// A page that arrived sideways must be able to select a DAG that straightens it.
+    /// The signal was measured and no rule could ask about it, so it changed nothing.
+    #[test]
+    fn a_sideways_page_can_be_routed_differently_from_an_upright_one() {
+        let upright = page("en", true, 0.9);
+        let mut sideways = upright.clone();
+        sideways.rotation_deg = 270;
+        let mut inverted = upright.clone();
+        inverted.rotation_deg = 180;
+
+        let any_rotation = Match { rotated: Some(true), ..Default::default() };
+        assert!(!any_rotation.matches(&upright));
+        assert!(any_rotation.matches(&sideways));
+        assert!(any_rotation.matches(&inverted), "upside down is rotated too");
+
+        let upright_only = Match { rotated: Some(false), ..Default::default() };
+        assert!(upright_only.matches(&upright));
+        assert!(!upright_only.matches(&sideways));
+
+        // The quarter-turn case, which is the one a reader cannot read at all, told apart
+        // from the inverted one.
+        let quarter = Match { rotated_deg: Some(vec![90, 270]), ..Default::default() };
+        assert!(quarter.matches(&sideways));
+        assert!(!quarter.matches(&inverted));
+        assert!(!quarter.matches(&upright));
+
+        // And it counts towards specificity, so a rotation rule beats a general one.
+        assert!(quarter.specificity() > Match::default().specificity());
     }
 
     #[test]

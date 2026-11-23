@@ -56,6 +56,24 @@ pub fn target_dag(list: &DagList, t: Target) -> &str {
 }
 
 /// Distinct pages (`page_id` → profile), in first-seen order.
+/// Pages per (DAG, parse path), sorted for a stable report.
+fn parse_path_counts(evals: &[PageEval]) -> Vec<((String, String), usize)> {
+    let mut counts: HashMap<(String, String), usize> = HashMap::new();
+    for e in evals {
+        // One page can run several model nodes; each is counted once per distinct path,
+        // so a DAG with a layout model and a recognition model does not read as two pages.
+        let mut seen: HashSet<&str> = HashSet::new();
+        for p in &e.parse_paths {
+            if seen.insert(p.as_str()) {
+                *counts.entry((e.dag_id.clone(), p.clone())).or_default() += 1;
+            }
+        }
+    }
+    let mut out: Vec<((String, String), usize)> = counts.into_iter().collect();
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+}
+
 fn pages(evals: &[PageEval]) -> Vec<(&str, &PageProfile)> {
     let mut seen = HashSet::new();
     evals.iter().filter(|e| seen.insert(e.page_id.as_str())).map(|e| (e.page_id.as_str(), &e.profile)).collect()
@@ -137,6 +155,32 @@ pub fn render(list: &DagList, evals: &[PageEval], obj: &Objective, current: Opti
         "- Objective: quality floor {}, latency ref {} ms, GPU ref {} s, min pages per class {}\n\n",
         obj.quality_floor, obj.latency_ref_ms, obj.gpu_ref_seconds, obj.min_pages
     ));
+
+    // How each DAG's model output was parsed. The question is `auto`'s: a registry entry
+    // is all it takes to add a model, and this is what says whether that model's output
+    // is being *read* — a family parser understood it — or merely split as Markdown
+    // because nothing did. A DAG whose pages are mostly `markdown` is scoring a text
+    // dump, and its quality numbers have to be read in that light.
+    let paths = parse_path_counts(evals);
+    if !paths.is_empty() {
+        md.push_str("## Parse paths\n\n");
+        md.push_str("Which parser produced the blocks, per DAG, over the pages evaluated. ");
+        md.push_str("`markdown` means no family parser recognised the output and it was split as prose: ");
+        md.push_str("the blocks have no bounding boxes worth the name, so layout metrics for those pages are near-meaningless.\n\n");
+        md.push_str("| DAG | Path | Pages |\n|---|---|---|\n");
+        for ((dag, path), n) in &paths {
+            md.push_str(&format!("| `{dag}` | `{path}` | {n} |\n"));
+        }
+        md.push('\n');
+        let fallbacks: usize = paths.iter().filter(|((_, p), _)| p == "markdown").map(|(_, n)| *n).sum();
+        if fallbacks > 0 {
+            md.push_str(&format!(
+                "**{fallbacks} page(s) fell back to the Markdown splitter.** Either the model's output is not in a \
+                 family this suite parses — in which case a bespoke parser would read its structure rather than \
+                 approximating it — or `coord_scale`/`family` in the registry is wrong for it.\n\n"
+            ));
+        }
+    }
 
     // Rules per profile
     md.push_str("## Rules\n\n");
@@ -318,6 +362,33 @@ mod tests {
             v.push(PageEval::new(format!("s{i}"), s, "vlm", 0.9, 3000.0, 2.0, Trust::Judge));
         }
         v
+    }
+
+    /// A model whose output nothing recognised is being scored on a text dump, and the
+    /// report has to say so: it is the difference between "this DAG is weak" and "this
+    /// DAG's output was never parsed".
+    #[test]
+    fn the_report_says_when_a_model_fell_back_to_splitting_markdown() {
+        let obj = Objective { min_pages: 3, ..Default::default() };
+        let mut with_paths = evals();
+        for e in with_paths.iter_mut() {
+            e.parse_paths = match e.dag_id.as_str() {
+                // The structured path: a family parser read the model's output.
+                "native" => vec!["dots_ocr".into()],
+                // The fallback: `auto` tried every candidate and split prose instead.
+                _ => vec!["markdown".into()],
+            };
+        }
+        let list = select(&with_paths, vec![], &obj, "t1", None).expect("a list");
+        let md = render(&list, &with_paths, &obj, None);
+        assert!(md.contains("## Parse paths"), "{md}");
+        assert!(md.contains("`dots_ocr`"));
+        assert!(md.contains("fell back to the Markdown splitter"), "the fallback must be called out, not merely listed");
+
+        // And with nothing to report, the section stays out of the way.
+        let plain = evals();
+        let plain_list = select(&plain, vec![], &obj, "t1", None).expect("a list");
+        assert!(!render(&plain_list, &plain, &obj, None).contains("## Parse paths"));
     }
 
     #[test]

@@ -33,6 +33,20 @@ pub struct PageSignals {
     /// one. `0.0` also means "not measured", which is why it only ever *skips* work.
     #[serde(default)]
     pub ink_coverage: f32,
+    /// Long straight ruled lines on the page, horizontal and vertical together.
+    ///
+    /// The signal that tells a form or a table from prose *before* any model looks. Only
+    /// measured for rasters, where tier 0 had nothing else to go on; a PDF's own text
+    /// layer and image objects are better evidence than pixels. `0` means "not
+    /// measured", so it only ever adds information.
+    #[serde(default)]
+    pub ruling_lines: u16,
+    /// Fraction of the page in the mid-grey band: how continuous-tone it is.
+    ///
+    /// A document is bimodal — paper and ink — and a photograph is not. `0.0` means "not
+    /// measured" here too, so a PDF page is never called a photograph on this basis.
+    #[serde(default)]
+    pub tone_continuity: f32,
 }
 
 /// Output of the tier 1 vision classifier.
@@ -61,6 +75,15 @@ pub struct ClassifyConfig {
     /// Ink coverage at or below which a scan counts as blank, so tier 1 is skipped.
     /// Set to 0 to disable, which is also the effect on inputs that cannot measure it.
     pub blank_ink_coverage: f32,
+    /// Ruled lines at or above which a raster page is treated as ruled — a form, a
+    /// table, a ledger. Six is two horizontals and four verticals, or the other way
+    /// round: fewer than that is an underline and a page edge.
+    pub ruled_min_lines: u16,
+    /// Mid-tone fraction at or above which a raster page is treated as a photograph.
+    ///
+    /// Well above a scan's own grey — paper and shadow put a few per cent in the middle —
+    /// and below a photograph's, which is typically over half.
+    pub photo_min_tone_continuity: f32,
 }
 
 impl Default for ClassifyConfig {
@@ -77,6 +100,8 @@ impl Default for ClassifyConfig {
             // Deliberately low: a page with a faint signature or a pale logo must not be
             // mistaken for blank, so this only catches pages with essentially nothing.
             blank_ink_coverage: 0.002,
+            ruled_min_lines: 6,
+            photo_min_tone_continuity: 0.35,
         }
     }
 }
@@ -89,6 +114,15 @@ pub struct Tier0 {
     /// Measured as having essentially no ink. Only ever set for inputs that report
     /// `ink_coverage`, so a PDF page is never flagged blank this way.
     pub blank: bool,
+    /// Ruled like a form or a table, from `ruling_lines`. Raster inputs only.
+    ///
+    /// This is what tier 0 could not say before: its only measured signal was how much
+    /// ink a page had, so a form, a photograph and a page of prose all reached the vision
+    /// tier indistinguishable — and on a deployment with no vision model, every
+    /// rules-only page claimed to have no tables whatever was printed on it.
+    pub ruled: bool,
+    /// Continuous-tone like a photograph, from `tone_continuity`. Raster inputs only.
+    pub photographic: bool,
 }
 
 pub fn tier0(s: &PageSignals, cfg: &ClassifyConfig) -> Tier0 {
@@ -99,8 +133,23 @@ pub fn tier0(s: &PageSignals, cfg: &ClassifyConfig) -> Tier0 {
     // `> 0.0` keeps an unmeasured page (ink_coverage defaulting to 0.0) out of this:
     // "we did not look" must not be read as "there is nothing there".
     let blank = cfg.blank_ink_coverage > 0.0 && s.ink_coverage > 0.0 && s.ink_coverage <= cfg.blank_ink_coverage;
+    // Both are raster-only measurements, and both read 0 as "not measured" rather than as
+    // "none", so a PDF page is never called ruled or photographic on this basis.
+    let ruled = !blank && cfg.ruled_min_lines > 0 && s.ruling_lines >= cfg.ruled_min_lines;
+    let photographic =
+        !blank && s.tone_continuity > 0.0 && s.tone_continuity >= cfg.photo_min_tone_continuity && !ruled;
     let text_only_digital = born_digital && !has_images && cfg.skip_vision_for_text_only_digital;
-    Tier0 { born_digital, has_images: has_images && !blank, needs_vision: !(text_only_digital || blank), blank }
+    Tier0 {
+        born_digital,
+        // A photograph *is* an image, whatever the container says about embedded image
+        // objects — which for a scan is "one, the whole page", and for a phone photo the
+        // same. The measurement is what distinguishes the two cases.
+        has_images: (has_images || photographic) && !blank,
+        needs_vision: !(text_only_digital || blank),
+        blank,
+        ruled,
+        photographic,
+    }
 }
 
 /// Combines tier 0 and (optional) tier 1 into a profile.
@@ -115,12 +164,17 @@ pub fn combine(
     match vision {
         None => PageProfile {
             language,
-            doc_type: known_doc_type.unwrap_or(DocType::Other),
+            // A ruled page with no caller hint and no vision model is a form: that is
+            // what ruling lines mean, and `other` was the answer only because nothing
+            // measured them.
+            doc_type: known_doc_type.unwrap_or(if t0.ruled { DocType::Form } else { DocType::Other }),
             born_digital: t0.born_digital,
             text_layer_coverage: s.text_layer_coverage,
             has_handwriting: false,
             has_images: t0.has_images,
-            has_tables: false,
+            // Rules on a page are a table or a form's field grid. Without this, a
+            // rules-only deployment told every router that no page had a table.
+            has_tables: t0.ruled,
             has_formulas: false,
             has_charts: false,
             rotation_deg: s.rotation_deg,
@@ -139,7 +193,10 @@ pub fn combine(
                 text_layer_coverage: s.text_layer_coverage,
                 has_handwriting: flag(v.p_handwriting),
                 has_images: t0.has_images || flag(v.p_images),
-                has_tables: flag(v.p_tables),
+                // The model's answer, or the page's own rules. A model that misses a
+                // faint field grid is the common failure here, and a measurement that
+                // disagrees with it is evidence, not noise.
+                has_tables: flag(v.p_tables) || t0.ruled,
                 has_formulas: flag(v.p_formulas),
                 has_charts: flag(v.p_charts),
                 rotation_deg: s.rotation_deg,
@@ -203,7 +260,48 @@ mod tests {
     #[test]
     fn text_only_digital_skips_vision() {
         let t = tier0(&digital(), &ClassifyConfig::default());
-        assert_eq!(t, Tier0 { born_digital: true, has_images: false, needs_vision: false, blank: false });
+        assert_eq!(
+            t,
+            Tier0 { born_digital: true, has_images: false, needs_vision: false, blank: false, ruled: false, photographic: false },
+            "a PDF page reports neither ruling lines nor tone, so tier 0 must claim nothing about either"
+        );
+    }
+
+    /// What tier 0 could not say before: whether a page nobody has read is a form, a
+    /// photograph, or prose. Its only measured signal was how much ink there was.
+    #[test]
+    fn a_ruled_scan_is_a_form_and_a_continuous_tone_one_is_a_photograph() {
+        let cfg = ClassifyConfig::default();
+        let scan = |lines: u16, tone: f32| PageSignals {
+            image_count: 1,
+            image_area_ratio: 1.0,
+            ink_coverage: 0.08,
+            ruling_lines: lines,
+            tone_continuity: tone,
+            ..Default::default()
+        };
+
+        let form = tier0(&scan(12, 0.02), &cfg);
+        assert!(form.ruled && !form.photographic);
+        let photo = tier0(&scan(0, 0.6), &cfg);
+        assert!(photo.photographic && !photo.ruled);
+        assert!(photo.has_images, "a photograph is an image whatever the container says");
+        let prose = tier0(&scan(1, 0.02), &cfg);
+        assert!(!prose.ruled && !prose.photographic, "one line is an underline, not a ruled page: {prose:?}");
+
+        // A ruled page printed on grey stock, or a shadowed scan of a form: ruled wins,
+        // because rules are a positive finding and mid-tone is an absence of contrast.
+        let shadowed_form = tier0(&scan(12, 0.6), &cfg);
+        assert!(shadowed_form.ruled && !shadowed_form.photographic);
+
+        // The rules-only profile is where this matters most: with no vision model, every
+        // page used to claim it had no tables.
+        let profile = combine(LanguageTag::parse("en").expect("lang"), &scan(12, 0.02), form, None, None, &cfg);
+        assert!(profile.has_tables, "a ruled page with no vision model still has a table on it");
+        assert_eq!(profile.doc_type, DocType::Form);
+        // And a caller's own hint still beats the measurement.
+        let hinted = combine(LanguageTag::parse("en").expect("lang"), &scan(12, 0.02), form, None, Some(DocType::Invoice), &cfg);
+        assert_eq!(hinted.doc_type, DocType::Invoice);
     }
 
     #[test]

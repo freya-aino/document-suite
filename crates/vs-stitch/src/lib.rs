@@ -30,6 +30,8 @@ pub enum LinkKind {
     Encloses,
     /// `from` is the value of the label `to`, on a form-like page.
     ValueOf,
+    /// `from` is a footnote and `to` is the body block whose text carries its marker.
+    FootnoteOf,
 }
 
 /// A stitching decision between two blocks (`from` → `to`).
@@ -180,6 +182,7 @@ pub fn stitch(mut pages: Vec<PageResult>, pages_total: u32) -> Result<StitchedDo
     }
     link_continuations(&mut doc);
     pair_captions(&mut doc);
+    anchor_footnotes(&mut doc);
     let page_types: HashMap<u32, vs_core::DocType> = pages.iter().map(|p| (p.page_no, p.profile.doc_type)).collect();
     doc.links.extend(page_layout::enclosures(&doc));
     doc.links.extend(page_layout::key_values(&doc, &page_types));
@@ -294,23 +297,159 @@ fn link_continuations(doc: &mut StitchedDocument) {
     doc.links.extend(links);
 }
 
+/// A caption and its target must share this much of the narrower one's width to be read
+/// as belonging together. A caption sits under (or over) the thing it describes, so it is
+/// aligned with it; two items side by side are not a pair however close their centres are.
+const CAPTION_OVERLAP: f32 = 0.3;
+
+/// A caption further than this from its target, as a fraction of the page height, is not
+/// its caption. Without a bound, a page with one figure at the top and one stray caption
+/// at the bottom pairs them for lack of anything better.
+const MAX_CAPTION_GAP: f32 = 0.25;
+
+/// `CaptionOf` links: each caption to the figure, chart or table it describes.
+///
+/// Three things decide it, in the order they matter:
+///
+/// 1. **Alignment.** A caption is printed across the width of its target, so a candidate
+///    that does not overlap it horizontally is not a candidate at all. This is what the
+///    earlier version was missing — it minimised the distance between vertical *centres*
+///    with no horizontal test, so on a page with two figures side by side a caption under
+///    the left one could be paired with the right one.
+/// 2. **The gap between the boxes**, not between their centres. A tall figure's centre is
+///    far from its own caption, and a short one next to it is nearer — by centre distance
+///    the caption goes to the wrong figure, by edge gap it does not.
+/// 3. **Which side it is on.** A figure's caption goes below it and a table's above it,
+///    almost everywhere, and the convention is strong enough to break a tie and to be
+///    worth saying in the confidence when it is violated.
 fn pair_captions(doc: &mut StitchedDocument) {
     let mut links = vec![];
     for cap in doc.blocks.iter().filter(|b| b.block.kind == BlockKind::Caption) {
-        let best = doc
+        let cb = &cap.block.bbox;
+        let mut best: Option<(&DocBlock, f32, bool)> = None;
+        for t in doc
             .blocks
             .iter()
             .filter(|t| t.page_no == cap.page_no && matches!(t.block.kind, BlockKind::Figure | BlockKind::Table | BlockKind::Chart))
-            .min_by(|x, y| {
-                let d = |t: &DocBlock| {
-                    let tc = (t.block.bbox.y0 + t.block.bbox.y1) / 2.0;
-                    let cc = (cap.block.bbox.y0 + cap.block.bbox.y1) / 2.0;
-                    (tc - cc).abs()
-                };
-                d(x).partial_cmp(&d(y)).unwrap_or(std::cmp::Ordering::Equal)
-            });
-        if let Some(t) = best {
-            links.push(Link::new(LinkKind::CaptionOf, cap.block.block_hk.clone(), t.block.block_hk.clone(), 0.8));
+        {
+            let tb = &t.block.bbox;
+            if page_layout::horizontal_overlap(cb, tb) < CAPTION_OVERLAP {
+                continue;
+            }
+            // Vertical gap between the two boxes; zero when they touch or overlap.
+            let gap = (cb.y0 - tb.y1).max(tb.y0 - cb.y1).max(0.0);
+            if gap > MAX_CAPTION_GAP {
+                continue;
+            }
+            // Below a figure or a chart, above a table.
+            let caption_below = cb.y0 >= (tb.y0 + tb.y1) / 2.0;
+            let conventional = match t.block.kind {
+                BlockKind::Table => !caption_below,
+                _ => caption_below,
+            };
+            // The convention breaks ties rather than overriding geometry: a small penalty,
+            // a tenth of the allowed gap, so a clearly nearer target on the unusual side
+            // still wins.
+            let score = gap + if conventional { 0.0 } else { MAX_CAPTION_GAP / 10.0 };
+            if best.is_none_or(|(_, s, _)| score < s) {
+                best = Some((t, score, conventional));
+            }
+        }
+        if let Some((t, _, conventional)) = best {
+            // Said in the confidence rather than hidden: a caption on the unusual side of
+            // its target is still the best reading available, and a reader thresholding
+            // on this can tell the two cases apart.
+            let confidence = if conventional { 0.85 } else { 0.6 };
+            links.push(Link::new(LinkKind::CaptionOf, cap.block.block_hk.clone(), t.block.block_hk.clone(), confidence));
+        }
+    }
+    doc.links.extend(links);
+}
+
+/// Markers a footnote can be numbered with, beyond plain digits.
+///
+/// The superscript digits are here because a text layer often carries them literally,
+/// and a model transcribing a page may emit either form — so both the footnote's own
+/// marker and the one in the body text are normalised through [`marker_of`].
+const FOOTNOTE_SYMBOLS: [char; 6] = ['*', '†', '‡', '§', '¶', '#'];
+
+/// The marker a footnote begins with: `12` from "12. Jones (2024)", `†` from "† ibid".
+///
+/// `None` when the footnote starts with no marker at all, which is common enough —
+/// a model that drops the superscript gives the text alone — and is why anchoring is
+/// best-effort rather than an invariant.
+fn marker_of(text: &str) -> Option<String> {
+    let t = text.trim_start();
+    let first = t.chars().next()?;
+    if FOOTNOTE_SYMBOLS.contains(&first) {
+        // A run of the same symbol: `*`, `**`, `***` number footnotes on many pages.
+        let run: String = t.chars().take_while(|c| *c == first).collect();
+        return Some(run);
+    }
+    let digits: String = t.chars().take_while(|c| c.is_ascii_digit() || superscript_digit(*c).is_some()).collect();
+    if digits.is_empty() {
+        return None;
+    }
+    let normalised: String = digits.chars().map(|c| superscript_digit(c).unwrap_or(c)).collect();
+    // A footnote numbered past three digits is almost certainly a year or an amount that
+    // happens to lead the line.
+    (normalised.len() <= 3).then_some(normalised)
+}
+
+/// `²` → `2`.
+fn superscript_digit(c: char) -> Option<char> {
+    const SUPERSCRIPTS: [char; 10] = ['⁰', '¹', '²', '³', '⁴', '⁵', '⁶', '⁷', '⁸', '⁹'];
+    SUPERSCRIPTS.iter().position(|s| *s == c).map(|i| (b'0' + i as u8) as char)
+}
+
+/// Whether `text` carries `marker` as a reference marker rather than as part of a word or
+/// a number.
+///
+/// The hard case is a digit: "3" appears in "Table 3", in "1,300" and in a hundred other
+/// places on a page, so a bare search would anchor every footnote to the first paragraph
+/// containing its number. Two forms are accepted, and nothing else: the superscript
+/// (`text³`), which is unambiguous, and a digit in brackets (`[3]`, `(3)`). A symbol
+/// marker needs no such care — `†` is a footnote marker wherever it appears.
+fn carries_marker(text: &str, marker: &str) -> bool {
+    if marker.starts_with(|c: char| FOOTNOTE_SYMBOLS.contains(&c)) {
+        return text.contains(marker);
+    }
+    let superscript: String = marker
+        .chars()
+        .filter_map(|c| c.to_digit(10).map(|d| ['⁰', '¹', '²', '³', '⁴', '⁵', '⁶', '⁷', '⁸', '⁹'][d as usize]))
+        .collect();
+    if !superscript.is_empty() && text.contains(&superscript) {
+        return true;
+    }
+    text.contains(&format!("[{marker}]")) || text.contains(&format!("({marker})"))
+}
+
+/// `FootnoteOf` links: each footnote to the body block whose text carries its marker.
+///
+/// Footnotes were ordered with everything else and linked to nothing, so the sentence a
+/// footnote belongs to was recoverable only by a reader doing this themselves. Anchoring
+/// is per page, because a footnote is printed on the page of its reference, and prefers
+/// the **last** body block before the footnote that carries the marker: a marker repeated
+/// down a page refers forward to the nearest footnote below it.
+fn anchor_footnotes(doc: &mut StitchedDocument) {
+    let mut links = vec![];
+    for (fi, fnote) in doc.blocks.iter().enumerate().filter(|(_, b)| b.block.kind == BlockKind::Footnote) {
+        let Some(marker) = marker_of(&fnote.block.text) else { continue };
+        let anchor = doc
+            .blocks
+            .iter()
+            .enumerate()
+            .filter(|(i, b)| {
+                *i != fi
+                    && b.page_no == fnote.page_no
+                    && b.block.kind != BlockKind::Footnote
+                    && doc.is_body(*i)
+                    && matches!(b.block.kind, BlockKind::Paragraph | BlockKind::List | BlockKind::Heading | BlockKind::Table | BlockKind::Caption)
+            })
+            .filter(|(_, b)| carries_marker(&b.block.text, &marker))
+            .max_by_key(|(_, b)| b.global_order);
+        if let Some((_, b)) = anchor {
+            links.push(Link::new(LinkKind::FootnoteOf, fnote.block.block_hk.clone(), b.block.block_hk.clone(), 0.8));
         }
     }
     doc.links.extend(links);
@@ -552,4 +691,138 @@ mod tests {
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0].to, HashKey::block(&HashKey::page(&doc, 1), &run, 1));
     }
+    /// A block at an arbitrary box, for the geometric tests.
+    fn placed(page_hk: &HashKey, run: RunId, i: u32, kind: BlockKind, text: &str, bbox: BBox) -> Block {
+        Block { bbox, ..block(page_hk, run, i, kind, text, 0.0) }
+    }
+
+    fn doc_of(blocks: Vec<Block>, run: RunId, doc: &HashKey) -> StitchedDocument {
+        let page_hk = HashKey::page(doc, 1);
+        let blocks = blocks
+            .into_iter()
+            .enumerate()
+            .map(|(i, block)| DocBlock { block, page_no: 1, page_hk: page_hk.clone(), global_order: i as u32 })
+            .collect();
+        StitchedDocument {
+            document_hk: doc.clone(),
+            run_id: run,
+            blocks,
+            furniture: HashSet::new(),
+            sections: vec![],
+            links: vec![],
+            missing_pages: vec![],
+        }
+    }
+
+    fn bb(x0: f32, y0: f32, x1: f32, y1: f32) -> BBox {
+        BBox::new(x0, y0, x1, y1).expect("bbox")
+    }
+
+    /// Two figures side by side, one caption under the left one. By vertical-centre
+    /// distance alone — which is all this used to measure — the caption can land on the
+    /// right figure; alignment is what decides it.
+    #[test]
+    fn a_caption_goes_to_the_figure_it_is_aligned_with() {
+        let (run, doc) = (RunId::new(), HashKey::of(&["d"]));
+        let page_hk = HashKey::page(&doc, 1);
+        let blocks = vec![
+            // Left figure: tall, so its centre is far from its own caption.
+            placed(&page_hk, run, 0, BlockKind::Figure, "", bb(0.05, 0.10, 0.45, 0.60)),
+            // Right figure: short, and its centre is nearer the caption below the left one.
+            placed(&page_hk, run, 1, BlockKind::Figure, "", bb(0.55, 0.55, 0.95, 0.60)),
+            placed(&page_hk, run, 2, BlockKind::Caption, "Figure 1: the left one", bb(0.05, 0.62, 0.45, 0.66)),
+        ];
+        let mut d = doc_of(blocks, run, &doc);
+        pair_captions(&mut d);
+        let link = d.links.iter().find(|l| l.kind == LinkKind::CaptionOf).expect("a caption link");
+        assert_eq!(link.to, HashKey::block(&page_hk, &run, 0), "the caption was paired with the figure it is not under");
+        assert!(link.confidence > 0.8, "a caption below a figure is the conventional side");
+    }
+
+    #[test]
+    fn a_table_caption_above_its_table_is_conventional_and_one_below_is_doubted() {
+        let (run, doc) = (RunId::new(), HashKey::of(&["d"]));
+        let page_hk = HashKey::page(&doc, 1);
+        let above = vec![
+            placed(&page_hk, run, 0, BlockKind::Caption, "Table 1: results", bb(0.1, 0.10, 0.9, 0.14)),
+            placed(&page_hk, run, 1, BlockKind::Table, "", bb(0.1, 0.16, 0.9, 0.40)),
+        ];
+        let mut d = doc_of(above, run, &doc);
+        pair_captions(&mut d);
+        assert!(d.links[0].confidence > 0.8, "a table's caption belongs above it");
+
+        let below = vec![
+            placed(&page_hk, run, 0, BlockKind::Table, "", bb(0.1, 0.16, 0.9, 0.40)),
+            placed(&page_hk, run, 1, BlockKind::Caption, "Table 1: results", bb(0.1, 0.42, 0.9, 0.46)),
+        ];
+        let mut d = doc_of(below, run, &doc);
+        pair_captions(&mut d);
+        // Still the right answer — it is the only table on the page — but said with less
+        // confidence, which is the difference a reader can act on.
+        assert_eq!(d.links.len(), 1);
+        assert!(d.links[0].confidence < 0.8, "an unconventional side is not stated as confidently");
+    }
+
+    #[test]
+    fn a_stray_caption_is_paired_with_nothing() {
+        let (run, doc) = (RunId::new(), HashKey::of(&["d"]));
+        let page_hk = HashKey::page(&doc, 1);
+        let blocks = vec![
+            placed(&page_hk, run, 0, BlockKind::Figure, "", bb(0.05, 0.05, 0.45, 0.15)),
+            // Half a page away, and not aligned with it either.
+            placed(&page_hk, run, 1, BlockKind::Caption, "Figure 7: from another page", bb(0.55, 0.90, 0.95, 0.95)),
+        ];
+        let mut d = doc_of(blocks, run, &doc);
+        pair_captions(&mut d);
+        assert!(d.links.is_empty(), "a caption was paired with a figure it cannot belong to");
+    }
+
+    #[test]
+    fn a_footnote_is_anchored_to_the_text_carrying_its_marker() {
+        let (run, doc) = (RunId::new(), HashKey::of(&["d"]));
+        let page_hk = HashKey::page(&doc, 1);
+        let blocks = vec![
+            placed(&page_hk, run, 0, BlockKind::Paragraph, "The rate was 3 per cent in 1970.", bb(0.1, 0.10, 0.9, 0.20)),
+            placed(&page_hk, run, 1, BlockKind::Paragraph, "The second estimate² is the one used here.", bb(0.1, 0.25, 0.9, 0.35)),
+            placed(&page_hk, run, 2, BlockKind::Footnote, "2. Jones (2024), p. 31.", bb(0.1, 0.90, 0.9, 0.94)),
+        ];
+        let mut d = doc_of(blocks, run, &doc);
+        anchor_footnotes(&mut d);
+        let link = d.links.iter().find(|l| l.kind == LinkKind::FootnoteOf).expect("a footnote link");
+        assert_eq!(link.from, HashKey::block(&page_hk, &run, 2));
+        // Not the first paragraph, which contains a bare "3" and a year: a digit on a page
+        // is not a marker unless it is marked as one.
+        assert_eq!(link.to, HashKey::block(&page_hk, &run, 1), "anchored to a paragraph that merely contains the digit");
+    }
+
+    #[test]
+    fn footnote_markers_are_read_in_the_forms_a_page_uses() {
+        assert_eq!(marker_of("12. Jones"), Some("12".into()));
+        assert_eq!(marker_of("² ibid"), Some("2".into()));
+        assert_eq!(marker_of("† the same"), Some("†".into()));
+        assert_eq!(marker_of("** and again"), Some("**".into()));
+        assert_eq!(marker_of("See also Jones"), None, "no marker at all is a footnote we cannot anchor");
+        assert_eq!(marker_of("1970 was different"), None, "a year is not a marker");
+
+        assert!(carries_marker("as shown³ here", "3"), "a superscript is unambiguous");
+        assert!(carries_marker("as shown [3] here", "3"));
+        assert!(carries_marker("as shown (3) here", "3"));
+        assert!(!carries_marker("Table 3 shows", "3"), "a bare digit must not anchor a footnote");
+        assert!(!carries_marker("1,300 units", "3"));
+        assert!(carries_marker("the usual caveat† applies", "†"));
+    }
+
+    #[test]
+    fn a_symbol_footnote_without_a_marker_in_the_text_anchors_to_nothing() {
+        let (run, doc) = (RunId::new(), HashKey::of(&["d"]));
+        let page_hk = HashKey::page(&doc, 1);
+        let blocks = vec![
+            placed(&page_hk, run, 0, BlockKind::Paragraph, "A paragraph with no markers.", bb(0.1, 0.1, 0.9, 0.2)),
+            placed(&page_hk, run, 1, BlockKind::Footnote, "‡ only on the next page", bb(0.1, 0.9, 0.9, 0.94)),
+        ];
+        let mut d = doc_of(blocks, run, &doc);
+        anchor_footnotes(&mut d);
+        assert!(d.links.is_empty(), "anchoring is best-effort, not a guess");
+    }
+
 }

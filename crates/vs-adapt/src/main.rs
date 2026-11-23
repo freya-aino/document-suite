@@ -208,7 +208,17 @@ async fn main() -> anyhow::Result<()> {
             let fetcher: Box<dyn Fetcher> = match blob_config {
                 Some(p) => {
                     let f: BlobFile = toml::from_str(&std::fs::read_to_string(&p)?)?;
-                    let cfg = vs_infra::config::BlobConfig { bucket: f.bucket.clone(), endpoint: f.endpoint, region: f.region };
+                    // Reading a dataset, so nothing here writes: encryption and retention
+                    // are the writer's settings and stay at their defaults.
+                    let cfg = vs_infra::config::BlobConfig {
+                        bucket: f.bucket.clone(),
+                        endpoint: f.endpoint,
+                        region: f.region,
+                        sse: "none".into(),
+                        sse_kms_key_id: None,
+                        sse_customer_key_env: None,
+                        retention: Default::default(),
+                    };
                     Box::new(BlobFetcher { store: Arc::new(vs_infra::ObjectBlobStore::s3(&cfg)?), bucket: f.bucket })
                 }
                 None => Box::new(LocalFetcher),

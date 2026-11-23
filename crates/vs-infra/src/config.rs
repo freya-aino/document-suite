@@ -32,6 +32,79 @@ pub struct BlobConfig {
     pub bucket: String,
     pub endpoint: Option<String>,
     pub region: Option<String>,
+    /// Server-side encryption for everything this suite writes: `none` (the default),
+    /// `aes256` (SSE-S3), `aws:kms` or `aws:kms:dsse` (both need `sse_kms_key_id`), or
+    /// `sse-c` (needs `sse_customer_key_env`).
+    ///
+    /// The system spec asserts encryption at rest for originals (§5.6) and for a long
+    /// time nothing here configured it, which meant it was true only where the bucket had
+    /// a default encryption rule — in other words, not a property of this software.
+    /// `none` is still the default because a bucket policy is the better place for it when
+    /// one exists, and silently sending an encryption header a non-AWS S3 implementation
+    /// rejects would break Garage and MinIO deployments that are already encrypting at the
+    /// volume. Setting it here is for the deployment that cannot rely on either.
+    #[serde(default = "sse_none")]
+    pub sse: String,
+    /// KMS key for `aws:kms` and `aws:kms:dsse`.
+    #[serde(default)]
+    pub sse_kms_key_id: Option<String>,
+    /// Name of the environment variable holding the base64 256-bit customer key for
+    /// `sse-c`. The key itself is never in the config file — it is the whole secret, and a
+    /// config file is checked in.
+    #[serde(default)]
+    pub sse_customer_key_env: Option<String>,
+    /// Days to keep each class of derived object. 0 keeps it forever.
+    ///
+    /// Only *derived* objects have defaults worth having: a page image and a page result
+    /// can be rebuilt by re-running the document, so keeping them indefinitely is
+    /// storage spent on a cache. Originals default to forever because deleting the input
+    /// is a decision about the tenant's own data, and nothing in this software is
+    /// entitled to make it.
+    #[serde(default)]
+    pub retention: RetentionConfig,
+}
+
+fn sse_none() -> String {
+    "none".into()
+}
+
+/// How long each class of object is kept. Days; 0 means forever.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct RetentionConfig {
+    /// Rendered page images and thumbnails (`pages/`). Rebuildable from the original.
+    pub page_images_days: u64,
+    /// Stage 1 and Stage 2 result JSON (`results/`). The vault holds the same facts with
+    /// their provenance; these are the raw model outputs behind them.
+    pub results_days: u64,
+    /// Extracted text layers (`textlayer/`). Rebuildable.
+    pub text_layers_days: u64,
+    /// Block crops handed to models (`crops/`). Rebuildable.
+    pub crops_days: u64,
+    /// Scratch images uploaded for `image_transport = "url"` (`model-images/`). These are
+    /// consumed within one model call, so a day is already generous — and they are the
+    /// one class that is **not** rebuildable from anything, because nothing records that
+    /// they existed.
+    pub model_images_days: u64,
+    /// Uploaded originals (`originals/`). 0 — forever — unless a deployment decides
+    /// otherwise.
+    pub originals_days: u64,
+    /// Hours between sweeps. 0 disables the sweep entirely, whatever the retentions say.
+    pub sweep_interval_h: u64,
+}
+
+impl Default for RetentionConfig {
+    fn default() -> Self {
+        Self {
+            page_images_days: 30,
+            results_days: 90,
+            text_layers_days: 30,
+            crops_days: 7,
+            model_images_days: 1,
+            originals_days: 0,
+            sweep_interval_h: 6,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -178,7 +251,16 @@ pub struct Stage2Config {
     pub judge_model: Option<String>,
     /// VLM that classifies a whole document from its opening page thumbnails.
     /// None = the document type is the weighted page vote alone.
+    ///
+    /// When it is set, the **ingest** stage calls it once per document, before any page
+    /// is routed, and every page is then classified knowing what document it belongs to.
+    /// That is the cross-page smoothing the page stage cannot do for itself: pages fan
+    /// out with no shared state. The same classifier is used again in Stage 2, where it
+    /// is one of the inputs to the final document type.
     pub doc_classifier_model: Option<String>,
+    /// Opening pages shown to the document classifier. Three is enough to tell an invoice
+    /// from a paper, and the call is per document rather than per page.
+    pub doc_classifier_pages: usize,
     /// Tier 1 page classifier (VLM). None = rules-only classification.
     pub classifier_model: Option<String>,
     /// Characters per extraction window.
@@ -203,6 +285,7 @@ impl Default for Stage2Config {
             embedding_model: "embed-text".into(),
             judge_model: None,
             doc_classifier_model: None,
+            doc_classifier_pages: 3,
             classifier_model: None,
             window_chars: 12_000,
             type_match_threshold: 0.85,

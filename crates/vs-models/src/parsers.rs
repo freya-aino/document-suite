@@ -25,19 +25,34 @@ pub trait OutputParser: Send + Sync {
 }
 
 pub fn parser_for(family: &str) -> Result<Box<dyn OutputParser>, ParseError> {
+    parser_for_with_scale(family, None)
+}
+
+/// A family's parser, with the deployment's declared coordinate convention applied.
+///
+/// `None` leaves each family on its **native** convention, which is the right default:
+/// the families were written against the models' documented output and are correct for
+/// them. `Some` is for the case this exists to serve — a registry entry saying "this
+/// deployment's build of that model emits thousandths, not pixels". That used to be
+/// accepted and then silently ignored for every family but `auto` and `generic_json`,
+/// which is worse than refusing it: the boxes came out scaled by the ratio of the page
+/// size to 1000 and nothing said why.
+pub fn parser_for_with_scale(family: &str, declared: Option<CoordScale>) -> Result<Box<dyn OutputParser>, ParseError> {
     match family {
-        "paddleocr_vl" => Ok(Box::new(PaddleOcrVl)),
-        "mineru" => Ok(Box::new(MinerU)),
-        "dots_ocr" => Ok(Box::new(DotsOcr)),
-        "logics_parsing" => Ok(Box::new(LogicsParsing)),
-        "generic_json" => Ok(Box::new(GenericJson::default())),
+        "paddleocr_vl" => Ok(Box::new(PaddleOcrVl { scale: declared.unwrap_or(CoordScale::Pixels) })),
+        "mineru" => Ok(Box::new(MinerU { scale: declared.unwrap_or(CoordScale::Thousandths) })),
+        "dots_ocr" => Ok(Box::new(DotsOcr { scale: declared.unwrap_or(CoordScale::Pixels) })),
+        "logics_parsing" => Ok(Box::new(LogicsParsing { scale: declared.unwrap_or(CoordScale::Thousandths) })),
+        "grounded_tags" => Ok(Box::new(GroundedTags { scale: declared.unwrap_or(CoordScale::Thousandths) })),
+        "generic_json" => Ok(Box::new(GenericJson { scale: declared.unwrap_or(CoordScale::Pixels) })),
         "auto" => Ok(Box::new(Auto::default())),
         other => Err(ParseError::UnknownFamily(other.to_string())),
     }
 }
 
 /// Families with a structured page parser (as opposed to e.g. `embedding`).
-pub const FAMILIES: &[&str] = &["paddleocr_vl", "mineru", "dots_ocr", "logics_parsing", "generic_json", "auto"];
+pub const FAMILIES: &[&str] =
+    &["paddleocr_vl", "mineru", "dots_ocr", "logics_parsing", "grounded_tags", "generic_json", "auto"];
 
 /// Parses `ModelSpec::coord_scale`. An unrecognised value is ignored rather than fatal:
 /// a typo in a registry file should not stop a worker from starting.
@@ -588,7 +603,10 @@ fn items_of<'a>(v: &'a Value, list_keys: &[&str]) -> Option<&'a Vec<Value>> {
 /// PaddleOCR-VL(-1.5). Page-level output is the pipeline's `parsing_res_list`
 /// (`block_label`, `block_bbox` in input pixels, `block_content`, optional `block_order`) or
 /// a bare list of `{label, bbox, content}`; region-level output is plain text / HTML / LaTeX.
-pub struct PaddleOcrVl;
+pub struct PaddleOcrVl {
+    /// Pixels natively; overridable per model (`coord_scale`).
+    pub scale: CoordScale,
+}
 
 impl OutputParser for PaddleOcrVl {
     fn family(&self) -> &'static str {
@@ -606,7 +624,7 @@ impl OutputParser for PaddleOcrVl {
                     let kind = block_kind_from_label(label);
                     let bbox = value_field(item, &["block_bbox", "bbox", "box", "coordinate"])
                         .and_then(coords)
-                        .map(|c| normalise_bbox(c, size, CoordScale::Pixels))
+                        .map(|c| normalise_bbox(c, size, self.scale))
                         .unwrap_or_else(full_page_bbox);
                     let content = value_field(item, &["block_content", "content", "text", "html", "latex"])
                         .map(content_string)
@@ -634,7 +652,10 @@ impl OutputParser for PaddleOcrVl {
 /// MinerU 2.x. Accepts the `content_list` JSON (`type`, `bbox` in thousandths, `text`,
 /// `text_level`, `table_body`, `*_caption`, `*_footnote`, `list_items`) or the VLM's raw
 /// tagged output `<|box_start|>x0 y0 x1 y1<|box_end|><|ref_start|>type<|ref_end|><|md_start|>…<|md_end|>`.
-pub struct MinerU;
+pub struct MinerU {
+    /// Thousandths natively; overridable per model (`coord_scale`).
+    pub scale: CoordScale,
+}
 
 impl OutputParser for MinerU {
     fn family(&self) -> &'static str {
@@ -642,13 +663,13 @@ impl OutputParser for MinerU {
     }
     fn parse(&self, raw: &str, _page: &PageImage, size: (u32, u32), node_id: &str) -> Result<Vec<BlockDraft>, ParseError> {
         let parsed = if raw.contains("<|box_start|>") || raw.contains("<|ref_start|>") {
-            parse_mineru_tagged(raw, size)
+            parse_mineru_tagged(raw, size, self.scale)
         } else if let Some(v) = extract_json(raw) {
             let items = items_of(&v, &["content_list", "blocks", "para_blocks", "result"])
                 .ok_or_else(|| ParseError::Invalid { family: "mineru", reason: "JSON has no content list".into() })?;
             let mut out = Vec::new();
             for item in items {
-                mineru_item(item, size, &mut out);
+                mineru_item(item, size, self.scale, &mut out);
             }
             out
         } else {
@@ -658,11 +679,11 @@ impl OutputParser for MinerU {
     }
 }
 
-fn mineru_item(item: &Value, size: (u32, u32), out: &mut Vec<Parsed>) {
+fn mineru_item(item: &Value, size: (u32, u32), scale: CoordScale, out: &mut Vec<Parsed>) {
     let ty = str_field(item, &["type", "category", "label"]).unwrap_or("other");
     let bbox = value_field(item, &["bbox", "box"])
         .and_then(coords)
-        .map(|c| normalise_bbox(c, size, CoordScale::Thousandths))
+        .map(|c| normalise_bbox(c, size, scale))
         .unwrap_or_else(full_page_bbox);
     let level = num_field(item, &["text_level", "level"]).map(|l| l.clamp(1.0, 6.0) as u8);
     let mut kind = block_kind_from_label(ty);
@@ -708,7 +729,7 @@ fn mineru_item(item: &Value, size: (u32, u32), out: &mut Vec<Parsed>) {
     }
 }
 
-fn parse_mineru_tagged(raw: &str, size: (u32, u32)) -> Vec<Parsed> {
+fn parse_mineru_tagged(raw: &str, size: (u32, u32), scale: CoordScale) -> Vec<Parsed> {
     const BOX_S: &str = "<|box_start|>";
     const BOX_E: &str = "<|box_end|>";
     const REF_S: &str = "<|ref_start|>";
@@ -722,7 +743,7 @@ fn parse_mineru_tagged(raw: &str, size: (u32, u32)) -> Vec<Parsed> {
         let Some(be) = after_box.find(BOX_E) else { break };
         let bbox = coords_from_str(&after_box[..be])
             .and_then(|n| coords_from_nums(&n))
-            .map(|c| normalise_bbox(c, size, CoordScale::Thousandths))
+            .map(|c| normalise_bbox(c, size, scale))
             .unwrap_or_else(full_page_bbox);
         let mut tail = &after_box[be + BOX_E.len()..];
         let mut label = "other";
@@ -770,7 +791,10 @@ fn mineru_label(label: &str) -> (BlockKind, Option<u8>) {
 
 /// dots.ocr: JSON array of `{bbox: [x0,y0,x1,y1] (input pixels), category, text}` where
 /// `Table` text is HTML, `Formula` text is LaTeX and `Picture` has no text.
-pub struct DotsOcr;
+pub struct DotsOcr {
+    /// Pixels natively; overridable per model (`coord_scale`).
+    pub scale: CoordScale,
+}
 
 impl OutputParser for DotsOcr {
     fn family(&self) -> &'static str {
@@ -788,7 +812,7 @@ impl OutputParser for DotsOcr {
                         let kind = block_kind_from_label(label);
                         let bbox = value_field(item, &["bbox", "box"])
                             .and_then(coords)
-                            .map(|c| normalise_bbox(c, size, CoordScale::Pixels))
+                            .map(|c| normalise_bbox(c, size, self.scale))
                             .unwrap_or_else(full_page_bbox);
                         let content = value_field(item, &["text", "content", "html", "latex"]).map(content_string).unwrap_or_default();
                         let mut p = Parsed::new(kind, bbox, content);
@@ -814,7 +838,10 @@ impl OutputParser for DotsOcr {
 /// Logics-Parsing: HTML with one `<div class="<category>" data-bbox="x0 y0 x1 y1">` per
 /// block (coordinates in thousandths; pixels accepted). Tables keep their inner `<table>`,
 /// formulas their LaTeX, everything else is projected to text.
-pub struct LogicsParsing;
+pub struct LogicsParsing {
+    /// Thousandths natively; overridable per model (`coord_scale`).
+    pub scale: CoordScale,
+}
 
 impl OutputParser for LogicsParsing {
     fn family(&self) -> &'static str {
@@ -827,7 +854,7 @@ impl OutputParser for LogicsParsing {
             let Some(bbox_attr) = el.attr("data-bbox").or_else(|| el.attr("bbox")) else { continue };
             let bbox = coords_from_str(bbox_attr)
                 .and_then(|n| coords_from_nums(&n))
-                .map(|c| normalise_bbox(c, size, CoordScale::Thousandths))
+                .map(|c| normalise_bbox(c, size, self.scale))
                 .unwrap_or_else(full_page_bbox);
             let class = el.attr("class").or_else(|| el.attr("data-category")).unwrap_or("other").to_string();
             let primary = class.split_whitespace().next().unwrap_or("other");
@@ -1058,6 +1085,98 @@ impl OutputParser for GenericJson {
 }
 
 // ---------------------------------------------------------------------------------------
+// `grounded_tags`: `<|ref|>label<|/ref|><|det|>[[x0,y0,x1,y1]]<|/det|>text`
+// ---------------------------------------------------------------------------------------
+
+/// The grounded-tag convention: a label, a box, then the content, in interleaved tags.
+///
+/// This is the shape DeepSeek-OCR's grounded mode emits, and the one several of the
+/// smaller 2026 OCR models copied from it — a lineage, not a single model's quirk, which
+/// is why the family is named after the convention rather than after a model. Before it,
+/// output in this shape reached `auto`, matched no candidate, and was split as Markdown:
+/// every box lost, the whole page one paragraph per line.
+///
+/// **Written from the published output format rather than from a capture.** No sample
+/// from a running model has ever gone through it here, which is exactly the limit on it —
+/// a model that diverges from the format falls back to the Markdown splitter as before,
+/// which is why doing this is safe without the model in hand. `vs-models/SPEC.md` keeps
+/// that caveat.
+///
+/// Coordinates are thousandths by default, which is what the format specifies; a
+/// deployment whose build emits pixels says so with `coord_scale`.
+#[derive(Debug, Clone, Copy)]
+pub struct GroundedTags {
+    pub scale: CoordScale,
+}
+
+impl Default for GroundedTags {
+    fn default() -> Self {
+        Self { scale: CoordScale::Thousandths }
+    }
+}
+
+/// The tags, in the two spellings in circulation: `<|ref|>…<|/ref|>` and the
+/// `_start`/`_end` spelling some ports use.
+const GROUNDED_TAGS: [(&str, &str); 2] = [("<|ref|>", "<|/ref|>"), ("<|ref_start|>", "<|ref_end|>")];
+const GROUNDED_DET: [(&str, &str); 2] = [("<|det|>", "<|/det|>"), ("<|det_start|>", "<|det_end|>")];
+
+/// Whether this output is in the grounded-tag shape.
+pub fn is_grounded_tags(raw: &str) -> bool {
+    GROUNDED_TAGS.iter().any(|(open, _)| raw.contains(open)) && GROUNDED_DET.iter().any(|(open, _)| raw.contains(open))
+}
+
+impl OutputParser for GroundedTags {
+    fn family(&self) -> &'static str {
+        "grounded_tags"
+    }
+
+    fn parse(&self, raw: &str, _page: &PageImage, size: (u32, u32), node_id: &str) -> Result<Vec<BlockDraft>, ParseError> {
+        let body = strip_code_fences(raw);
+        let mut out: Vec<Parsed> = Vec::new();
+        let mut rest = body;
+        while let Some((label, after_ref)) = next_tag(rest, &GROUNDED_TAGS) {
+            // A `<|det|>` must follow the reference; without one there is no box and the
+            // segment is not a grounded block.
+            let Some((coords_raw, after_det)) = next_tag(after_ref, &GROUNDED_DET) else {
+                rest = after_ref;
+                continue;
+            };
+            let bbox = coords_from_str(&coords_raw)
+                .and_then(|n| coords_from_nums(&n))
+                .map(|c| normalise_bbox(c, size, self.scale))
+                .unwrap_or_else(full_page_bbox);
+            // The content runs to the next reference tag, or to the end.
+            let end = GROUNDED_TAGS
+                .iter()
+                .filter_map(|(open, _)| after_det.find(open))
+                .min()
+                .unwrap_or(after_det.len());
+            let content = after_det[..end].trim();
+            rest = &after_det[end..];
+            let kind = block_kind_from_label(label.trim());
+            // An empty segment is a box with nothing in it, which is a detection the
+            // model made and then said nothing about: keep the region, drop nothing.
+            out.push(Parsed::new(kind, bbox, content));
+        }
+        if out.is_empty() {
+            return Err(ParseError::Invalid { family: "grounded_tags", reason: "no grounded reference/detection pairs".into() });
+        }
+        Ok(finish(out, node_id))
+    }
+}
+
+/// The text inside the first of `tags` found, and the rest of the input after it.
+fn next_tag<'a>(input: &'a str, tags: &[(&str, &str); 2]) -> Option<(String, &'a str)> {
+    let (start, open, close) = tags
+        .iter()
+        .filter_map(|(open, close)| input.find(open).map(|i| (i, *open, *close)))
+        .min_by_key(|(i, _, _)| *i)?;
+    let after_open = &input[start + open.len()..];
+    let end = after_open.find(close)?;
+    Some((after_open[..end].to_string(), &after_open[end + close.len()..]))
+}
+
+// ---------------------------------------------------------------------------------------
 // `auto`: the family for a model we have no parser for
 // ---------------------------------------------------------------------------------------
 
@@ -1109,6 +1228,13 @@ impl Auto {
         // JSON, so nothing else would read it.
         if body.contains("<|box_start|>") || body.contains("<|md_start|>") || body.contains("<|ref_start|>") {
             out.push("mineru");
+        }
+        // The grounded-tag shape (DeepSeek-OCR and the models that copied it). Checked
+        // after MinerU because the `_start`/`_end` spelling overlaps: MinerU pairs a
+        // reference with `<|box_start|>`, and this convention pairs it with `<|det|>`, so
+        // whichever parser finds its own box tag wins and the other returns nothing.
+        if is_grounded_tags(body) {
+            out.push("grounded_tags");
         }
         // Logics-Parsing emits HTML divs carrying their own bbox attribute.
         if body.contains("data-bbox") {
@@ -1168,13 +1294,12 @@ impl Auto {
     ) -> (Vec<BlockDraft>, AutoPath) {
         for family in Self::candidates(raw) {
             // `generic_json` is the one family whose coordinate convention we may override.
-            let parser: Box<dyn OutputParser> = if family == "generic_json" {
-                Box::new(GenericJson { scale: self.scale.unwrap_or(CoordScale::Pixels) })
-            } else {
-                match parser_for(family) {
-                    Ok(p) => p,
-                    Err(_) => continue,
-                }
+            // The declared scale reaches whichever family wins, not only
+            // `generic_json`: a deployment that says its model emits thousandths means
+            // that whatever the output turns out to look like.
+            let parser: Box<dyn OutputParser> = match parser_for_with_scale(family, self.scale) {
+                Ok(p) => p,
+                Err(_) => continue,
             };
             match parser.parse(raw, page, size, node_id) {
                 // An empty result is not a win: it means the parser read the output and

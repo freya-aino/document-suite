@@ -87,7 +87,7 @@ async fn map_page(
             Artifact::PageImage(page.clone())
         }
     };
-    Ok(StepOutput { artifact, model_ref: None, prompt_ref: None })
+    Ok(StepOutput::plain(artifact))
 }
 
 fn page_signature() -> Signature {
@@ -137,6 +137,90 @@ pub fn ink_coverage(gray: &GrayImage) -> f32 {
     let level = imageproc::contrast::otsu_level(gray);
     let dark = gray.pixels().filter(|p| p.0[0] <= level).count();
     dark as f32 / total as f32
+}
+
+/// How many long straight ruled lines the page has, horizontal and vertical together.
+///
+/// The signal that tells a **form or a table** from prose on a page nobody has read yet.
+/// Tier 0 could measure only how much ink a scan had, which separates a blank page from a
+/// dense one and nothing else — so a form, a photograph and a page of text all arrived at
+/// the vision tier indistinguishable, and `has_tables` was false for every rules-only
+/// page whatever was on it.
+///
+/// A ruled line is a row (or column) with one **contiguous** dark run across most of the
+/// page. Contiguity is what does the work: a line of type also puts a lot of ink in its
+/// row, but in short runs with white between the words, so its longest unbroken run is a
+/// word wide. A rule's is the whole table. Measuring the run rather than the coverage is
+/// therefore the difference between finding rules and finding text.
+///
+/// Adjacent dark rows are counted once, because a rule two pixels thick is one rule.
+pub fn ruling_lines(gray: &GrayImage) -> u16 {
+    /// Fraction of the page's width (or height) one unbroken dark run must cover.
+    const MIN_RUN: f32 = 0.7;
+    /// Pale pixels this many in a row do not break a rule: a scanned line drops out for a
+    /// pixel or two, and a rule broken by a speck is still a rule.
+    const TOLERANCE: u32 = 2;
+
+    let (w, h) = (gray.width(), gray.height());
+    if w < 20 || h < 20 {
+        return 0;
+    }
+    let level = imageproc::contrast::otsu_level(gray);
+    // Longest tolerant dark run along a line of pixels, as a fraction of its length.
+    let longest_run = |dark: &dyn Fn(u32) -> bool, len: u32| -> f32 {
+        let (mut best, mut run, mut gap) = (0u32, 0u32, 0u32);
+        for i in 0..len {
+            if dark(i) {
+                run += 1 + std::mem::take(&mut gap);
+                best = best.max(run);
+            } else if run > 0 && gap < TOLERANCE {
+                gap += 1;
+            } else {
+                run = 0;
+                gap = 0;
+            }
+        }
+        best as f32 / len as f32
+    };
+    let mut count: u16 = 0;
+    // Rows, then columns; a run of adjacent ruled lines counts once.
+    let mut in_run = false;
+    for y in 0..h {
+        let ruled = longest_run(&|x| gray.get_pixel(x, y).0[0] <= level, w) >= MIN_RUN;
+        if ruled && !in_run {
+            count = count.saturating_add(1);
+        }
+        in_run = ruled;
+    }
+    in_run = false;
+    for x in 0..w {
+        let ruled = longest_run(&|y| gray.get_pixel(x, y).0[0] <= level, h) >= MIN_RUN;
+        if ruled && !in_run {
+            count = count.saturating_add(1);
+        }
+        in_run = ruled;
+    }
+    count
+}
+
+/// Fraction of pixels in the mid-grey band: how **continuous-tone** the page is.
+///
+/// What separates a photograph from a document. A scanned or born-digital page of text is
+/// bimodal — nearly white paper, nearly black ink, very little between — while a
+/// photograph has its tones spread through the middle. Measured as the fraction of pixels
+/// in the central half of the range, which needs one histogram and no model.
+///
+/// Known limits, which is why it is a fraction and not a verdict: a heavily shadowed scan
+/// (a phone photo of a page) reads as continuous-tone, and so does a page printed on grey
+/// stock. Both are cases where treating the page as a photograph — handing it to a vision
+/// model rather than a text parser — is the safer error anyway.
+pub fn tone_continuity(gray: &GrayImage) -> f32 {
+    let total = (gray.width() as usize) * (gray.height() as usize);
+    if total == 0 {
+        return 0.0;
+    }
+    let mid = gray.pixels().filter(|p| (64..=191).contains(&p.0[0])).count();
+    mid as f32 / total as f32
 }
 
 /// The rotation, in degrees, that would straighten the page — i.e. the value to hand
@@ -744,6 +828,47 @@ mod tests {
             imageproc::geometric_transformations::Interpolation::Bilinear,
             imageproc::geometric_transformations::Border::Constant(Luma([240])),
         )
+    }
+
+    /// A ruled table: full-width horizontal rules and full-height vertical ones. Text
+    /// never makes a row that dark across the page, which is what the measurement rests
+    /// on — so a page of type must come back with no rules at all.
+    #[test]
+    fn ruling_lines_find_a_table_and_not_a_page_of_text() {
+        let table = GrayImage::from_fn(300, 300, |x, y| {
+            let on_rule = y % 50 == 0 || x % 60 == 0;
+            if on_rule { Luma([20]) } else { Luma([245]) }
+        });
+        let found = ruling_lines(&table);
+        assert!(found >= 8, "a ruled grid should show its rules, found {found}");
+
+        // Text: short dark runs with white between the words. Its rows carry plenty of
+        // ink — which is why coverage alone could not tell them from rules — but no long
+        // unbroken run.
+        let text = GrayImage::from_fn(300, 300, |x, y| {
+            let on_line = (y / 4) % 3 == 0 && (10..290).contains(&y);
+            let in_word = (x / 9) % 2 == 0 && (20..280).contains(&x);
+            if on_line && in_word { Luma([20]) } else { Luma([245]) }
+        });
+        assert_eq!(ruling_lines(&text), 0, "lines of type are not ruled lines");
+        assert_eq!(ruling_lines(&blank(300, 300)), 0);
+        assert_eq!(ruling_lines(&GrayImage::new(4, 4)), 0, "too small to measure");
+
+        // A rule several pixels thick is one rule, not one per pixel row.
+        let thick = GrayImage::from_fn(200, 200, |_, y| if (100..104).contains(&y) { Luma([20]) } else { Luma([245]) });
+        assert_eq!(ruling_lines(&thick), 1);
+    }
+
+    #[test]
+    fn tone_continuity_separates_a_photograph_from_a_document() {
+        // A document: paper and ink, nothing in between.
+        let document = lined_page(200, 200);
+        assert!(tone_continuity(&document) < 0.05, "got {}", tone_continuity(&document));
+
+        // A photograph: a smooth gradient through the mid tones.
+        let photo = GrayImage::from_fn(200, 200, |x, y| Luma([((x + y) * 255 / 398) as u8]));
+        assert!(tone_continuity(&photo) > 0.4, "got {}", tone_continuity(&photo));
+        assert_eq!(tone_continuity(&GrayImage::new(0, 0)), 0.0);
     }
 
     #[test]

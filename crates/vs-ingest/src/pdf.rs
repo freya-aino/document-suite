@@ -291,8 +291,11 @@ fn signals(page: &PdfPage, geom: &PageGeom, layer: &TextLayer, page_no: u32) -> 
         rotation_deg: geom.rotation,
         // Not measured for a PDF: it would mean rasterising the page twice, and a PDF
         // already has better evidence in its text layer and image objects. 0.0 reads as
-        // "not measured", so tier 0 never calls a PDF page blank on this basis.
+        // "not measured", so tier 0 never calls a PDF page blank, ruled or photographic
+        // on this basis — the same reasoning covers all three.
         ink_coverage: 0.0,
+        ruling_lines: 0,
+        tone_continuity: 0.0,
     })
 }
 

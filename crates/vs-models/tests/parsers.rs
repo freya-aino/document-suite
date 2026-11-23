@@ -274,3 +274,84 @@ fn generic_json_requires_a_list() {
     let err = p.parse(r#"{"foo": 1}"#, &page(10, 10), (10, 10), "n").unwrap_err();
     assert!(err.to_string().contains("generic_json"));
 }
+
+// ───────────── grounded tags ─────────────
+//
+// The `<|ref|>label<|/ref|><|det|>[[…]]<|/det|>content` convention: DeepSeek-OCR's
+// grounded mode and the smaller models that copied it. The fixture is **written from the
+// published format, not captured from a model** — no sample from a running model has gone
+// through this parser, which is the stated limit on it. What makes that safe is the
+// fallback: output that does not match reaches the Markdown splitter exactly as it did
+// before this family existed.
+
+#[test]
+fn grounded_tags_page() {
+    let raw = include_str!("fixtures/grounded_tags/page.txt");
+    let blocks = parse("grounded_tags", raw, (1000, 1000));
+    assert_sane(&blocks);
+    assert_eq!(
+        kinds(&blocks),
+        vec![
+            BlockKind::Title,
+            BlockKind::Paragraph,
+            BlockKind::Table,
+            BlockKind::Caption,
+            BlockKind::Formula,
+            BlockKind::Figure
+        ]
+    );
+    // Thousandths by default, which is what the format specifies: 112/1000.
+    assert!((blocks[0].bbox.x0 - 0.112).abs() < 1e-3, "{:?}", blocks[0].bbox);
+    assert!((blocks[0].bbox.y1 - 0.118).abs() < 1e-3);
+    // The content between one detection and the next reference is that block's content,
+    // tags and all.
+    assert!(blocks[1].text.contains("projection-profile estimator"));
+    assert!(matches!(&blocks[2].content, BlockContent::Table { html } if html.contains("<td>0.31</td>")));
+    assert!(matches!(&blocks[4].content, BlockContent::Formula { latex } if latex.contains("arg\\max")));
+    // A detection the model made and then said nothing about keeps its region: dropping
+    // it would lose a figure that a later step can still crop.
+    assert_eq!(blocks[5].kind, BlockKind::Figure);
+}
+
+#[test]
+fn grounded_tags_needs_both_halves_of_the_convention() {
+    let page = page(1000, 1000);
+    let p = parser_for("grounded_tags").unwrap();
+    // A reference with no detection is not a grounded block, and a page of them is not
+    // this format: better to fail and let `auto` try the next candidate than to return
+    // boxless blocks that look parsed.
+    assert!(p.parse("<|ref|>paragraph<|/ref|>some text", &page, (1000, 1000), "n").is_err());
+    assert!(p.parse("plain prose with no tags at all", &page, (1000, 1000), "n").is_err());
+    // The `_start`/`_end` spelling some ports use.
+    let alt = "<|ref_start|>paragraph<|ref_end|><|det_start|>[[0,0,500,100]]<|det_end|>hello";
+    let blocks = p.parse(alt, &page, (1000, 1000), "n").expect("the other spelling");
+    assert_eq!(blocks.len(), 1);
+    assert_eq!(blocks[0].text, "hello");
+}
+
+/// `coord_scale` used to be honoured by `auto` and `generic_json` alone: declaring it for
+/// a document-VLM family was read, logged about and ignored, and the boxes came out
+/// scaled by the ratio of the page size to 1000 with nothing saying why.
+#[test]
+fn a_declared_coord_scale_reaches_every_family() {
+    use vs_models::parsers::{parser_for_with_scale, CoordScale};
+    let raw = include_str!("fixtures/grounded_tags/page.txt");
+    let page = page(2000, 2000);
+
+    // Native: thousandths, so 112 means 11.2 % across.
+    let native = parser_for_with_scale("grounded_tags", None).unwrap().parse(raw, &page, (2000, 2000), "n").unwrap();
+    assert!((native[0].bbox.x0 - 0.112).abs() < 1e-3);
+
+    // Declared as pixels of a 2000 px input: the same 112 now means 5.6 %.
+    let pixels = parser_for_with_scale("grounded_tags", Some(CoordScale::Pixels)).unwrap().parse(raw, &page, (2000, 2000), "n").unwrap();
+    assert!((pixels[0].bbox.x0 - 0.056).abs() < 1e-3, "{:?}", pixels[0].bbox);
+
+    // And the same for a family that hardcoded pixels before.
+    let dots = include_str!("fixtures/dots_ocr/page.txt");
+    let as_pixels = parser_for_with_scale("dots_ocr", None).unwrap().parse(dots, &page, (2000, 2000), "n").unwrap();
+    let as_thousandths = parser_for_with_scale("dots_ocr", Some(CoordScale::Thousandths))
+        .unwrap()
+        .parse(dots, &page, (2000, 2000), "n")
+        .unwrap();
+    assert_ne!(as_pixels[0].bbox, as_thousandths[0].bbox, "the declaration changed nothing, so it was ignored again");
+}

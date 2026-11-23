@@ -351,7 +351,29 @@ pub fn score_labelled(rec: &RunRecord, result: Option<&AdaptPageResult>, gt: &[E
         e.metrics = labelled_metrics(&draft_blocks(&r.blocks), gt);
         e.quality = quality_from_metrics(&e.metrics, w);
     }
+    if let Some(r) = result {
+        e.parse_paths = parse_paths(r);
+    }
     e
+}
+
+/// How each model node parsed its output, from the node traces.
+///
+/// `auto_path` when the family was `auto` — the parser that actually won — and the family
+/// name otherwise. Nodes that called no model report nothing and are absent.
+pub fn parse_paths(result: &AdaptPageResult) -> Vec<String> {
+    result
+        .traces
+        .iter()
+        .filter(|t| t.model_ref.is_some())
+        .filter_map(|t| {
+            let m = &t.metrics;
+            m.get("auto_path")
+                .or_else(|| m.get("parse_family"))
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        })
+        .collect()
 }
 
 /// Reference DAG for judge-trust pages: the DAG with the highest mean labelled quality
@@ -443,6 +465,9 @@ pub async fn score(runs: Vec<RunRecord>, opts: &ScoreOptions<'_>) -> anyhow::Res
         let ref_text = reference.and_then(|r| texts.iter().find(|(d, _)| *d == r)).map(|(_, t)| t.as_str()).unwrap_or("");
         for l in recs {
             let mut e = base_eval(&l.rec, Trust::Judge);
+            if let Some(r) = l.result.as_ref() {
+                e.parse_paths = parse_paths(r);
+            }
             if let (true, Some(r)) = (l.rec.ok, l.result.as_ref()) {
                 let text = metrics::reading_order_text(&draft_blocks(&r.blocks));
                 let agreement = if reference.is_some() { metrics::text_similarity(&text, ref_text) } else { 0.0 };

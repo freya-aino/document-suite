@@ -132,15 +132,16 @@ impl Pipeline {
 
     async fn stages(&self, job_id: uuid::Uuid, run_id: RunId, spec: &JobSpec) -> Result<(), TaskError> {
         let started = Instant::now();
-        let (document_hk, pages) = self.timed(Stage::Ingest, self.ingest.ingest(job_id, run_id, spec)).await?;
-        tracing::info!(%job_id, %document_hk, pages = pages.len(), "ingested; running pages");
+        let ingested = self.timed(Stage::Ingest, self.ingest.ingest(job_id, run_id, spec)).await?;
+        let crate::ingest::Ingested { document_hk, pages, doc_type } = ingested;
+        tracing::info!(%job_id, %document_hk, pages = pages.len(), doc_type = ?doc_type.map(|d| d.doc_type), "ingested; running pages");
 
         // Pages are independent, and a failed one is recorded rather than propagated: the
         // doc stage decides whether too many failed (`worker.max_failed_page_fraction`)
         // or whether the document is merely `partial`.
         let slots = self.cfg.max_pages_in_flight.max(1);
         futures::stream::iter(pages)
-            .map(|page| self.one_page(job_id, run_id, &document_hk, page, spec))
+            .map(|page| self.one_page(job_id, run_id, &document_hk, page, spec, doc_type.map(|d| d.doc_type)))
             .buffer_unordered(slots)
             .collect::<Vec<()>>()
             .await;
@@ -151,7 +152,15 @@ impl Pipeline {
     }
 
     /// One page, retried while the error is transient.
-    async fn one_page(&self, job_id: uuid::Uuid, run_id: RunId, document_hk: &HashKey, page: PageRef, spec: &JobSpec) {
+    async fn one_page(
+        &self,
+        job_id: uuid::Uuid,
+        run_id: RunId,
+        document_hk: &HashKey,
+        page: PageRef,
+        spec: &JobSpec,
+        doc_type: Option<vs_core::DocType>,
+    ) {
         let _permit = acquire(spec.priority, &self.shared, &self.interactive_only).await;
         let task = PageTask {
             job_id,
@@ -161,6 +170,9 @@ impl Pipeline {
             page_image_uri: &page.page_image_uri,
             text_layer_uri: page.text_layer_uri.as_deref(),
             spec,
+            // Settled by the ingest stage, which is the one place that sees the whole
+            // document before the pages fan out.
+            doc_type,
         };
 
         // Borrowed, not moved: the closure is `FnMut` and may run more than once.

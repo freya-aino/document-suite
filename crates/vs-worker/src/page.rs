@@ -37,6 +37,10 @@ pub(crate) struct PageTask<'a> {
     pub(crate) page_image_uri: &'a str,
     pub(crate) text_layer_uri: Option<&'a str>,
     pub(crate) spec: &'a JobSpec,
+    /// The document's type as the ingest stage settled it: the caller's hint, or the
+    /// document classifier over the opening thumbnails. `None` leaves this page to
+    /// classify itself.
+    pub(crate) doc_type: Option<DocType>,
 }
 
 impl PageHandler {
@@ -83,9 +87,23 @@ impl PageHandler {
             height_px: height,
             dpi: self.render_dpi,
         });
+        // Kept for the heading-level pass below: the executor takes the layer by value,
+        // and the spans are small next to the page image that is already in memory.
+        let text_layer_spans = text_layer.spans.clone();
         let out = Executor::new(&self.steps).run(sel.dag, &ctx, image, Artifact::TextLayer(text_layer)).await.map_err(exec_error)?;
 
         let mut blocks = drafts_to_blocks(out, &ctx.page_hk, &t.run_id);
+        // Heading levels from the type sizes in the text layer, for the headings no model
+        // gave a level and no numbering could supply one. Done here because this is where
+        // the text layer is: `vs-stitch` builds the section tree from `level` and never
+        // sees the spans, so without this a document with unnumbered headings arrives
+        // with every heading at level 1 and a section tree one level deep.
+        let spans: Vec<(vs_core::BBox, f32)> =
+            text_layer_spans.iter().filter_map(|s| s.font_size.map(|size| (s.bbox, size))).collect();
+        let levelled = vs_stitch::page_layout::assign_heading_levels(&mut blocks, &spans);
+        if levelled > 0 {
+            tracing::debug!(page = t.page_no, headings = levelled, "heading levels taken from type size");
+        }
         upload_crops(self.blob.as_ref(), &mut blocks, &image_bytes, &ctx.page_hk, &t.run_id).await?;
         let result = page_result(t.document_hk.clone(), t.page_no, t.run_id, profile, dag_ref.clone(), width, height, blocks);
         let body = serde_json::to_vec(&result)?;
@@ -101,15 +119,20 @@ impl PageHandler {
 
     /// Tier 0 rules, then the vision classifier when configured and needed.
     ///
-    /// `known_doc_type` comes from the caller's hint and nowhere else. There is no
-    /// cross-page smoothing, and it is not an oversight: pages fan out as independent
-    /// tasks across workers with no shared per-document state, so page 7 cannot learn
-    /// what page 1 concluded without a round trip that would serialise the fan-out. The
-    /// document-level type is settled in Stage 2, where every page is in hand — too late
-    /// to affect this page's routing, which is exactly why the caller hint matters.
+    /// `known_doc_type` is the document's type as the **ingest** stage settled it: the
+    /// caller's hint if there was one, otherwise the document classifier shown the
+    /// opening thumbnails, once per document. That is where cross-page smoothing had to
+    /// go. It cannot happen here — pages fan out with no shared per-document state, so
+    /// page 7 cannot learn what page 1 concluded without a round trip that would
+    /// serialise the fan-out — and it cannot wait for Stage 2, which is after routing.
+    /// Before the fan-out there is exactly one place holding the whole document, and the
+    /// answer from there reaches every page.
+    ///
+    /// `None` still happens: no caller hint and no `doc_classifier_model` configured, or
+    /// a classification that failed. Then this page classifies itself, as it always did.
     async fn classify(&self, t: &PageTask<'_>, signals: &PageSignals) -> Result<PageProfile, TaskError> {
         let t0 = tier0(signals, &self.classify);
-        let known: Option<DocType> = t.spec.doc_type;
+        let known: Option<DocType> = t.spec.doc_type.or(t.doc_type);
         let vision = match (&self.vision, t0.needs_vision) {
             (Some(v), true) => {
                 let bytes = self.blob.get(&keys::thumbnail(t.document_hk.as_str(), t.page_no)).await.map_err(page_data)?;
@@ -379,7 +402,12 @@ mod tests {
         };
         let out = ExecOutput {
             blocks: vec![draft(5), draft(2)],
-            traces: vec![NodeTrace { node_id: "parse".into(), provenance: prov, outcome: NodeOutcome::Ok }],
+            traces: vec![NodeTrace {
+                node_id: "parse".into(),
+                provenance: prov,
+                outcome: NodeOutcome::Ok,
+                metrics: Default::default(),
+            }],
         };
         let blocks = drafts_to_blocks(out, &page_hk, &run);
         assert_eq!(blocks[0].text, "b2");

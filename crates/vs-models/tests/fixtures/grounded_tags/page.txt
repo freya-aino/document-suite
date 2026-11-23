@@ -1,0 +1,7 @@
+<|ref|>title<|/ref|><|det|>[[112, 64, 888, 118]]<|/det|>Measuring Ink Coverage on Degraded Scans
+<|ref|>paragraph<|/ref|><|det|>[[110, 150, 889, 318]]<|/det|>We report a projection-profile estimator for page skew and compare it against two
+published baselines on a corpus of 1,200 scanned invoices.
+<|ref|>table<|/ref|><|det|>[[110, 340, 889, 520]]<|/det|><table><tr><th>Method</th><th>MAE (deg)</th></tr><tr><td>Ours</td><td>0.31</td></tr><tr><td>Baseline A</td><td>0.74</td></tr></table>
+<|ref|>caption<|/ref|><|det|>[[110, 530, 889, 560]]<|/det|>Table 1: Skew estimation error, lower is better.
+<|ref|>formula<|/ref|><|det|>[[300, 580, 700, 640]]<|/det|>\theta = \arg\max_\phi \sum_i h_\phi(i)^2
+<|ref|>figure<|/ref|><|det|>[[110, 660, 500, 900]]<|/det|>

@@ -23,6 +23,9 @@ pub struct NodeTrace {
     pub node_id: String,
     pub provenance: Provenance,
     pub outcome: NodeOutcome,
+    /// What the step reported about how it ran: `StepOutput::metrics`. Empty for a step
+    /// that reported nothing, and for a node that failed or was skipped.
+    pub metrics: crate::step::Metrics,
 }
 
 #[derive(Debug)]
@@ -123,7 +126,12 @@ impl<'a> Executor<'a> {
                         prov.model_ref = out.model_ref;
                         prov.prompt_ref = out.prompt_ref;
                         store.insert(node.id.clone(), out.artifact);
-                        traces.push(NodeTrace { node_id: node.id.clone(), provenance: prov, outcome: NodeOutcome::Ok });
+                        traces.push(NodeTrace {
+                            node_id: node.id.clone(),
+                            provenance: prov,
+                            outcome: NodeOutcome::Ok,
+                            metrics: out.metrics,
+                        });
                         continue;
                     }
                     Ok(Err(e)) => {
@@ -143,6 +151,9 @@ impl<'a> Executor<'a> {
                             node_id: node.id.clone(),
                             provenance: prov,
                             outcome: NodeOutcome::SkippedAfterError(failure.to_string()),
+                            // A node that did not produce an artifact reported nothing
+                            // about how it produced one.
+                            metrics: Default::default(),
                         });
                     }
                     _ => return Err(failure),

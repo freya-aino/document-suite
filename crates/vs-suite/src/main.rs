@@ -103,6 +103,9 @@ async fn run() -> anyhow::Result<()> {
     vs_api::spawn_idempotency_purge(state.ops.clone());
     // Retention for the one place personal data lives (`docs/SPEC.md` §5.6).
     vs_api::scope::spawn_retention_sweep(state.ops.clone(), cfg.api.job_retention_days);
+    // Retention for the object store: rendered pages, results, crops and the scratch
+    // images handed to models. `[blob].retention` is what answers open question 4.
+    spawn_blob_retention(&cfg)?;
     // Recovery for documents a crashed copy abandoned. See `resume`.
     resume::spawn(
         state.ops.clone(),
@@ -144,6 +147,37 @@ async fn run() -> anyhow::Result<()> {
         tracing::warn!(documents = left, "grace elapsed with documents still in flight; they will need re-uploading");
     }
     telemetry.shutdown();
+    Ok(())
+}
+
+/// Deletes derived objects past their retention, every `blob.retention.sweep_interval_h`.
+///
+/// In every copy, which is safe because the sweep is idempotent — it deletes what is
+/// older than a cutoff, so two copies racing delete the same objects and the second finds
+/// them gone. The alternative, electing one sweeper, would need a lock for a job whose
+/// worst case is a wasted LIST.
+fn spawn_blob_retention(cfg: &Config) -> anyhow::Result<()> {
+    let retention = cfg.blob.retention.clone();
+    if retention.sweep_interval_h == 0 {
+        tracing::info!("blob.retention.sweep_interval_h = 0: nothing deletes derived objects");
+        return Ok(());
+    }
+    let blob: Arc<dyn vs_infra::BlobStore> = Arc::new(ObjectBlobStore::s3(&cfg.blob)?);
+    let period = Duration::from_secs(retention.sweep_interval_h * 3600);
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(period);
+        // Not immediately: a copy coming up has better things to do than a full LIST of
+        // every prefix, and nothing is urgent about an object a day past its retention.
+        tick.tick().await;
+        loop {
+            tick.tick().await;
+            let swept = vs_infra::blob::sweep_retention(blob.as_ref(), &retention).await;
+            let total: u64 = swept.iter().map(|(_, n)| *n).sum();
+            if total > 0 {
+                metrics::counter!("suite_blob_objects_pruned_total").increment(total);
+            }
+        }
+    });
     Ok(())
 }
 

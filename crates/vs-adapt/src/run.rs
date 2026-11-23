@@ -299,6 +299,7 @@ impl Runner {
                                 NodeOutcome::Ok => "ok".into(),
                                 NodeOutcome::SkippedAfterError(e) => format!("skipped: {e}"),
                             },
+                            metrics: t.metrics.clone(),
                         })
                         .collect(),
                 };

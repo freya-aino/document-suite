@@ -23,11 +23,7 @@ impl Step for MergeNative {
         let (Artifact::TextLayer(text), Artifact::Layout(layout), Artifact::Blocks(recognised)) = (inputs[0], inputs[1], inputs[2]) else {
             return Err(StepError::InvalidParams("unexpected input kinds".into()));
         };
-        Ok(StepOutput {
-            artifact: Artifact::Blocks(merge_native(text, layout, recognised, &ctx.node_id)),
-            model_ref: None,
-            prompt_ref: None,
-        })
+        Ok(StepOutput::plain(Artifact::Blocks(merge_native(text, layout, recognised, &ctx.node_id))))
     }
 }
 
@@ -126,7 +122,7 @@ impl Step for FigureCrop {
         let crops = tokio::task::spawn_blocking(move || crop_figures(&bytes, &regions, padding, &uri_prefix))
             .await
             .map_err(|e| StepError::Io(format!("figure.crop task failed: {e}")))??;
-        Ok(StepOutput { artifact: Artifact::FigureCrops(crops), model_ref: None, prompt_ref: None })
+        Ok(StepOutput::plain(Artifact::FigureCrops(crops)))
     }
 }
 
@@ -203,7 +199,7 @@ impl Step for MergeBlocks {
             }
         }
         out.sort_by_key(|b| b.reading_order);
-        Ok(StepOutput { artifact: Artifact::Blocks(out), model_ref: None, prompt_ref: None })
+        Ok(StepOutput::plain(Artifact::Blocks(out)))
     }
 }
 
@@ -255,7 +251,7 @@ impl Step for VerifyBlocks {
                 return Err(StepError::InvalidParams(format!("{name} must be within 0..={hi}, got {v}")));
             }
         }
-        Ok(StepOutput { artifact: Artifact::Blocks(verify_blocks(primary, second, &p)), model_ref: None, prompt_ref: None })
+        Ok(StepOutput::plain(Artifact::Blocks(verify_blocks(primary, second, &p))))
     }
 }
 

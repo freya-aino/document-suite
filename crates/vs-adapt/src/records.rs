@@ -44,6 +44,15 @@ pub struct TraceSummary {
     pub prompt_ref: Option<String>,
     pub duration_ms: u64,
     pub outcome: String,
+    /// What the step reported about how it ran (`StepOutput::metrics`): for a model whose
+    /// family is `auto`, which parse path won — the fact that says whether a newly
+    /// registered model is being read structurally or split as Markdown.
+    ///
+    /// This is why the `Step` trait gained a metadata channel: the parse path was logged
+    /// to a `tracing` target, which an operator could read and the scorer could not, so
+    /// the question `auto` exists to answer was the one thing nothing could score.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub metrics: vs_dag::Metrics,
 }
 
 /// `PageResult`-like output of one DAG on one page (block drafts, no hash keys).

@@ -55,6 +55,9 @@ impl Step for Fake {
                 }]),
                 model_ref: Some("fake@1".into()),
                 prompt_ref: None,
+                // One named fact about how this ran, so the executor's handling of
+                // per-node metadata is exercised rather than asserted.
+                metrics: vs_dag::Metrics::from([("fake_path".to_string(), serde_json::json!("blocks"))]),
             }),
             Behaviour::Fail(e) => Err(clone_err(e)),
             Behaviour::Hang => {

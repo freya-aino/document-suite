@@ -48,6 +48,8 @@ pub enum EdgeKind {
     EnclosesRegion,
     /// Block → block, same page: the first is the value of the second, a form label.
     ValueOf,
+    /// Footnote block → the body block whose text carries its marker.
+    FootnoteOf,
     /// Table → cell.
     HasCell,
     /// Figure/chart block → text found inside the image.
@@ -109,7 +111,7 @@ fn endpoints(kind: EdgeKind) -> Option<(NodeKind, NodeKind)> {
         HasPage => (Document, Page),
         OnPage => (Block, Page),
         Contains => (Section, Block),
-        Next | ContinuesOn | TableContinues | CaptionOf | RefersTo | EnclosesRegion | ValueOf => (Block, Block),
+        Next | ContinuesOn | TableContinues | CaptionOf | RefersTo | EnclosesRegion | ValueOf | FootnoteOf => (Block, Block),
         Mentions => (Block, Entity),
         Arg => (Assertion, Entity),
         // Entity → entity, but both sides may be a doc-local or a canonical key, so the
@@ -269,6 +271,7 @@ pub fn build(doc: &StitchedDocument, ext: &ExtractionOutput, title: Option<&str>
             LinkKind::RefersTo => EdgeKind::RefersTo,
             LinkKind::Encloses => EdgeKind::EnclosesRegion,
             LinkKind::ValueOf => EdgeKind::ValueOf,
+            LinkKind::FootnoteOf => EdgeKind::FootnoteOf,
         };
         // `header_repeated` used to be dropped here, which lost the one fact a reader
         // merging two halves of a split table actually needs.

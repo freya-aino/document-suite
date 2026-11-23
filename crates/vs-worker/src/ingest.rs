@@ -8,7 +8,9 @@ use futures::{StreamExt, TryStreamExt};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use vs_core::{HashKey, JobSpec, JobState, RunId};
+use vs_classify::DocumentClassifier;
+use vs_core::{DocTypeSource, HashKey, JobSpec, JobState, RunId};
+use vs_dag::PageImage;
 use vs_infra::blob::{key_from_uri, keys, BlobStore};
 use vs_ingest::{detect_format, Format, IngestError, PageAssets, RenderPool};
 use vs_vault::ops::Ops;
@@ -32,11 +34,33 @@ pub struct IngestHandler {
     /// How wide a newly uploaded document is open inside its organization
     /// (`api.default_visibility`). Applied once, when the document is first seen.
     pub default_visibility: vs_vault::Visibility,
+    /// Classifies the whole document from its opening thumbnails, once, before any page
+    /// is routed.
+    ///
+    /// This is the cross-page smoothing `vs-classify` asked for, in the only place it can
+    /// go. Pages fan out with no shared per-document state, so page 7 cannot learn what
+    /// page 1 concluded — but *before* the fan-out there is one place that has the whole
+    /// document in hand, and this is it. `None` leaves every page routed on its own
+    /// classification, which is what happened before.
+    pub doc_classifier: Option<Arc<dyn DocumentClassifier>>,
+    /// Opening pages the document classifier is shown. Three is enough to tell an invoice
+    /// from a paper and cheap enough to pay for on every document.
+    pub doc_classify_pages: usize,
+}
+
+/// What ingest found out about the document before any page was routed.
+pub(crate) struct Ingested {
+    pub(crate) document_hk: HashKey,
+    pub(crate) pages: Vec<PageRef>,
+    /// The document's type, when it could be settled up front: the caller's hint, or the
+    /// document classifier over the opening thumbnails. Every page is then routed knowing
+    /// what document it belongs to.
+    pub(crate) doc_type: Option<vs_core::DocumentType>,
 }
 
 impl IngestHandler {
-    /// Renders the document and returns one [`PageRef`] per page for the page stage.
-    pub(crate) async fn ingest(&self, job_id: uuid::Uuid, run_id: RunId, spec: &JobSpec) -> Result<(HashKey, Vec<PageRef>), TaskError> {
+    /// Renders the document and returns what the page stage needs to run it.
+    pub(crate) async fn ingest(&self, job_id: uuid::Uuid, run_id: RunId, spec: &JobSpec) -> Result<Ingested, TaskError> {
         let job = self
             .ops
             .get_job(&spec.tenant, job_id)
@@ -94,7 +118,59 @@ impl IngestHandler {
                 text_layer_uri: (format == Format::Pdf).then(|| keys::text_layer(document_hk.as_str(), n)),
             })
             .collect();
-        Ok((document_hk, pages))
+        let doc_type = self.document_type(spec, &document_hk, page_count).await;
+        Ok(Ingested { document_hk, pages, doc_type })
+    }
+
+    /// The document's type, settled before any page is routed.
+    ///
+    /// The caller's hint wins outright — someone uploading a batch of invoices knows more
+    /// than a model looking at pixels. Otherwise the document classifier is shown the
+    /// first few thumbnails, which is one small model call per *document* rather than per
+    /// page, and the answer reaches every page's routing.
+    ///
+    /// Failure is not fatal and not retried: the pages fall back to classifying
+    /// themselves, which is exactly what they did before this existed. A document is not
+    /// worth failing over a type hint.
+    async fn document_type(&self, spec: &JobSpec, document_hk: &HashKey, page_count: u32) -> Option<vs_core::DocumentType> {
+        if let Some(doc_type) = spec.doc_type {
+            return Some(vs_core::DocumentType { doc_type, confidence: 1.0, source: DocTypeSource::Caller });
+        }
+        let classifier = self.doc_classifier.as_ref()?;
+        let n = self.doc_classify_pages.clamp(1, 8).min(page_count as usize);
+        let mut thumbnails = Vec::with_capacity(n);
+        for page_no in 1..=n as u32 {
+            let key = keys::thumbnail(document_hk.as_str(), page_no);
+            match self.blob.get(&key).await {
+                Ok(bytes) => {
+                    let (width_px, height_px) = match crate::page::image_dimensions(&bytes) {
+                        Ok(d) => d,
+                        Err(e) => {
+                            tracing::warn!(%document_hk, page_no, error = %e, "unreadable thumbnail; not classifying the document");
+                            return None;
+                        }
+                    };
+                    thumbnails.push(PageImage { uri: key, bytes: Arc::from(bytes.as_ref()), width_px, height_px, dpi: 0 });
+                }
+                Err(e) => {
+                    tracing::warn!(%document_hk, page_no, error = %e, "thumbnail unavailable; not classifying the document");
+                    return None;
+                }
+            }
+        }
+        match classifier.classify(&thumbnails, &spec.language).await {
+            Ok(dt) => {
+                tracing::info!(%document_hk, doc_type = ?dt.doc_type, confidence = dt.confidence, pages = thumbnails.len(), "document type settled before routing");
+                metrics::counter!("worker_document_type_total", "source" => "classifier").increment(1);
+                Some(dt)
+            }
+            Err(e) => {
+                // Every page still classifies itself; this only loses the smoothing.
+                tracing::warn!(%document_hk, error = %e, "document classification failed; pages will route on their own class");
+                metrics::counter!("worker_document_type_total", "source" => "failed").increment(1);
+                None
+            }
+        }
     }
 
     /// Streams the object to `path`, hashing on the way. Returns (sha256 hex, size).

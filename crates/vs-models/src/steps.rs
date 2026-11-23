@@ -14,7 +14,7 @@ use vs_dag::{Artifact, ArtifactKind, BlockDraft, LayoutRegion, PageImage, Signat
 use crate::client::{ChatRequest, OpenAiClient};
 use crate::registry::ModelSpec;
 use crate::parsers::{
-    block_kind_from_label, content_for, coord_scale_from_name, extract_json, parser_for, Auto, GenericJson,
+    block_kind_from_label, content_for, coord_scale_from_name, extract_json, parser_for_with_scale, Auto,
     OutputParser,
 };
 use crate::prompts::{self, Prompt};
@@ -101,16 +101,56 @@ fn parser_or_none(spec: &ModelSpec) -> Option<Box<dyn OutputParser>> {
 
 /// The parser for a model, honouring a declared coordinate convention.
 ///
-/// `coord_scale` only reaches the two parsers that cannot infer it from the format:
-/// `auto` and `generic_json`. The document-VLM families know their own convention, and
-/// overriding it there would break a parser that is already correct.
+/// `coord_scale` reaches **every** family now. Each one keeps its own documented
+/// convention as the default — they were written against the models' real output and are
+/// correct for them — and a registry entry that declares otherwise overrides it, which is
+/// the case this is for: a deployment whose build of a model emits thousandths where the
+/// family expects pixels. That declaration used to be read, logged about, and ignored for
+/// every family but `auto` and `generic_json`, which is worse than refusing it — the boxes
+/// came out scaled by the ratio of the page size to 1000 and nothing said why.
 fn parser_for_spec(spec: &ModelSpec) -> Result<Box<dyn OutputParser>, StepError> {
     let scale = spec.coord_scale.as_deref().and_then(coord_scale_from_name);
-    match (spec.family.as_str(), scale) {
-        ("auto", _) => Ok(Box::new(Auto::with_scale(scale))),
-        ("generic_json", Some(scale)) => Ok(Box::new(GenericJson { scale })),
-        (family, _) => parser_for(family).map_err(|e| StepError::InvalidParams(e.to_string())),
+    match spec.family.as_str() {
+        "auto" => Ok(Box::new(Auto::with_scale(scale))),
+        family => parser_for_with_scale(family, scale).map_err(|e| StepError::InvalidParams(e.to_string())),
     }
+}
+
+/// Parses model output and records how it was parsed, for the node's trace.
+///
+/// The `auto` family is the reason this exists: it tries several parsers and which one
+/// won is the single most useful fact about the call — it is what says whether a newly
+/// registered model is being read structurally or falling back to splitting Markdown.
+/// There was nowhere to put it, so it went to a `tracing` target, which an operator can
+/// read and `vs-adapt` cannot. It travels in `StepOutput::metrics` now, through the
+/// `NodeTrace`, into the vault.
+fn parse_with_metrics(
+    parser: &dyn OutputParser,
+    spec: &ModelSpec,
+    raw: &str,
+    page: &PageImage,
+    size: (u32, u32),
+    node_id: &str,
+    step: &str,
+) -> Result<(Vec<BlockDraft>, vs_dag::Metrics), StepError> {
+    let mut metrics = vs_dag::Metrics::new();
+    let blocks = if spec.family == "auto" {
+        let auto = Auto::with_scale(spec.coord_scale.as_deref().and_then(coord_scale_from_name));
+        let (blocks, path) = auto.parse_reporting(raw, page, size, node_id);
+        metrics.insert("auto_path".into(), path.as_str().into());
+        blocks
+    } else {
+        parser.parse(raw, page, size, node_id).map_err(|e| parse_err(&spec.family, step, e))?
+    };
+    metrics.insert("parse_family".into(), parser.family().into());
+    metrics.insert("blocks".into(), blocks.len().into());
+    // The same fact as a counter, for the deployment that is not running `vs-adapt`: the
+    // label values are family names and `markdown`, which is a bounded set. A rise in
+    // `path="markdown"` is a model whose output stopped being understood — a new release
+    // changing its format, for instance — and it is otherwise invisible.
+    let path = metrics.get("auto_path").and_then(|v| v.as_str()).unwrap_or(parser.family()).to_string();
+    ::metrics::counter!("models_parse_path_total", "family" => spec.family.clone(), "path" => path).increment(1);
+    Ok((blocks, metrics))
 }
 
 /// Refuses a model that has declared it cannot take images, before any request is made.
@@ -286,11 +326,12 @@ impl Step for PageParseE2e {
             })
             .await
             .map_err(model_err)?;
-        let blocks = parser
-            .parse(&resp.text, page, (page.width_px, page.height_px), &ctx.node_id)
-            .map_err(|e| parse_err(&spec.family, self.kind(), e))?;
+        let (blocks, metrics) =
+            parse_with_metrics(parser.as_ref(), spec, &resp.text, page, (page.width_px, page.height_px), &ctx.node_id, self.kind())?;
         tracing::debug!(step = self.kind(), blocks = blocks.len(), "parsed page");
-        Ok(StepOutput { artifact: Artifact::Blocks(blocks), model_ref: Some(spec.model_ref()), prompt_ref: Some(prompt.reference) })
+        let mut out = StepOutput::from_model(Artifact::Blocks(blocks), spec.model_ref(), prompt.reference);
+        out.metrics = metrics;
+        Ok(out)
     }
 }
 
@@ -334,12 +375,14 @@ impl Step for LayoutDetect {
             })
             .await
             .map_err(model_err)?;
-        let blocks = parser
-            .parse(&resp.text, page, (page.width_px, page.height_px), &ctx.node_id)
-            .map_err(|e| parse_err(&spec.family, self.kind(), e))?;
+        let (blocks, mut metrics) =
+            parse_with_metrics(parser.as_ref(), spec, &resp.text, page, (page.width_px, page.height_px), &ctx.node_id, self.kind())?;
         let regions = regions_from_blocks(&blocks);
+        metrics.insert("regions".into(), regions.len().into());
         tracing::debug!(step = self.kind(), regions = regions.len(), "layout detected");
-        Ok(StepOutput { artifact: Artifact::Layout(regions), model_ref: Some(spec.model_ref()), prompt_ref: Some(prompt.reference) })
+        let mut out = StepOutput::from_model(Artifact::Layout(regions), spec.model_ref(), prompt.reference);
+        out.metrics = metrics;
+        Ok(out)
     }
 }
 
@@ -449,7 +492,7 @@ impl Step for RegionStep {
         let selected: Vec<LayoutRegion> = layout.iter().filter(|r| wanted.contains(&r.kind)).cloned().collect();
         tracing::debug!(step = self.kind(), model, node = %ctx.node_id, regions = selected.len(), "model_step");
         if selected.is_empty() {
-            return Ok(StepOutput { artifact: Artifact::Blocks(vec![]), model_ref: Some(spec.model_ref()), prompt_ref: Some(prompt.reference) });
+            return Ok(StepOutput::from_model(Artifact::Blocks(vec![]), spec.model_ref(), prompt.reference));
         }
         let crops = crop_regions(page, selected, padding).await?;
         let parser = parser_or_none(spec);
@@ -484,7 +527,7 @@ impl Step for RegionStep {
         }
         blocks.sort_by_key(|b| b.reading_order);
         tracing::debug!(step = self.kind(), blocks = blocks.len(), "regions recognised");
-        Ok(StepOutput { artifact: Artifact::Blocks(blocks), model_ref: Some(spec.model_ref()), prompt_ref: Some(prompt.reference) })
+        Ok(StepOutput::from_model(Artifact::Blocks(blocks), spec.model_ref(), prompt.reference))
     }
 }
 
@@ -561,7 +604,7 @@ impl Step for FigureDescribe {
             });
         }
         blocks.sort_by_key(|b| b.reading_order);
-        Ok(StepOutput { artifact: Artifact::Blocks(blocks), model_ref: Some(spec.model_ref()), prompt_ref: Some(prompt.reference) })
+        Ok(StepOutput::from_model(Artifact::Blocks(blocks), spec.model_ref(), prompt.reference))
     }
 }
 
@@ -654,7 +697,7 @@ impl Step for ChartToTable {
             });
         }
         blocks.sort_by_key(|b| b.reading_order);
-        Ok(StepOutput { artifact: Artifact::Blocks(blocks), model_ref: Some(spec.model_ref()), prompt_ref: Some(prompt.reference) })
+        Ok(StepOutput::from_model(Artifact::Blocks(blocks), spec.model_ref(), prompt.reference))
     }
 }
 
@@ -694,7 +737,7 @@ mod tests {
 
     #[test]
     fn region_content_reduces_structured_output() {
-        let p = parser_for("dots_ocr").unwrap();
+        let p = crate::parsers::parser_for("dots_ocr").unwrap();
         let raw = r#"[{"bbox":[0,0,10,10],"category":"Table","text":"<table><tr><td>1</td></tr></table>"}]"#;
         let (c, t) = region_content(Some(p.as_ref()), BlockKind::Table, raw, (10, 10));
         assert_eq!(c, BlockContent::Table { html: "<table><tr><td>1</td></tr></table>".into() });

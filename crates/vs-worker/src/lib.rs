@@ -91,6 +91,23 @@ pub async fn build_pipeline(cfg: &Config, deps: Deps) -> anyhow::Result<Pipeline
     let steps = Arc::new(vs_steps::production_registry(models.client.clone()));
     let classify = classify_config(cfg)?;
 
+    // Built before the ingest handler because both stages use it: ingest to settle the
+    // document type before the pages fan out, Stage 2 to settle it again with every page
+    // in hand.
+    let doc_classifier: Option<Arc<dyn vs_classify::DocumentClassifier>> = match &cfg.stage2.doc_classifier_model {
+        Some(model) => {
+            models.client.spec(model)?; // fail at startup, not per document
+            Some(Arc::new(vs_models::classifier::VlmDocumentClassifier {
+                client: models.client.clone(),
+                model: model.clone(),
+                max_pages: cfg.stage2.doc_classifier_pages.clamp(1, 8),
+            }))
+        }
+        None => {
+            tracing::info!("no doc_classifier_model: pages route on their own class and the document type is the page vote");
+            None
+        }
+    };
     let default_visibility = vs_vault::Visibility::parse(cfg.api.default_visibility.trim())
         .ok_or_else(|| anyhow::anyhow!("api.default_visibility {:?}: expected private, department, workspace or organization", cfg.api.default_visibility))?;
     let ingest = ingest::IngestHandler {
@@ -107,6 +124,8 @@ pub async fn build_pipeline(cfg: &Config, deps: Deps) -> anyhow::Result<Pipeline
         thumbnail_px: classify.thumbnail_long_side_px,
         max_pages: MAX_PAGES,
         default_visibility,
+        doc_classifier: doc_classifier.clone(),
+        doc_classify_pages: cfg.stage2.doc_classifier_pages,
     };
 
     let vision: Option<Arc<dyn vs_classify::VisionClassifier>> = match &cfg.stage2.classifier_model {
@@ -147,16 +166,6 @@ pub async fn build_pipeline(cfg: &Config, deps: Deps) -> anyhow::Result<Pipeline
     // before the first document: a wrong dimension is unrecoverable once points exist.
     vectors.ensure_ready(embedder.dimensions()).await?;
 
-    let doc_classifier: Option<Arc<dyn vs_classify::DocumentClassifier>> = match &s2.doc_classifier_model {
-        Some(model) => {
-            models.client.spec(model)?; // fail at startup, not per document
-            Some(Arc::new(vs_models::classifier::VlmDocumentClassifier { client: models.client.clone(), model: model.clone(), max_pages: 3 }))
-        }
-        None => {
-            tracing::info!("no doc_classifier_model: document type comes from the weighted page vote");
-            None
-        }
-    };
     let mut resolver = PgCorpusResolver::new(ops.pool.clone(), vectors.clone(), embedder.clone())
         .with_thresholds(s2.link_threshold, s2.judge_band);
     if let Some(judge) = &s2.judge_model {

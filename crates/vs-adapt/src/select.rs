@@ -55,6 +55,14 @@ pub struct PageEval {
     /// The DAG failed on this page (quality is 0).
     #[serde(default)]
     pub failed: bool,
+    /// How each model node's output was parsed, from the node traces: `auto_path` for the
+    /// `auto` family, the family name otherwise.
+    ///
+    /// Carried this far so that "is this newly registered model being read structurally,
+    /// or split as Markdown because nothing understood its output?" is a question the
+    /// report can answer. It was previously logged and lost.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parse_paths: Vec<String>,
 }
 
 impl PageEval {
@@ -75,6 +83,7 @@ impl PageEval {
             metrics: Metrics::default(),
             tokens: 0,
             failed: false,
+            parse_paths: Vec::new(),
         }
     }
 }
@@ -165,21 +174,33 @@ pub fn best(aggs: &HashMap<String, Agg>, obj: &Objective, w: Weights) -> Option<
     v.first().map(|(id, u, n)| ((*id).clone(), *u, *n))
 }
 
-/// Number of back-off levels: level 0 = all 8 conditions, level 7 = language only.
-pub const LEVELS: usize = 8;
+/// Number of back-off levels: level 0 = all 9 conditions, level 8 = language only.
+pub const LEVELS: usize = 9;
 
 /// Class key of a profile at a back-off level.
+///
+/// `rotated` is dropped first, before the content flags, because it is the condition most
+/// likely to have no examples: most corpora are upright. It is in the ladder at all
+/// because whether a sideways page wants a different workflow — one that straightens it
+/// first — is exactly the kind of question this exists to answer, and until the router
+/// could match on rotation there was no way to express the answer.
 pub fn class_key(p: &PageProfile, level: usize) -> Match {
     let keep = |rank: usize| rank >= level; // rank 0 is dropped first
     Match {
-        has_charts: keep(0).then_some(p.has_charts),
-        has_images: keep(1).then_some(p.has_images),
-        has_formulas: keep(2).then_some(p.has_formulas),
-        has_tables: keep(3).then_some(p.has_tables),
-        has_handwriting: keep(4).then_some(p.has_handwriting),
-        born_digital: keep(5).then_some(p.born_digital),
-        doc_types: keep(6).then(|| vec![p.doc_type]),
-        languages: keep(7).then(|| vec![p.language.primary()]),
+        rotated: keep(0).then_some(!p.rotation_deg.is_multiple_of(360)),
+        has_charts: keep(1).then_some(p.has_charts),
+        has_images: keep(2).then_some(p.has_images),
+        has_formulas: keep(3).then_some(p.has_formulas),
+        has_tables: keep(4).then_some(p.has_tables),
+        has_handwriting: keep(5).then_some(p.has_handwriting),
+        born_digital: keep(6).then_some(p.born_digital),
+        doc_types: keep(7).then(|| vec![p.doc_type]),
+        languages: keep(8).then(|| vec![p.language.primary()]),
+        // The exact angle is never a class: three near-identical classes for 90, 180 and
+        // 270 would split what little rotated data a corpus has three ways. A routing
+        // table can still be written by hand with `rotated_deg` when a deployment knows
+        // it needs to.
+        rotated_deg: None,
     }
 }
 
@@ -198,6 +219,7 @@ pub fn describe(m: &Match) -> String {
         ("formulas", m.has_formulas),
         ("images", m.has_images),
         ("charts", m.has_charts),
+        ("rotated", m.rotated),
     ] {
         if let Some(b) = v {
             parts.push(format!("{name}={b}"));
@@ -363,9 +385,18 @@ mod tests {
     #[test]
     fn class_key_backoff() {
         let p = profile("de-CH", true);
-        assert_eq!(class_key(&p, 0).has_charts, Some(false));
-        let k7 = class_key(&p, 7);
-        assert_eq!(k7.languages, Some(vec!["de".to_string()]));
-        assert!(k7.born_digital.is_none() && k7.doc_types.is_none());
+        let full = class_key(&p, 0);
+        assert_eq!(full.has_charts, Some(false));
+        // Rotation is in the class, so a corpus with sideways pages can be given its own
+        // workflow; it is dropped first because most corpora have no examples of it.
+        assert_eq!(full.rotated, Some(false));
+        assert_eq!(class_key(&p, 1).rotated, None, "rotation is the first condition to go");
+
+        let last = class_key(&p, LEVELS - 1);
+        assert_eq!(last.languages, Some(vec!["de".to_string()]));
+        assert!(last.born_digital.is_none() && last.doc_types.is_none(), "the last level is language alone");
+        // The exact angle is never part of a class: it would split what little rotated
+        // data there is three ways.
+        assert!((0..LEVELS).all(|l| class_key(&p, l).rotated_deg.is_none()));
     }
 }
