@@ -67,11 +67,26 @@ pub struct QdrantConfig {
     pub collection_prefix: String,
     /// Points per upsert request.
     pub batch_size: usize,
+    /// Whether Qdrant applies inverse document frequency to the lexical half.
+    ///
+    /// Default true, which is the better ranking. The statistics behind it are the
+    /// collection's, and a collection holds every tenant's points, so a term's rarity is
+    /// computed across organizations — no content crosses the boundary, but the *ranking*
+    /// depends on other organizations' corpora. A deployment where that is unacceptable
+    /// sets this false and gets saturated term frequencies alone. It is a property of the
+    /// collection, so changing it means a new collection: see `vs-vectors/SPEC.md`.
+    pub idf: bool,
 }
 
 impl Default for QdrantConfig {
     fn default() -> Self {
-        Self { url: "http://127.0.0.1:6334".into(), api_key_env: None, collection_prefix: "vs".into(), batch_size: 256 }
+        Self {
+            url: "http://127.0.0.1:6334".into(),
+            api_key_env: None,
+            collection_prefix: "vs".into(),
+            batch_size: 256,
+            idf: true,
+        }
     }
 }
 
@@ -108,6 +123,23 @@ pub struct WorkerConfig {
     pub page_attempts: u32,
     /// Address-space limit per render child.
     pub render_mem_limit_mb: Option<u64>,
+    /// How long this process's claim on a document is good for, in seconds.
+    ///
+    /// Renewed while the document is being worked on, so it only lapses when the process
+    /// carrying it stops renewing — which is what a crash looks like from the outside.
+    /// The resume sweep claims a job whose lease has lapsed, so this is also the delay
+    /// before a crashed document is picked up again. Default 120.
+    pub lease_ttl_s: u64,
+    /// How often this copy looks for abandoned documents. 0 disables the sweep, which
+    /// restores the behaviour of having no recovery at all. Default 60.
+    pub resume_interval_s: u64,
+    /// Abandoned documents claimed per sweep. Bounded so a copy that comes up after a
+    /// fleet-wide outage does not take every orphaned document at once. Default 4.
+    pub resume_batch: i64,
+    /// Times one document may be resumed before the job is failed. Stops a document that
+    /// kills the process reading it from taking down the fleet one copy at a time.
+    /// Default 3.
+    pub max_resumes: i32,
 }
 
 impl Default for WorkerConfig {
@@ -123,6 +155,10 @@ impl Default for WorkerConfig {
             max_documents: 4,
             page_attempts: 3,
             render_mem_limit_mb: None,
+            lease_ttl_s: 120,
+            resume_interval_s: 60,
+            resume_batch: 4,
+            max_resumes: 3,
         }
     }
 }
@@ -188,11 +224,55 @@ pub struct ApiConfig {
     pub interactive_max_pending: u64,
     /// Where multipart uploads are spooled while hashing. Default: system temp dir.
     pub scratch_dir: Option<PathBuf>,
+    /// How wide a newly uploaded document is open inside its organization:
+    /// `private` | `department` | `workspace` | `organization`.
+    ///
+    /// Default `private`, which is the identity model's answer — access is the person's
+    /// (D14) — and the strict one: a deployment that wants what the API did before per-
+    /// person scoping existed, where every member of an organization reads every
+    /// document it owns, sets `organization` and gets exactly that.
+    pub default_visibility: String,
+    /// Whether a caller holding `auth.admin_role` reads every document in its
+    /// organization. Default true: the role already carries routing and metrics, and an
+    /// operator who cannot read a document cannot answer a question about it. Set false
+    /// in a deployment where administration and access are deliberately separate.
+    pub admin_reads_all: bool,
+    /// Requests per second one organization may make, token-bucket, per process. 0
+    /// disables the limit. Default 50.
+    ///
+    /// Per process rather than per deployment because there is nothing between the
+    /// copies to share a counter — the same reason admission control is per copy (D13).
+    /// A fleet of N copies therefore allows N × this in the worst case, which is the
+    /// honest number to size against.
+    pub tenant_rate_per_s: f64,
+    /// Requests one organization may make at once before the rate applies. Default 100.
+    pub tenant_rate_burst: f64,
+    /// Days after a job finishes before the caller's subject is scrubbed from it.
+    /// 0 disables the sweep (and leaves the data, which is a decision worth making
+    /// deliberately). Default 90.
+    pub job_retention_days: u64,
+    /// How often the revocation list is re-read from Postgres. Default 30 s.
+    ///
+    /// This is the window in which a revoked token still verifies on a copy that has not
+    /// refreshed yet. It is short because the list is small, and the alternative — a
+    /// query per request — would put Postgres on the path of every call, which is what
+    /// verifying signatures locally exists to avoid (D10).
+    pub revocation_refresh_s: u64,
 }
 
 impl Default for ApiConfig {
     fn default() -> Self {
-        Self { max_upload_bytes: 2 * 1024 * 1024 * 1024, interactive_max_pending: 1000, scratch_dir: None }
+        Self {
+            max_upload_bytes: 2 * 1024 * 1024 * 1024,
+            interactive_max_pending: 1000,
+            scratch_dir: None,
+            default_visibility: "private".into(),
+            admin_reads_all: true,
+            tenant_rate_per_s: 50.0,
+            tenant_rate_burst: 100.0,
+            job_retention_days: 90,
+            revocation_refresh_s: 30,
+        }
     }
 }
 
@@ -293,12 +373,26 @@ impl AuthConfig {
     }
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
 pub struct TelemetryConfig {
     pub otlp_endpoint: Option<String>,
     pub metrics_addr: Option<String>,
-    #[serde(default)]
     pub json_logs: bool,
+    /// Fraction of traces exported, 0.0..=1.0. Default 1.0 — every trace, which is what
+    /// this did before there was a choice.
+    ///
+    /// The sampler is parent-based: a span whose parent was sampled is sampled, so a
+    /// trace is never exported in pieces, and the ratio applies to traces that start
+    /// here. One span per stage and per DAG node is affordable at 1.0; the model
+    /// client's per-attempt span at volume is what this exists for.
+    pub sample_ratio: f64,
+}
+
+impl Default for TelemetryConfig {
+    fn default() -> Self {
+        Self { otlp_endpoint: None, metrics_addr: None, json_logs: false, sample_ratio: 1.0 }
+    }
 }
 
 impl Config {

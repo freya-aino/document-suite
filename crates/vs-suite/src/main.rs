@@ -25,7 +25,9 @@ use vs_api::auth::Auth;
 use vs_api::Dispatch;
 use vs_core::{JobSpec, RunId};
 use vs_infra::{Config, ObjectBlobStore};
-use vs_worker::{build_pipeline, connect_pg, self_render_command, Deps, Pipeline};
+use vs_worker::{build_pipeline, connect_pg, holder_id, self_render_command, Deps, Pipeline};
+
+mod resume;
 
 #[derive(Parser)]
 #[command(about = "The visual-suite service: HTTP API and document pipeline in one process")]
@@ -92,8 +94,28 @@ async fn run() -> anyhow::Result<()> {
 
     let auth = Auth::discover(auth_cfg).await?;
     auth.spawn_refresher();
-    let state = api_state(&cfg, pool, dispatch.clone(), auth, telemetry.metrics.clone())?;
+    let state = api_state(&cfg, pool, dispatch.clone(), auth.clone(), telemetry.metrics.clone())?;
+    // Revocation: a token stays good for its `exp` unless something says otherwise, and
+    // this is that something. Given the same `Ops` the routes use, so a revocation
+    // recorded here applies to this copy at once and to the others on their next refresh.
+    auth.with_revocations(state.ops.clone());
+    auth.spawn_revocation_refresher(Duration::from_secs(cfg.api.revocation_refresh_s));
     vs_api::spawn_idempotency_purge(state.ops.clone());
+    // Retention for the one place personal data lives (`docs/SPEC.md` §5.6).
+    vs_api::scope::spawn_retention_sweep(state.ops.clone(), cfg.api.job_retention_days);
+    // Recovery for documents a crashed copy abandoned. See `resume`.
+    resume::spawn(
+        state.ops.clone(),
+        dispatch.clone(),
+        resume::ResumeConfig {
+            holder: holder_id(),
+            lease_ttl: Duration::from_secs(cfg.worker.lease_ttl_s.max(10)),
+            interval: Duration::from_secs(cfg.worker.resume_interval_s),
+            batch: cfg.worker.resume_batch,
+            max_resumes: cfg.worker.max_resumes,
+            max_documents: cfg.worker.max_documents.max(1) as u64,
+        },
+    );
 
     let (stop_tx, mut stop_rx) = watch::channel(false);
     tokio::spawn(async move {
@@ -184,6 +206,17 @@ fn api_state(
             None
         }
     };
+    // Read scoping needs a valid default, and a typo in it must not come up as a
+    // service that silently shares every upload with the whole organization.
+    let visibility = vs_vault::Visibility::parse(cfg.api.default_visibility.trim()).ok_or_else(|| {
+        anyhow::anyhow!("api.default_visibility {:?}: expected private, department, workspace or organization", cfg.api.default_visibility)
+    })?;
+    tracing::info!(
+        default_visibility = visibility.as_str(),
+        admin_reads_all = cfg.api.admin_reads_all,
+        rate_per_s = cfg.api.tenant_rate_per_s,
+        "read scoping"
+    );
     Ok(vs_api::AppState {
         ops: Arc::new(vs_vault::ops::Ops { pool }),
         auth,
@@ -191,6 +224,7 @@ fn api_state(
         blob: Arc::new(ObjectBlobStore::s3(&cfg.blob)?),
         bucket: cfg.blob.bucket.clone(),
         api: cfg.api.clone(),
+        limiter: Arc::new(vs_api::limit::RateLimiter::new(cfg.api.tenant_rate_per_s, cfg.api.tenant_rate_burst)),
         steps,
         metrics,
     })

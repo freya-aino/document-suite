@@ -76,6 +76,9 @@ async fn a_span_reaches_the_collector_and_carries_the_service_name() {
         otlp_endpoint: Some(format!("http://127.0.0.1:{port}")),
         metrics_addr: None,
         json_logs: false,
+        // Every trace, which is what this test asserts reaches the collector; the
+        // sampler itself is covered by `sampling_is_parent_based_and_clamped`.
+        sample_ratio: 1.0,
     };
     let t = vs_infra::telemetry::init(&cfg, "vs-worker-traced").expect("init");
 

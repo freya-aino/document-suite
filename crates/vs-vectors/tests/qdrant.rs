@@ -20,6 +20,7 @@ fn config() -> QdrantConfig {
         // A per-process prefix so a failed run never poisons the next one.
         collection_prefix: format!("itest_{}", RunId::new().to_string().replace(['-'], "")),
         batch_size: 8,
+        idf: true,
     }
 }
 

@@ -88,6 +88,12 @@ impl VectorStore for OneHit {
             vector: self.vector.clone(),
         }])
     }
+    async fn search(&self, _: &TenantId, _: vs_vectors::Scope, _: &vs_vectors::HybridQuery) -> Result<Vec<vs_vectors::Hit>, VectorError> {
+        Ok(vec![])
+    }
+    async fn migrate_dimensions(&self, _: usize) -> Result<Vec<String>, VectorError> {
+        Ok(vec![])
+    }
 }
 
 struct UnitEmbedder;

@@ -37,7 +37,10 @@ use vs_infra::config::ApiConfig;
 use vs_vault::ops::{NewJob, Ops};
 
 pub mod auth;
+pub mod limit;
+pub mod scope;
 use auth::{Admin, Auth, Caller, Tenant};
+use limit::RateLimiter;
 
 /// Documents per `POST /v1/batches`.
 const MAX_BATCH_DOCUMENTS: usize = 10_000;
@@ -59,6 +62,8 @@ pub struct AppState {
     pub blob: Arc<dyn BlobStore>,
     pub bucket: String,
     pub api: ApiConfig,
+    /// Requests per organization, per process. Built from `api.tenant_rate_per_s`.
+    pub limiter: Arc<RateLimiter>,
     /// Production step registry for DAG-list validation; `None` if the model registry
     /// could not be loaded at startup (DAG-list uploads then get 503).
     pub steps: Option<Arc<StepRegistry>>,
@@ -96,7 +101,7 @@ struct Accepted {
 
 type ApiError = (StatusCode, String);
 
-fn internal(e: impl std::fmt::Display) -> ApiError {
+pub(crate) fn internal(e: impl std::fmt::Display) -> ApiError {
     tracing::error!(error = %e, "request failed");
     (StatusCode::INTERNAL_SERVER_ERROR, "internal error".into())
 }
@@ -150,20 +155,41 @@ pub fn router(state: AppState) -> Router {
     // rates to anyone who asks. A Prometheus scrape authenticates as a Keycloak service
     // account holding the admin role — see SPEC.md.
     let protected = Router::new()
-        .route("/v1/documents", post(create_document).layer(DefaultBodyLimit::max(upload_limit)))
+        .route(
+            "/v1/documents",
+            post(create_document).layer(DefaultBodyLimit::max(upload_limit)).get(scope::list_documents),
+        )
         .route("/v1/batches", post(create_batch).layer(DefaultBodyLimit::max(16 * 1024 * 1024)))
         .route("/v1/jobs/{job_id}", get(get_job))
         .route("/v1/batches/{batch_id}", get(get_batch))
         .route("/v1/documents/{document_hk}", get(get_document))
         .route("/v1/documents/{document_hk}/pages/{page_no}", get(get_page))
+        // Who may read a document, and the two ways to change it. The rule itself is
+        // `vs_vault::access::Reader::may_read`; `scope` is where a request meets it.
+        .route("/v1/documents/{document_hk}/access", get(scope::get_access).put(scope::set_access))
+        .route("/v1/documents/{document_hk}/grants", post(scope::add_grant))
+        .route("/v1/documents/{document_hk}/grants/{kind}/{id}", axum::routing::delete(scope::remove_grant))
+        // Erasure, and revoking a token before it expires.
+        .route("/v1/owners/{subject}", axum::routing::delete(scope::erase_owner))
+        .route("/v1/auth/revocations", post(scope::revoke).get(scope::revocation_status))
         .route("/v1/dag-lists", get(list_dag_lists).post(upload_dag_list))
         .route("/v1/dag-lists/{version}/activate", post(activate_dag_list))
         .route("/metrics", get(metrics_handler))
+        // Order matters and is the reverse of the reading order: a layer added later
+        // wraps the ones before it, so `authenticate` runs first and the rate limiter
+        // second. It has to be that way round — the limiter counts per organization, and
+        // the organization is only known once a token has been verified.
+        .route_layer(middleware::from_fn_with_state(state.clone(), rate_limit))
         .route_layer(middleware::from_fn_with_state(state.auth.clone(), auth::authenticate));
 
-    // Liveness and readiness only. A load balancer cannot hold a token, and neither
-    // says anything about a tenant.
-    let public = Router::new().route("/healthz", get(|| async { "ok" })).route("/readyz", get(readyz));
+    // Liveness, readiness — a load balancer cannot hold a token, and neither says
+    // anything about a tenant — and back-channel logout, which carries a logout token
+    // signed by the realm instead of a bearer token: the signature is the
+    // authentication, and `scope::backchannel_logout` says why that is not a hole.
+    let public = Router::new()
+        .route("/healthz", get(|| async { "ok" }))
+        .route("/readyz", get(readyz))
+        .route("/v1/auth/backchannel-logout", post(scope::backchannel_logout));
 
     protected.merge(public).layer(middleware::from_fn(record_metrics)).with_state(state)
 }
@@ -195,6 +221,29 @@ async fn record_metrics(req: Request, next: Next) -> Response {
     metrics::counter!("vs_api_http_requests_total", &labels).increment(1);
     metrics::histogram!("vs_api_http_request_duration_seconds", &labels).record(start.elapsed().as_secs_f64());
     res
+}
+
+/// Sheds requests from an organization over `api.tenant_rate_per_s`.
+///
+/// Runs after authentication, because the organization comes from the verified token and
+/// from nothing else. A request that got this far without a principal is a router bug
+/// rather than an unlimited caller, so it is let through and logged by the extractor that
+/// notices (`AuthError::NotAuthenticated`).
+async fn rate_limit(State(s): State<AppState>, req: Request, next: Next) -> Response {
+    if let Some(p) = req.extensions().get::<Arc<auth::Principal>>() {
+        if let Err(retry_after) = s.limiter.check(p.tenant.as_str()) {
+            metrics::counter!("vs_api_rate_limited_total").increment(1);
+            tracing::debug!(tenant = %p.tenant.as_str(), retry_after, "request rate-limited");
+            let header = HeaderValue::from_str(&retry_after.to_string()).unwrap_or(HeaderValue::from_static("1"));
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                [(header::RETRY_AFTER, header)],
+                format!("more than {} requests per second for this organization", s.api.tenant_rate_per_s),
+            )
+                .into_response();
+        }
+    }
+    next.run(req).await
 }
 
 async fn metrics_handler(State(s): State<AppState>, _: Admin) -> Response {
@@ -529,8 +578,10 @@ struct JobStatus {
     timings: Option<vs_vault::ops::JobTimings>,
 }
 
-async fn get_job(State(s): State<AppState>, Tenant(tenant): Tenant, Path(job_id): Path<uuid::Uuid>) -> Result<Json<JobStatus>, ApiError> {
+async fn get_job(State(s): State<AppState>, Caller(caller): Caller, Path(job_id): Path<uuid::Uuid>) -> Result<Json<JobStatus>, ApiError> {
+    let tenant = caller.tenant.clone();
     let j = s.ops.get_job(&tenant, job_id).await.map_err(internal)?.ok_or((StatusCode::NOT_FOUND, "job not found".into()))?;
+    require_job(&s, &caller, &j).await?;
     let timings = s.ops.job_timings(&tenant, job_id).await.map_err(internal)?;
     Ok(Json(JobStatus {
         job_id: j.job_id,
@@ -545,6 +596,26 @@ async fn get_job(State(s): State<AppState>, Tenant(tenant): Tenant, Path(job_id)
         updated_at: j.updated_at,
         timings,
     }))
+}
+
+/// Whether this caller may see a job's status.
+///
+/// A job is the asker's. It is also visible to anyone who may read the document it
+/// produced, because a status that disappears the moment someone else can read the result
+/// would be a strange shape — and to an administrator. A job with no recorded owner is
+/// the organization's, like its documents.
+async fn require_job(s: &AppState, caller: &auth::Principal, job: &vs_vault::ops::JobRow) -> Result<(), ApiError> {
+    let owner = job.spec.owner.as_ref().map(|o| o.subject.as_str());
+    if caller.admin || owner.is_none() || owner == Some(caller.subject.as_str()) {
+        return Ok(());
+    }
+    // Still running, or failed before it had a document: there is nothing to share yet,
+    // so the asker is the only one who sees it.
+    let Some(hk) = job.document_hk.as_deref().and_then(vs_vault::hash_key_from_hex) else {
+        metrics::counter!("vs_api_access_refusals_total", "object" => "job").increment(1);
+        return Err((StatusCode::FORBIDDEN, "this job belongs to another member of the organization".into()));
+    };
+    scope::require_read(s, caller, &hk).await
 }
 
 /// Postgres and blob store reachable (the bus connection is checked at startup and
@@ -787,17 +858,21 @@ struct RunQuery {
     run_id: Option<uuid::Uuid>,
 }
 
-fn parse_hk(hk: &str) -> Result<HashKey, ApiError> {
+pub(crate) fn parse_hk(hk: &str) -> Result<HashKey, ApiError> {
     vs_vault::hash_key_from_hex(hk).ok_or((StatusCode::BAD_REQUEST, "document_hk must be 64 hex characters".into()))
 }
 
 async fn get_document(
     State(s): State<AppState>,
-    Tenant(tenant): Tenant,
+    Caller(caller): Caller,
     Path(hk): Path<String>,
     Query(q): Query<RunQuery>,
 ) -> Result<Json<vs_vault::ops::DocumentSummary>, ApiError> {
     let hk = parse_hk(&hk)?;
+    // The organization check is in `document_summary` and always was. This is the check
+    // that was missing: which *member* of the organization may read it.
+    scope::require_read(&s, &caller, &hk).await?;
+    let tenant = caller.tenant.clone();
     s.ops
         .document_summary(&tenant, &hk, q.run_id.map(RunId))
         .await
@@ -809,11 +884,13 @@ async fn get_document(
 /// The stored `PageResult` JSON, as written by the page worker.
 async fn get_page(
     State(s): State<AppState>,
-    Tenant(tenant): Tenant,
+    Caller(caller): Caller,
     Path((hk, page_no)): Path<(String, u32)>,
     Query(q): Query<RunQuery>,
 ) -> Result<Response, ApiError> {
     let hk = parse_hk(&hk)?;
+    scope::require_read(&s, &caller, &hk).await?;
+    let tenant = caller.tenant.clone();
     let run = s
         .ops
         .document_run(&tenant, &hk, q.run_id.map(RunId))

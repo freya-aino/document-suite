@@ -240,6 +240,13 @@ impl Ops {
             .bind(enum_str(&JobState::Received))
             .execute(&mut *tx)
             .await?;
+        // The caller's subject, lifted out of `spec` into its own column: scoping a job
+        // to the person who asked, counting what they own and erasing them are all
+        // queries over an indexed column rather than over JSONB (see `access`).
+        let subjects: Vec<Option<String>> = jobs.iter().map(|j| j.spec.owner.as_ref().map(|o| o.subject.clone())).collect();
+        if subjects.iter().any(Option::is_some) {
+            Self::set_job_owners(&mut tx, &job_ids, &subjects).await?;
+        }
         tx.commit().await?;
         Ok(())
     }

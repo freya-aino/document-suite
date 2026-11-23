@@ -29,6 +29,8 @@ use tokio::sync::RwLock;
 
 use vs_core::{Owner, TenantId};
 use vs_infra::config::AuthConfig;
+use vs_vault::access::{Revocation, RevocationKind};
+use vs_vault::ops::Ops;
 
 /// Signature algorithms this API will verify.
 ///
@@ -59,6 +61,25 @@ const MIN_REFETCH: Duration = Duration::from_secs(10);
 /// Spec claims required in every token, beyond a valid signature.
 const REQUIRED_CLAIMS: [&str; 4] = ["exp", "iss", "aud", "sub"];
 
+/// The event a back-channel logout token must carry (OpenID Connect Back-Channel
+/// Logout 1.0 §2.4).
+const LOGOUT_EVENT: &str = "http://schemas.openid.net/event/backchannel-logout";
+
+/// How old a logout token may be. The specification says a logout token is short-lived
+/// without putting a number on it; this is the replay window for one that is captured
+/// in flight, and five minutes is the same order as the clock skew everything else here
+/// allows. A replayed token inside the window is harmless anyway — it revokes a session
+/// that is already revoked.
+const MAX_LOGOUT_TOKEN_AGE: Duration = Duration::from_secs(300);
+
+/// How long a revocation is kept after it is recorded.
+///
+/// A revocation only has to outlive the tokens it refuses, and an access token's
+/// lifetime is the realm's business — minutes, by default, in Keycloak. A day is far
+/// past any sane access-token lifetime and still bounds the table, and `purge_revocations`
+/// is what reclaims it.
+pub const REVOCATION_TTL: chrono::TimeDelta = chrono::TimeDelta::days(1);
+
 /// Longest accepted organization id. It is a blob-key prefix and a hash-key part, so it
 /// is bounded here rather than wherever it is first concatenated.
 const MAX_TENANT_LEN: usize = 64;
@@ -85,6 +106,14 @@ pub struct Principal {
     pub admin: bool,
     /// `jti`, for correlating a request with the token it used.
     pub token_id: Option<String>,
+    /// Keycloak's `sid`: the session this token belongs to. What a back-channel logout
+    /// names, and therefore what makes revocation possible at all for a token that
+    /// carries no `jti`.
+    pub session_id: Option<String>,
+    /// `iat`, as seconds since the epoch. Read because a subject- or session-wide
+    /// revocation is "every token issued before this instant", so the question is when
+    /// this one was issued.
+    pub issued_at: Option<i64>,
 }
 
 impl std::fmt::Debug for Principal {
@@ -110,6 +139,20 @@ impl Principal {
             workspaces: self.workspaces.clone(),
         }
     }
+
+    /// What read scoping is evaluated against.
+    ///
+    /// `admin_reads_all` comes from the configuration rather than from the role alone,
+    /// because whether administration implies access is a deployment's decision and not
+    /// this crate's (`api.admin_reads_all`).
+    pub fn reader(&self, admin_reads_all: bool) -> vs_vault::access::Reader {
+        vs_vault::access::Reader {
+            subject: self.subject.clone(),
+            department: self.department.clone(),
+            workspaces: self.workspaces.clone(),
+            admin: self.admin && admin_reads_all,
+        }
+    }
 }
 
 /// Why a request was refused. The caller is told the class, never the detail: a precise
@@ -127,6 +170,9 @@ pub enum AuthError {
     Invalid(jsonwebtoken::errors::ErrorKind),
     /// Verified, but carries no organization — authentication without entitlement.
     NoOrganization,
+    /// Verified and unexpired, but the session, the token or the person has been
+    /// revoked since it was issued.
+    Revoked,
     /// Verified, but missing the role the route needs.
     MissingRole,
     /// No verification keys available: Keycloak was unreachable. Our fault, not the
@@ -153,6 +199,7 @@ impl AuthError {
                 _ => "invalid",
             },
             AuthError::NoOrganization => "no_organization",
+            AuthError::Revoked => "revoked",
             AuthError::MissingRole => "missing_role",
             AuthError::KeysUnavailable => "keys_unavailable",
             AuthError::NotAuthenticated => "route_not_authenticated",
@@ -172,6 +219,7 @@ impl AuthError {
     fn message(&self) -> &'static str {
         match self {
             AuthError::Missing => "missing bearer token",
+            AuthError::Revoked => "token revoked",
             AuthError::NoOrganization => "token carries no organization",
             AuthError::MissingRole => "this route needs an administrative role",
             AuthError::KeysUnavailable => "verification keys unavailable",
@@ -209,6 +257,18 @@ impl IntoResponse for AuthError {
     }
 }
 
+/// What a verified back-channel logout token asks for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LogoutRequest {
+    /// The session to end, if the token named one.
+    pub session_id: Option<String>,
+    /// The person whose tokens to refuse, if the token named one.
+    pub subject: Option<String>,
+    /// The organization, when the token carries the claim. Logout is the realm's to
+    /// order, so a token without it still logs the session out.
+    pub tenant: Option<TenantId>,
+}
+
 /// The subset of the OIDC discovery document this needs.
 #[derive(Deserialize)]
 struct Discovery {
@@ -240,6 +300,77 @@ pub struct Auth {
     /// needing a Keycloak. The fetch path has its own test against a real socket.
     jwks_uri: Option<String>,
     keys: RwLock<Cache>,
+    /// Tokens that must stop being accepted before they expire.
+    ///
+    /// Held in memory and refreshed on a timer rather than read per request: a signature
+    /// is verified locally precisely so that Keycloak — and now Postgres — is not on the
+    /// path of every call (D10). `api.revocation_refresh_s` is therefore the window in
+    /// which a revoked token still works on a copy that has not refreshed yet, and it is
+    /// a stated window rather than a hidden one.
+    revocations: RwLock<Revocations>,
+    /// Where the list comes from. Unset disables revocation entirely, which is what a
+    /// test with no database gets. A `OnceLock` because it is set once, after
+    /// `discover` has already handed the verifier out as an `Arc`, and is then only
+    /// ever read.
+    ops: std::sync::OnceLock<Arc<Ops>>,
+}
+
+/// The revocation list, indexed the three ways it is asked.
+#[derive(Debug, Default)]
+pub struct Revocations {
+    /// Single tokens, by `jti`. No instant: the token itself is revoked.
+    jti: std::collections::HashSet<String>,
+    /// Sessions, by `sid`. No instant either: a session is ended as a whole, and a
+    /// person who logs in again gets a new `sid` rather than a newer token under the old
+    /// one, so there is nothing an instant would usefully separate.
+    sid: std::collections::HashSet<String>,
+    /// People, by `sub` → tokens issued before this are refused.
+    subject: std::collections::HashMap<String, i64>,
+}
+
+impl Revocations {
+    fn from_rows(rows: Vec<Revocation>) -> Self {
+        let mut r = Revocations::default();
+        for row in rows {
+            match row.kind {
+                RevocationKind::Jti => {
+                    r.jti.insert(row.id);
+                }
+                RevocationKind::Sid => {
+                    r.sid.insert(row.id);
+                }
+                RevocationKind::Subject => {
+                    let e = r.subject.entry(row.id).or_insert(i64::MIN);
+                    *e = (*e).max(row.not_before.timestamp());
+                }
+            }
+        }
+        r
+    }
+
+    fn len(&self) -> usize {
+        self.jti.len() + self.sid.len() + self.subject.len()
+    }
+
+    /// Whether this token has been revoked.
+    ///
+    /// A `jti` or a `sid` is absolute: that token, or that session, is finished. A
+    /// *subject* revocation is "every token issued before this instant", because "log me
+    /// out everywhere" must not refuse the login the person makes a second later.
+    ///
+    /// A token with no `iat` is refused by a subject revocation rather than let through:
+    /// the question it asks cannot be answered without an issue time, and the safe
+    /// reading of an unanswerable question here is the restrictive one. Keycloak always
+    /// issues `iat`, so a token without one is the forged case.
+    pub fn is_revoked(&self, p: &Principal) -> bool {
+        if p.token_id.as_ref().is_some_and(|j| self.jti.contains(j)) {
+            return true;
+        }
+        if p.session_id.as_ref().is_some_and(|s| self.sid.contains(s)) {
+            return true;
+        }
+        self.subject.get(&p.subject).copied().is_some_and(|not_before| p.issued_at.is_none_or(|iat| iat < not_before))
+    }
 }
 
 impl std::fmt::Debug for Auth {
@@ -297,7 +428,14 @@ impl Auth {
             anyhow::bail!("discovery issuer {:?} does not match auth.issuer {:?}", doc.issuer, cfg.issuer);
         }
 
-        let auth = Arc::new(Self { cfg, http, jwks_uri: Some(doc.jwks_uri), keys: RwLock::new(Cache::empty()) });
+        let auth = Arc::new(Self {
+            cfg,
+            http,
+            jwks_uri: Some(doc.jwks_uri),
+            keys: RwLock::new(Cache::empty()),
+            revocations: RwLock::new(Revocations::default()),
+            ops: Default::default(),
+        });
         if let Err(e) = auth.refresh().await {
             tracing::error!(error = %e, "JWKS prefetch failed; requests answer 503 until a fetch succeeds");
         }
@@ -314,7 +452,106 @@ impl Auth {
             http: reqwest::Client::new(),
             jwks_uri: None,
             keys: RwLock::new(cache),
+            revocations: RwLock::new(Revocations::default()),
+            ops: Default::default(),
         })
+    }
+
+    /// Gives this verifier the revocation list. Without it every token is good until it
+    /// expires, which is what this API did before.
+    ///
+    /// Set once, during startup, after `discover` has already handed out the `Arc`. A
+    /// second call is ignored rather than replacing the source: two revocation lists
+    /// behind one verifier is a configuration nobody means.
+    pub fn with_revocations(&self, ops: Arc<Ops>) {
+        if self.ops.set(ops).is_err() {
+            tracing::warn!("revocation source already set; the second one is ignored");
+        }
+    }
+
+    /// Re-reads the revocation list every `refresh` and purges rows whose tokens have
+    /// all expired. Does nothing without [`Auth::with_revocations`].
+    pub fn spawn_revocation_refresher(self: &Arc<Self>, refresh: Duration) {
+        if self.ops.get().is_none() {
+            tracing::warn!("no revocation source configured; tokens stay valid until they expire");
+            return;
+        }
+        let this = Arc::downgrade(self);
+        let period = refresh.max(Duration::from_secs(1));
+        tokio::spawn(async move {
+            // Immediately, so the first request after startup already sees the list.
+            if let Some(auth) = this.upgrade() {
+                auth.refresh_revocations().await;
+            }
+            let mut tick = tokio::time::interval(period);
+            tick.tick().await;
+            let mut since_purge = 0u32;
+            loop {
+                tick.tick().await;
+                let Some(auth) = this.upgrade() else { return };
+                auth.refresh_revocations().await;
+                // Expired rows match nothing, so purging them is housekeeping rather
+                // than correctness: hourly-ish is enough.
+                since_purge += 1;
+                if since_purge as u64 * period.as_secs() >= 3600 {
+                    since_purge = 0;
+                    if let Some(ops) = auth.ops.get() {
+                        match ops.purge_revocations().await {
+                            Ok(n) if n > 0 => tracing::info!(rows = n, "purged expired revocations"),
+                            Ok(_) => {}
+                            Err(e) => tracing::warn!(error = %e, "could not purge revocations"),
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    async fn refresh_revocations(&self) {
+        let Some(ops) = self.ops.get() else { return };
+        match ops.live_revocations().await {
+            Ok(rows) => {
+                let next = Revocations::from_rows(rows);
+                let n = next.len();
+                *self.revocations.write().await = next;
+                metrics::gauge!("vs_api_revocations").set(n as f64);
+            }
+            // The cached list is kept: serving the previous one is better than serving
+            // none, which would un-revoke everything for as long as Postgres is away.
+            Err(e) => tracing::warn!(error = %e, "could not refresh the revocation list; serving the cached one"),
+        }
+    }
+
+    /// Revokes a token, a session or a person, and applies it to this copy at once.
+    ///
+    /// The other copies pick it up on their next refresh — `api.revocation_refresh_s`
+    /// is that window.
+    pub async fn revoke(
+        &self,
+        kind: RevocationKind,
+        id: &str,
+        tenant: Option<&TenantId>,
+        not_before: chrono::DateTime<chrono::Utc>,
+        expires_at: chrono::DateTime<chrono::Utc>,
+        reason: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let ops = self.ops.get().ok_or_else(|| anyhow::anyhow!("no revocation source configured"))?;
+        ops.revoke_token(kind, id, tenant, not_before, expires_at, reason).await?;
+        self.refresh_revocations().await;
+        metrics::counter!("vs_api_revocations_total", "kind" => kind.as_str()).increment(1);
+        Ok(())
+    }
+
+    /// The live list, for a test and for the status route.
+    pub async fn revocation_count(&self) -> usize {
+        self.revocations.read().await.len()
+    }
+
+    /// Replaces the cached list directly, so a test can exercise the check without a
+    /// database behind it.
+    #[cfg(test)]
+    pub(crate) async fn set_revocations_for_test(&self, rows: Vec<Revocation>) {
+        *self.revocations.write().await = Revocations::from_rows(rows);
     }
 
     /// Re-reads the JWKS every `auth.jwks_refresh_s`, so a key the realm withdrew stops
@@ -420,7 +657,96 @@ impl Auth {
         v.set_required_spec_claims(&REQUIRED_CLAIMS);
 
         let data = decode::<Value>(token, &key, &v).map_err(|e| AuthError::Invalid(e.into_kind()))?;
-        self.principal(&data.claims)
+        let principal = self.principal(&data.claims)?;
+        // After the signature and the claims, because revoking something that was never
+        // valid is not a thing to spend a lock on.
+        if self.revocations.read().await.is_revoked(&principal) {
+            return Err(AuthError::Revoked);
+        }
+        Ok(principal)
+    }
+
+    /// Verifies a back-channel logout token from the realm (OpenID Connect Back-Channel
+    /// Logout 1.0).
+    ///
+    /// This is what makes revocation something the identity provider can order rather
+    /// than something an operator has to remember: Keycloak posts one of these when a
+    /// session ends, and the session's still-unexpired access tokens stop being accepted.
+    ///
+    /// It is held to the same key set and issuer as an access token, and then to the
+    /// three things that distinguish it from one: the `events` claim naming the logout
+    /// event, no `nonce` (§2.4 forbids it, because an ID token with one would otherwise
+    /// pass here), and a `sid` or a `sub` to act on. It must *not* satisfy the access-token
+    /// path, and `an_id_token_is_not_a_logout_token` is what holds it to that.
+    pub async fn verify_logout_token(&self, token: &str) -> Result<LogoutRequest, AuthError> {
+        let header = decode_header(token).map_err(|_| AuthError::Malformed("header"))?;
+        if !ALLOWED_ALGS.contains(&header.alg) {
+            return Err(AuthError::Malformed("alg"));
+        }
+        let kid = header.kid.ok_or(AuthError::Malformed("kid"))?;
+        let jwk = self.jwk_for(&kid).await?;
+        if let Some(declared) = declared_alg(&jwk) {
+            if declared != header.alg {
+                return Err(AuthError::Malformed("alg_not_the_keys"));
+            }
+        }
+        let key = DecodingKey::from_jwk(&jwk).map_err(|_| AuthError::Malformed("jwk"))?;
+
+        let mut v = Validation::new(header.alg);
+        v.algorithms = vec![header.alg];
+        v.leeway = self.cfg.leeway_s;
+        v.validate_nbf = true;
+        v.set_issuer(&[self.cfg.issuer.as_str()]);
+        v.set_audience(&self.cfg.audience);
+        // A logout token carries `iat` and `jti` and need not carry `exp` or `sub`
+        // (§2.4), so freshness is checked from `iat` below rather than left to `exp`.
+        v.set_required_spec_claims(&["iss", "aud"]);
+        let claims = decode::<Value>(token, &key, &v).map_err(|e| AuthError::Invalid(e.into_kind()))?.claims;
+
+        // §2.6: a token with a `nonce` is an ID token, and accepting one here would turn
+        // every login into a logout.
+        if claims.get("nonce").is_some() {
+            return Err(AuthError::Malformed("logout_nonce"));
+        }
+        let has_event = claims
+            .get("events")
+            .and_then(Value::as_object)
+            .is_some_and(|e| e.contains_key(LOGOUT_EVENT));
+        if !has_event {
+            return Err(AuthError::Malformed("logout_events"));
+        }
+        let iat = claims.get("iat").and_then(Value::as_i64).ok_or(AuthError::Malformed("logout_iat"))?;
+        let age = chrono::Utc::now().timestamp() - iat;
+        if age > MAX_LOGOUT_TOKEN_AGE.as_secs() as i64 || age < -(self.cfg.leeway_s as i64) {
+            return Err(AuthError::Malformed("logout_stale"));
+        }
+        let session_id = claims.get("sid").and_then(Value::as_str).map(str::to_string);
+        let subject = claims.get("sub").and_then(Value::as_str).map(str::to_string);
+        if session_id.is_none() && subject.is_none() {
+            return Err(AuthError::Malformed("logout_target"));
+        }
+        Ok(LogoutRequest {
+            session_id,
+            subject,
+            tenant: claim_str(&claims, &self.cfg.org_claim).as_deref().and_then(tenant_from),
+        })
+    }
+
+    /// Acts on a verified logout token: the session, or the person, stops being accepted.
+    ///
+    /// A `sid` revokes that session; a token with only a `sub` revokes every token of
+    /// that person issued before now, which is what "the user logged out everywhere"
+    /// means. `not_before` is the logout instant, so a *new* login right afterwards is
+    /// unaffected.
+    pub async fn apply_logout(&self, req: &LogoutRequest) -> anyhow::Result<()> {
+        let now = chrono::Utc::now();
+        let expires = now + REVOCATION_TTL;
+        if let Some(sid) = &req.session_id {
+            self.revoke(RevocationKind::Sid, sid, req.tenant.as_ref(), now, expires, Some("backchannel logout")).await?;
+        } else if let Some(sub) = &req.subject {
+            self.revoke(RevocationKind::Subject, sub, req.tenant.as_ref(), now, expires, Some("backchannel logout")).await?;
+        }
+        Ok(())
     }
 
     fn principal(&self, claims: &Value) -> Result<Principal, AuthError> {
@@ -455,6 +781,8 @@ impl Auth {
             roles,
             admin,
             token_id: claims.get("jti").and_then(Value::as_str).map(str::to_string),
+            session_id: claims.get("sid").and_then(Value::as_str).map(str::to_string),
+            issued_at: claims.get("iat").and_then(Value::as_i64),
         })
     }
 }

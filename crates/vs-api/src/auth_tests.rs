@@ -75,6 +75,9 @@ pub(crate) fn claims() -> Value {
         "azp": CLIENT_ID,
         "typ": "Bearer",
         "jti": "11111111-1111-1111-1111-111111111111",
+        // The session the token belongs to. Keycloak issues it, and it is what a
+        // back-channel logout names, so it is what makes a session revocable.
+        "sid": "22222222-2222-2222-2222-222222222222",
         "iat": now(),
         "exp": now() + 300,
         "organization": ORG,
@@ -87,6 +90,27 @@ pub(crate) fn claims() -> Value {
 /// The same, holding the admin role on the `vs-api` client.
 pub(crate) fn admin_claims() -> Value {
     let mut c = claims();
+    c["resource_access"] = json!({ CLIENT_ID: { "roles": [ADMIN_ROLE] } });
+    c
+}
+
+/// Another member of the *same* organization: a different person, a different
+/// department, a different workspace. What read scoping inside an organization is about.
+pub(crate) const OTHER_SUBJECT: &str = "11111111-2222-3333-4444-555555555555";
+
+pub(crate) fn other_member_claims() -> Value {
+    let mut c = claims();
+    c["sub"] = json!(OTHER_SUBJECT);
+    c["jti"] = json!("55555555-5555-5555-5555-555555555555");
+    c["sid"] = json!("66666666-6666-6666-6666-666666666666");
+    c["department"] = json!("dept-b");
+    c["workspaces"] = json!(["ws-green"]);
+    c
+}
+
+/// Another member who holds the admin role.
+pub(crate) fn other_admin_claims() -> Value {
+    let mut c = other_member_claims();
     c["resource_access"] = json!({ CLIENT_ID: { "roles": [ADMIN_ROLE] } });
     c
 }
@@ -117,6 +141,7 @@ pub(crate) fn state() -> AppState {
         blob: Arc::new(vs_infra::ObjectBlobStore::new(Arc::new(object_store::memory::InMemory::new()))),
         bucket: "visual-suite".into(),
         api: ApiConfig::default(),
+        limiter: Arc::new(crate::limit::RateLimiter::new(0.0, 0.0)),
         steps: None,
         metrics: metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder().handle(),
     }
@@ -222,11 +247,34 @@ async fn a_bearer_header_that_is_not_one_is_refused() {
     assert_eq!(status_of(&s, req).await, StatusCode::OK);
 }
 
+#[tokio::test]
+async fn one_organization_over_its_rate_is_shed_and_told_when_to_come_back() {
+    // Back-pressure bounds documents in flight; it says nothing about request volume, so
+    // a tenant polling a status route in a loop used to cost Postgres on every call and
+    // show up nowhere. `/metrics` is used here because it is the one route that answers
+    // 200 without a database.
+    let mut s = state();
+    s.limiter = Arc::new(crate::limit::RateLimiter::new(1.0, 2.0));
+    let t = token(&admin_claims());
+    assert_eq!(status_of(&s, get_with("/metrics", Some(&t))).await, StatusCode::OK);
+    assert_eq!(status_of(&s, get_with("/metrics", Some(&t))).await, StatusCode::OK, "the burst");
+
+    let res = router(s.clone()).oneshot(get_with("/metrics", Some(&t))).await.expect("router");
+    assert_eq!(res.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert!(res.headers().contains_key("retry-after"), "a 429 without Retry-After leaves a client guessing");
+
+    // The limit is per organization, so another one is unaffected — and an
+    // *unauthenticated* request never reaches the limiter at all, so junk traffic cannot
+    // spend a tenant's budget.
+    assert_eq!(status_of(&s, get_with("/metrics", None)).await, StatusCode::UNAUTHORIZED);
+}
+
 // ───────────── the token ─────────────
 
 #[tokio::test]
 async fn a_valid_token_resolves_to_the_organization_the_person_and_their_roles() {
-    let p = verifier().verify(&token(&admin_claims())).await.expect("verify");
+    let claims = admin_claims();
+    let p = verifier().verify(&token(&claims)).await.expect("verify");
     assert_eq!(
         p,
         Principal {
@@ -239,8 +287,14 @@ async fn a_valid_token_resolves_to_the_organization_the_person_and_their_roles()
             roles: vec!["offline_access".into(), ADMIN_ROLE.into()],
             admin: true,
             token_id: Some("11111111-1111-1111-1111-111111111111".into()),
+            session_id: Some("22222222-2222-2222-2222-222222222222".into()),
+            issued_at: claims["iat"].as_i64(),
         }
     );
+    // What read scoping is evaluated against, and the one place the configuration gets
+    // a say: whether holding the admin role implies reading every document.
+    assert!(p.reader(true).admin);
+    assert!(!p.reader(false).admin, "api.admin_reads_all = false separates administration from access");
     // What gets recorded on a job, so read scoping within the organization can be
     // enforced later without re-plumbing.
     let owner = p.owner();
@@ -351,6 +405,143 @@ async fn a_token_of_the_wrong_type_is_not_an_access_token() {
         c["typ"] = json!(typ);
         assert_eq!(verifier().verify(&token(&c)).await.expect_err(typ).reason(), "typ", "a {typ} token was accepted");
     }
+}
+
+// ───────────── revocation ─────────────
+
+// A verified signature says the realm issued the token. It does not say the session
+// behind it still exists, and until there was a revocation list it could not: a token
+// stayed good for its `exp` however it had been ended. These four tests are that gap
+// closed.
+
+use chrono::{TimeDelta, Utc};
+use vs_vault::access::{Revocation, RevocationKind};
+
+fn revocation(kind: RevocationKind, id: &str, not_before: chrono::DateTime<Utc>) -> Revocation {
+    Revocation { kind, id: id.to_string(), not_before }
+}
+
+#[tokio::test]
+async fn a_revoked_session_stops_being_accepted_before_its_token_expires() {
+    let auth = verifier();
+    let t = token(&claims());
+    assert!(auth.verify(&t).await.is_ok(), "the token is valid to begin with");
+
+    // What a back-channel logout records: this session, from now on.
+    auth.set_revocations_for_test(vec![revocation(RevocationKind::Sid, "22222222-2222-2222-2222-222222222222", Utc::now())]).await;
+    let err = auth.verify(&t).await.expect_err("the session was revoked");
+    assert_eq!(err.reason(), "revoked");
+    assert_eq!(err.status(), StatusCode::UNAUTHORIZED, "a client that refreshes is right to; this is not a 403");
+}
+
+#[tokio::test]
+async fn revoking_one_token_leaves_the_rest_of_the_session_alone() {
+    let auth = verifier();
+    let mut other = claims();
+    other["jti"] = json!("33333333-3333-3333-3333-333333333333");
+    auth.set_revocations_for_test(vec![revocation(RevocationKind::Jti, "11111111-1111-1111-1111-111111111111", Utc::now())]).await;
+    assert!(auth.verify(&token(&claims())).await.is_err(), "the named token");
+    assert!(auth.verify(&token(&other)).await.is_ok(), "another token of the same session");
+}
+
+#[tokio::test]
+async fn a_person_wide_revocation_refuses_only_what_was_issued_before_it() {
+    // "Log me out everywhere" must not refuse the login the person makes straight
+    // afterwards, which is why a subject revocation carries an instant rather than
+    // being a ban.
+    let auth = verifier();
+    let logout_at = Utc::now();
+    auth.set_revocations_for_test(vec![revocation(RevocationKind::Subject, SUBJECT, logout_at)]).await;
+
+    let mut old = claims();
+    old["iat"] = json!(logout_at.timestamp() - 60);
+    assert!(auth.verify(&token(&old)).await.is_err(), "issued before the logout");
+
+    let mut fresh = claims();
+    fresh["iat"] = json!(logout_at.timestamp() + 5);
+    assert!(auth.verify(&token(&fresh)).await.is_ok(), "issued after it, by logging in again");
+
+    // A token with no `iat` cannot answer "was this issued before the logout", and the
+    // safe reading of an unanswerable question is the restrictive one.
+    let mut undated = claims();
+    undated.as_object_mut().expect("claims").remove("iat");
+    assert!(auth.verify(&token(&undated)).await.is_err(), "a token with no issue time is refused by a person-wide revocation");
+}
+
+#[tokio::test]
+async fn a_revocation_that_has_expired_stops_mattering() {
+    let auth = verifier();
+    // `live_revocations` filters these out in SQL; this is the in-memory half: a list
+    // built from rows whose instant is in the past still refuses tokens older than it,
+    // and nothing newer.
+    auth.set_revocations_for_test(vec![revocation(RevocationKind::Subject, SUBJECT, Utc::now() - TimeDelta::hours(2))]).await;
+    assert!(auth.verify(&token(&claims())).await.is_ok(), "a token issued since the revocation");
+}
+
+// ───────────── back-channel logout ─────────────
+
+/// The claims Keycloak posts when a session ends (OpenID Connect Back-Channel Logout
+/// 1.0 §2.4).
+fn logout_claims() -> Value {
+    json!({
+        "iss": ISSUER,
+        "aud": AUDIENCE,
+        "iat": now(),
+        "jti": "44444444-4444-4444-4444-444444444444",
+        "sid": "22222222-2222-2222-2222-222222222222",
+        "events": { "http://schemas.openid.net/event/backchannel-logout": {} },
+        "organization": ORG,
+    })
+}
+
+#[tokio::test]
+async fn a_logout_token_from_the_realm_names_the_session_to_end() {
+    let req = verifier().verify_logout_token(&token(&logout_claims())).await.expect("a well-formed logout token");
+    assert_eq!(req.session_id.as_deref(), Some("22222222-2222-2222-2222-222222222222"));
+    assert_eq!(req.tenant.map(|t| t.0).as_deref(), Some(ORG));
+}
+
+#[tokio::test]
+async fn an_id_token_is_not_a_logout_token() {
+    let auth = verifier();
+    // §2.6 forbids `nonce` precisely because an ID token has one: without this check, a
+    // captured login token would log the session out.
+    let mut with_nonce = logout_claims();
+    with_nonce["nonce"] = json!("n-123");
+    assert_eq!(auth.verify_logout_token(&token(&with_nonce)).await.expect_err("nonce").reason(), "logout_nonce");
+
+    // An access token is signed by the same key and would otherwise verify here.
+    assert_eq!(auth.verify_logout_token(&token(&claims())).await.expect_err("no events").reason(), "logout_events");
+
+    // Neither a session nor a person to act on.
+    let mut targetless = logout_claims();
+    targetless.as_object_mut().expect("claims").remove("sid");
+    assert_eq!(auth.verify_logout_token(&token(&targetless)).await.expect_err("no target").reason(), "logout_target");
+
+    // Captured and replayed later. Harmless in itself — it revokes a session that is
+    // already revoked — but a logout token is short-lived and this is the window.
+    let mut stale = logout_claims();
+    stale["iat"] = json!(now() - 3600);
+    assert_eq!(auth.verify_logout_token(&token(&stale)).await.expect_err("stale").reason(), "logout_stale");
+
+    // And the thing all of this rests on: a logout token nobody signed.
+    let unsigned = token(&logout_claims());
+    let tampered = format!("{}x", &unsigned[..unsigned.len() - 1]);
+    assert!(auth.verify_logout_token(&tampered).await.is_err(), "a forged signature");
+}
+
+#[tokio::test]
+async fn the_logout_route_refuses_an_unsigned_token_and_says_nothing_more() {
+    let s = state();
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/auth/backchannel-logout")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(Body::from("logout_token=not.a.token"))
+        .expect("request");
+    // No bearer token on this route, by design: the logout token's own signature is the
+    // authentication. An unsigned one is a 400 and nothing happens.
+    assert_eq!(status_of(&s, req).await, StatusCode::BAD_REQUEST);
 }
 
 // ───────────── the organization ─────────────

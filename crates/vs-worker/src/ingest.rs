@@ -29,6 +29,9 @@ pub struct IngestHandler {
     pub render_dpi: u32,
     pub thumbnail_px: u32,
     pub max_pages: u32,
+    /// How wide a newly uploaded document is open inside its organization
+    /// (`api.default_visibility`). Applied once, when the document is first seen.
+    pub default_visibility: vs_vault::Visibility,
 }
 
 impl IngestHandler {
@@ -76,6 +79,12 @@ impl IngestHandler {
             page_count,
         };
         self.vault.write_document(&run, spec, &meta).await?;
+        // Who may read this document, recorded here because this is the first point at
+        // which the document hash key exists. It does not overwrite: re-running a
+        // document keeps the first uploader and whatever has been shared since.
+        if self.ops.record_document_owner(&spec.tenant, &document_hk, spec.owner.as_ref(), self.default_visibility).await? {
+            tracing::debug!(%document_hk, visibility = self.default_visibility.as_str(), "recorded document ownership");
+        }
         self.ops.start_pages(job_id, &document_hk, page_count).await?;
 
         let pages = (1..=page_count)

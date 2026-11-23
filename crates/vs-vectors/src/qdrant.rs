@@ -2,10 +2,10 @@
 
 use async_trait::async_trait;
 use qdrant_client::qdrant::{
-    Condition, CreateCollectionBuilder, CreateFieldIndexCollectionBuilder, DeletePointsBuilder, Distance, FieldType,
-    Filter, HnswConfigDiffBuilder, KeywordIndexParamsBuilder, Modifier, PointStruct, Query, QueryPointsBuilder,
-    SparseVector, SparseVectorParamsBuilder, SparseVectorsConfigBuilder, UpsertPointsBuilder, Value,
-    VectorParamsBuilder, VectorsConfigBuilder,
+    Condition, CreateAliasBuilder, CreateCollectionBuilder, CreateFieldIndexCollectionBuilder, DeletePointsBuilder,
+    Distance, FieldType, Filter, Fusion, HnswConfigDiffBuilder, KeywordIndexParamsBuilder, Modifier, PointStruct,
+    PrefetchQueryBuilder, Query, QueryPointsBuilder, SparseVector, SparseVectorParamsBuilder,
+    SparseVectorsConfigBuilder, UpsertPointsBuilder, Value, VectorInput, VectorParamsBuilder, VectorsConfigBuilder,
 };
 use qdrant_client::{Payload, Qdrant};
 
@@ -13,7 +13,7 @@ use vs_core::{HashKey, TenantId};
 use vs_graph::{DocGraph, NodeKind, RunInfo, Vectors};
 
 use crate::sparse;
-use crate::{EntityHit, VectorError, VectorStore};
+use crate::{EntityHit, Hit, HybridQuery, Scope, VectorError, VectorStore};
 
 /// Named vectors on every point. Both names are part of the stored data: renaming one
 /// makes existing collections unqueryable.
@@ -41,11 +41,32 @@ pub struct QdrantConfig {
     pub collection_prefix: String,
     /// Points per upsert request.
     pub batch_size: usize,
+    /// Whether the server applies inverse document frequency to the sparse half.
+    ///
+    /// `true` (the default) is the better ranking and the thing BM25 needs: the client
+    /// sends term frequencies and Qdrant supplies IDF from the collection's own
+    /// statistics. The collection holds every tenant's points, so those statistics are
+    /// shared — a term's rarity is computed across organizations. No content crosses a
+    /// tenant boundary (every query is filtered, and the filter is an index, not a
+    /// post-pass), but a ranking that depends on other organizations' corpora is a
+    /// statistical side channel, and a deployment where that is unacceptable sets this
+    /// to `false` and gets saturated term frequencies alone: a weaker lexical ranking
+    /// computed entirely from the document in front of it.
+    ///
+    /// It is a per-collection property, so it cannot be changed under live points — see
+    /// `SPEC.md`.
+    pub idf: bool,
 }
 
 impl Default for QdrantConfig {
     fn default() -> Self {
-        Self { url: "http://127.0.0.1:6334".into(), api_key: None, collection_prefix: "vs".into(), batch_size: 256 }
+        Self {
+            url: "http://127.0.0.1:6334".into(),
+            api_key: None,
+            collection_prefix: "vs".into(),
+            batch_size: 256,
+            idf: true,
+        }
     }
 }
 
@@ -55,6 +76,7 @@ pub struct QdrantStore {
     sections: String,
     entities: String,
     batch_size: usize,
+    idf: bool,
 }
 
 fn unavailable(e: impl std::fmt::Display) -> VectorError {
@@ -75,7 +97,16 @@ impl QdrantStore {
             sections: format!("{p}_sections"),
             entities: format!("{p}_entities"),
             batch_size: cfg.batch_size.max(1),
+            idf: cfg.idf,
         })
+    }
+
+    fn collection_of(&self, scope: Scope) -> &str {
+        match scope {
+            Scope::Blocks => &self.blocks,
+            Scope::Sections => &self.sections,
+            Scope::Entities => &self.entities,
+        }
     }
 
     fn collection_for(&self, kind: NodeKind) -> Option<&str> {
@@ -87,21 +118,84 @@ impl QdrantStore {
         }
     }
 
-    /// Creates one collection with a dense and a sparse named vector, and the tenant
-    /// index. Existing collections are left alone — the dimension of a live collection
-    /// cannot be changed, so a dimension change is a new collection (see `SPEC.md`).
+    /// Creates one collection with a dense and a sparse named vector, the tenant index,
+    /// and an alias so the configured name is not the collection's own name.
+    ///
+    /// The indirection is what makes a dimension change possible at all. A live
+    /// collection's vector size cannot be altered, so the physical collection carries its
+    /// dimension in its name (`vs_blocks__d1024`) and `vs_blocks` is an alias pointing at
+    /// it: `migrate_dimensions` creates the next one and moves the alias, and every
+    /// reader keeps using the configured name throughout.
+    ///
+    /// An **existing** collection under the configured name — a deployment that predates
+    /// the alias — is left exactly as it is and used directly. Renaming it would be a
+    /// migration nobody asked for, and its points are still perfectly good.
     async fn ensure_collection(&self, name: &str, dimensions: usize) -> Result<(), VectorError> {
         if self.client.collection_exists(name).await.map_err(unavailable)? {
+            // Resolves through an alias as well, so this covers both layouts. The guard
+            // matters because the alternative is silent: Qdrant refuses each point whose
+            // vector is the wrong length, so a mismatch used to surface as every write
+            // failing, one document at a time, with nothing saying why.
+            if let Some(existing) = self.dimensions_of(name).await? {
+                if existing != dimensions {
+                    return Err(VectorError::Config(format!(
+                        "collection {name} holds {existing}-dimensional vectors and this process embeds {dimensions}-dimensional ones; \
+                         run `vs-suite vectors migrate` to create a collection for the new dimension (the documents then have to be re-run), \
+                         or point [qdrant].collection_prefix at a different deployment"
+                    )));
+                }
+            }
             return Ok(());
         }
+        let physical = physical_name(name, dimensions);
+        if !self.client.collection_exists(&physical).await.map_err(unavailable)? {
+            self.create_collection(&physical, dimensions).await?;
+        }
+        self.alias(name, &physical).await?;
+        Ok(())
+    }
+
+    /// The dense vector size of a collection, resolving aliases. `None` when the
+    /// collection reports no dense vector configuration, which is not a shape this
+    /// crate writes.
+    async fn dimensions_of(&self, name: &str) -> Result<Option<usize>, VectorError> {
+        use qdrant_client::qdrant::vectors_config::Config as VConfig;
+        let info = self.client.collection_info(name).await.map_err(unavailable)?;
+        let params = info.result.and_then(|r| r.config).and_then(|c| c.params);
+        let Some(cfg) = params.and_then(|p| p.vectors_config).and_then(|v| v.config) else {
+            return Ok(None);
+        };
+        Ok(match cfg {
+            VConfig::Params(p) => Some(p.size as usize),
+            VConfig::ParamsMap(m) => m.map.get(DENSE).map(|p| p.size as usize),
+        })
+    }
+
+    /// Points `alias` at `collection`, replacing whatever it pointed at before.
+    async fn alias(&self, alias: &str, collection: &str) -> Result<(), VectorError> {
+        self.client
+            .create_alias(CreateAliasBuilder::new(collection, alias))
+            .await
+            .map_err(|e| VectorError::Unavailable(format!("alias {alias} -> {collection}: {e}")))?;
+        tracing::info!(alias, collection, "qdrant alias set");
+        Ok(())
+    }
+
+    async fn create_collection(&self, name: &str, dimensions: usize) -> Result<(), VectorError> {
         let mut dense = VectorsConfigBuilder::default();
         dense.add_named_vector_params(DENSE, VectorParamsBuilder::new(dimensions as u64, Distance::Cosine).build());
 
         let mut sparse_cfg = SparseVectorsConfigBuilder::default();
         // `Modifier::Idf` makes the server apply inverse document frequency, so the
         // client only has to send term frequencies. This is what lets the sparse half
-        // work without an embedding model.
-        sparse_cfg.add_named_vector_params(SPARSE, SparseVectorParamsBuilder::default().modifier(Modifier::Idf).build());
+        // work without an embedding model — and what makes the statistics behind the
+        // ranking collection-wide rather than per tenant, which `[qdrant].idf = false`
+        // is there to opt out of.
+        let mut params = SparseVectorParamsBuilder::default();
+        if self.idf {
+            params = params.modifier(Modifier::Idf);
+        }
+        sparse_cfg.add_named_vector_params(SPARSE, params.build());
 
         let create = CreateCollectionBuilder::new(name)
             .vectors_config(dense)
@@ -120,7 +214,7 @@ impl QdrantStore {
             Err(e) => return Err(unavailable(e)),
         }
         self.ensure_tenant_index(name).await?;
-        tracing::info!(collection = name, dimensions, "qdrant collection created");
+        tracing::info!(collection = name, dimensions, idf = self.idf, "qdrant collection created");
         Ok(())
     }
 
@@ -151,6 +245,14 @@ impl QdrantStore {
             .map_err(unavailable)?;
         Ok(())
     }
+}
+
+/// The collection behind an alias, for a given dimension.
+///
+/// Two underscores so it cannot collide with a prefix a deployment chose: `vs_blocks`
+/// and `vs__d768` are both plausible configured names, `vs_blocks__d768` is not.
+fn physical_name(alias: &str, dimensions: usize) -> String {
+    format!("{alias}__d{dimensions}")
 }
 
 /// Qdrant point ids must be integers or UUIDs, and our keys are neither: a `block_hk` is
@@ -302,6 +404,125 @@ impl VectorStore for QdrantStore {
                 Some(EntityHit { entity_hk: key, type_id, vector })
             })
             .collect())
+    }
+
+    async fn search(&self, tenant: &TenantId, scope: Scope, q: &HybridQuery) -> Result<Vec<Hit>, VectorError> {
+        if q.is_empty() {
+            return Ok(vec![]);
+        }
+        let collection = self.collection_of(scope);
+        let mut filter = vec![Condition::matches(TENANT, tenant.as_str().to_string())];
+        if let Some(doc) = &q.document_hk {
+            filter.push(Condition::matches(DOCUMENT_HK, doc.clone()));
+        }
+        let filter = Filter::must(filter);
+        let limit = q.limit as u64;
+        let prefetch = q.prefetch_limit() as u64;
+        let dense = q.dense.as_ref().filter(|d| !d.is_empty());
+        let sparse = q.text.as_deref().map(sparse::encode).filter(|s| !s.is_empty());
+
+        let mut builder = QueryPointsBuilder::new(collection)
+            .filter(filter.clone())
+            .limit(limit)
+            .with_payload(true)
+            .with_vectors(q.with_vector);
+
+        builder = match (dense, &sparse) {
+            // Both halves: each is prefetched on its own index and the server fuses the
+            // two candidate lists. Reciprocal rank fusion, because the two scores are
+            // not comparable — a cosine similarity and a BM25 score have neither the
+            // same scale nor the same distribution, so fusing by *rank* is the only
+            // combination that needs no per-corpus tuning.
+            (Some(d), Some(s)) => builder
+                .add_prefetch(
+                    PrefetchQueryBuilder::default()
+                        .query(Query::new_nearest(d.to_vec()))
+                        .using(DENSE)
+                        .filter(filter.clone())
+                        .limit(prefetch),
+                )
+                .add_prefetch(
+                    PrefetchQueryBuilder::default()
+                        .query(Query::new_nearest(VectorInput::new_sparse(s.indices.clone(), s.values.clone())))
+                        .using(SPARSE)
+                        .filter(filter)
+                        .limit(prefetch),
+                )
+                .query(Query::new_fusion(Fusion::Rrf)),
+            (Some(d), None) => builder.query(Query::new_nearest(d.to_vec())).using(DENSE),
+            (None, Some(s)) => builder
+                .query(Query::new_nearest(VectorInput::new_sparse(s.indices.clone(), s.values.clone())))
+                .using(SPARSE),
+            // `is_empty` already refused a query with neither half — but a query whose
+            // text tokenised to nothing (`"(3)"`) lands here too, and it is not an error.
+            (None, None) => return Ok(vec![]),
+        };
+
+        let response = self.client.query(builder).await.map_err(unavailable)?;
+        let hits: Vec<Hit> = response
+            .result
+            .into_iter()
+            .filter_map(|p| {
+                let key = p.payload.get(KEY)?.as_str()?.to_string();
+                Some(Hit {
+                    key,
+                    score: p.score,
+                    document_hk: p.payload.get(DOCUMENT_HK).and_then(|v| v.as_str()).cloned(),
+                    run_id: p.payload.get(RUN_ID).and_then(|v| v.as_str()).cloned(),
+                    page_no: p.payload.get(PAGE_NO).and_then(|v| v.as_integer()),
+                    type_id: p.payload.get(TYPE_ID).and_then(|v| v.as_str()).cloned(),
+                    vector: dense_of(p.vectors),
+                })
+            })
+            .collect();
+        metrics::counter!("vectors_searches_total", "scope" => scope.as_str(), "mode" => mode_label(q)).increment(1);
+        Ok(hits)
+    }
+
+    async fn migrate_dimensions(&self, dimensions: usize) -> Result<Vec<String>, VectorError> {
+        if dimensions == 0 {
+            return Err(VectorError::Config("embedding dimensions must be non-zero".into()));
+        }
+        let mut report = Vec::new();
+        for alias in [&self.blocks, &self.sections, &self.entities] {
+            let physical = physical_name(alias, dimensions);
+            // A collection under the configured name that is *not* an alias cannot be
+            // migrated by moving one: Qdrant will not create an alias that shadows a
+            // real collection. Say so plainly rather than failing with its error.
+            let aliases = self.client.list_collection_aliases(alias.as_str()).await.ok();
+            let shadowed = self.client.collection_exists(alias).await.map_err(unavailable)? && aliases.is_none();
+            if shadowed {
+                return Err(VectorError::Config(format!(
+                    "{alias} is a collection, not an alias: this deployment predates aliased collections. \
+                     Rename or drop it first (its points are only recoverable by re-running the documents), \
+                     or set [qdrant].collection_prefix to a new prefix and re-run."
+                )));
+            }
+            if self.client.collection_exists(&physical).await.map_err(unavailable)? {
+                report.push(format!("{physical} already exists"));
+            } else {
+                self.create_collection(&physical, dimensions).await?;
+                report.push(format!("created {physical}"));
+            }
+            self.alias(alias, &physical).await?;
+            report.push(format!("{alias} -> {physical}"));
+        }
+        report.push(
+            "the previous collections are untouched; their vectors cannot be converted, so re-run the documents whose \
+             embeddings you want searchable at the new dimension"
+                .into(),
+        );
+        Ok(report)
+    }
+}
+
+/// Which halves a query used, for the metric label.
+fn mode_label(q: &HybridQuery) -> &'static str {
+    match (q.dense.as_ref().is_some_and(|d| !d.is_empty()), q.text.as_deref().is_some_and(|t| !t.is_empty())) {
+        (true, true) => "hybrid",
+        (true, false) => "dense",
+        (false, true) => "lexical",
+        (false, false) => "empty",
     }
 }
 

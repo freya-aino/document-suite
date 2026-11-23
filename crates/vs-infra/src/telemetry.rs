@@ -74,7 +74,7 @@ pub fn init(cfg: &TelemetryConfig, service: &str) -> anyhow::Result<Telemetry> {
     // subscriber so that an unreachable or malformed endpoint is a startup error rather
     // than a silent fallback to logs-only.
     let traces = match &cfg.otlp_endpoint {
-        Some(endpoint) => Some(trace_provider(endpoint, service)?),
+        Some(endpoint) => Some(trace_provider(endpoint, service, cfg.sample_ratio)?),
         None => {
             tracing::debug!("telemetry.otlp_endpoint unset; spans go to the logs only");
             None
@@ -119,12 +119,37 @@ pub fn init(cfg: &TelemetryConfig, service: &str) -> anyhow::Result<Telemetry> {
     Ok(Telemetry { metrics, traces })
 }
 
+/// The sampler for a given ratio.
+///
+/// Parent-based around a ratio sampler, which is the combination that matters: the ratio
+/// decides whether a *trace* is recorded, at the span that starts it, and every span
+/// below it then follows its parent's decision. Sampling each span independently would
+/// export fragments of traces — a Stage 2 span with no document span above it — which is
+/// worse than exporting fewer whole ones.
+///
+/// 1.0 (the default) is `AlwaysOn`, not a ratio sampler with probability 1, so the
+/// common case carries no sampling decision at all. A ratio outside 0.0..=1.0 is clamped
+/// rather than refused: a typo in a telemetry setting should not stop the service, and
+/// the clamp is logged.
+fn sampler(ratio: f64) -> opentelemetry_sdk::trace::Sampler {
+    use opentelemetry_sdk::trace::Sampler;
+    let r = if ratio.is_nan() { 1.0 } else { ratio.clamp(0.0, 1.0) };
+    if r != ratio {
+        tracing::warn!(configured = ratio, used = r, "telemetry.sample_ratio is outside 0.0..=1.0; clamped");
+    }
+    match r {
+        r if r >= 1.0 => Sampler::ParentBased(Box::new(Sampler::AlwaysOn)),
+        r if r <= 0.0 => Sampler::ParentBased(Box::new(Sampler::AlwaysOff)),
+        r => Sampler::ParentBased(Box::new(Sampler::TraceIdRatioBased(r))),
+    }
+}
+
 /// Batch-exports spans over OTLP HTTP/protobuf.
 ///
 /// HTTP rather than gRPC because `reqwest` with rustls is already a dependency of this
 /// crate and `tonic` is not, and every collector speaks both. The consequence for a
 /// deployment is the port: OTLP/HTTP is 4318, not gRPC's 4317.
-fn trace_provider(endpoint: &str, service: &str) -> anyhow::Result<SdkTracerProvider> {
+fn trace_provider(endpoint: &str, service: &str, sample_ratio: f64) -> anyhow::Result<SdkTracerProvider> {
     use opentelemetry_otlp::WithExportConfig as _;
     let exporter = opentelemetry_otlp::SpanExporter::builder()
         .with_http()
@@ -133,6 +158,7 @@ fn trace_provider(endpoint: &str, service: &str) -> anyhow::Result<SdkTracerProv
         .build()?;
     Ok(SdkTracerProvider::builder()
         .with_batch_exporter(exporter)
+        .with_sampler(sampler(sample_ratio))
         // The same name the Prometheus series carry, so a trace and a counter from the
         // same process are joinable.
         .with_resource(opentelemetry_sdk::Resource::builder().with_service_name(service.to_string()).build())

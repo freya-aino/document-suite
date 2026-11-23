@@ -4276,6 +4276,7 @@ dependencies = [
  "chrono",
  "clap",
  "futures",
+ "metrics",
  "metrics-exporter-prometheus",
  "object_store",
  "reqwest",
@@ -4323,6 +4324,7 @@ name = "vs-vectors"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "metrics",
  "qdrant-client",
  "serde_json",
  "thiserror",

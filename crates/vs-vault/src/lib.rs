@@ -1,10 +1,12 @@
 //! Data Vault 2.0 writer. See `SPEC.md`.
 
+pub mod access;
 mod graph;
 pub mod ontology;
 pub mod ops;
 pub mod resolve;
 
+pub use access::{DocumentAccess, GranteeKind, Reader, Visibility};
 pub use graph::READING_ORDER_QUERY;
 pub use ontology::PgOntologyStore;
 pub use resolve::PgCorpusResolver;
@@ -34,10 +36,10 @@ pub async fn check_migrations(pool: &PgPool) -> Result<(), VaultError> {
     let applied: Vec<(i64, Vec<u8>)> = sqlx::query_as("SELECT version, checksum FROM _sqlx_migrations WHERE success")
         .fetch_all(pool)
         .await
-        .map_err(|e| VaultError::Schema(format!("cannot read migration history ({e}); run `vs-api migrate`")))?;
+        .map_err(|e| VaultError::Schema(format!("cannot read migration history ({e}); run `vs-suite migrate`")))?;
     for m in MIGRATOR.iter() {
         match applied.iter().find(|(v, _)| *v == m.version) {
-            None => return Err(VaultError::Schema(format!("migration {} ({}) not applied; run `vs-api migrate`", m.version, m.description))),
+            None => return Err(VaultError::Schema(format!("migration {} ({}) not applied; run `vs-suite migrate`", m.version, m.description))),
             Some((_, sum)) if sum.as_slice() != m.checksum.as_ref() => {
                 return Err(VaultError::Schema(format!("migration {} changed after it was applied", m.version)))
             }

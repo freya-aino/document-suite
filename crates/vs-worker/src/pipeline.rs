@@ -67,6 +67,12 @@ pub struct PipelineConfig {
     pub interactive_share: f32,
     /// Attempts per page before it is recorded failed. 1 disables retrying.
     pub page_attempts: u32,
+    /// Who this process says it is when it claims a document. One string per process —
+    /// `vs_worker::holder_id` builds one — because two copies must never look like the
+    /// same lease holder.
+    pub holder: String,
+    /// How long a claim is good for before another copy may take the document.
+    pub lease_ttl: Duration,
 }
 
 /// The three stages, and the page slots they share.
@@ -101,6 +107,17 @@ impl Pipeline {
     /// On failure the job row is left `failed` with the reason, because nothing else will
     /// pick it up: this process is the only thing that knows about the document.
     pub async fn run(&self, job_id: uuid::Uuid, run_id: RunId, spec: &JobSpec) -> Result<(), TaskError> {
+        // Claim the document before any work on it. This is what stops two copies from
+        // processing the same document after a resume sweep: the writes are idempotent
+        // either way (§5.4), but the model calls are the expensive part and they are not.
+        if !self.ops.take_lease(job_id, &self.cfg.holder, self.cfg.lease_ttl).await? {
+            tracing::info!(%job_id, "another copy holds this document; leaving it alone");
+            metrics::counter!("worker_lease_contended_total").increment(1);
+            return Ok(());
+        }
+        // Renewed for as long as this document is being worked on, so the lease lapses
+        // only when the process stops — which is what a crash looks like from outside.
+        let _lease = Lease::renewing(self.ops.clone(), job_id, self.cfg.holder.clone(), self.cfg.lease_ttl);
         match self.stages(job_id, run_id, spec).await {
             Ok(()) => Ok(()),
             Err(e) => {
@@ -180,6 +197,63 @@ impl Pipeline {
         in_flight(stage, -1.0);
         record(stage, if result.is_ok() { "ok" } else { "error" }, started);
         result
+    }
+}
+
+/// Holds a document's lease, renewing it until dropped.
+///
+/// A guard rather than a pair of calls because every exit from the document — finished,
+/// failed, or a panic in a stage — has to release it. Dropping it aborts the renewal and
+/// releases the lease, so the next sweep can pick the document up immediately instead of
+/// waiting out the TTL.
+struct Lease {
+    renewer: tokio::task::JoinHandle<()>,
+    ops: Arc<Ops>,
+    job_id: uuid::Uuid,
+    holder: String,
+}
+
+impl Lease {
+    fn renewing(ops: Arc<Ops>, job_id: uuid::Uuid, holder: String, ttl: Duration) -> Self {
+        // A third of the TTL: two renewals may be lost — a slow query, a paused
+        // scheduler — before anything else considers the document abandoned.
+        let period = (ttl / 3).max(Duration::from_secs(1));
+        let renewer = tokio::spawn({
+            let (ops, holder) = (ops.clone(), holder.clone());
+            async move {
+                let mut tick = tokio::time::interval(period);
+                tick.tick().await;
+                loop {
+                    tick.tick().await;
+                    match ops.renew_lease(job_id, &holder, ttl).await {
+                        Ok(true) => {}
+                        // Taken by another copy: this one's writes are still idempotent,
+                        // so the work is not wrong, only duplicated. Worth a warning
+                        // because it means a lease expired while work was in progress.
+                        Ok(false) => {
+                            tracing::warn!(%job_id, "lost the lease on a document still being processed");
+                            return;
+                        }
+                        Err(e) => tracing::warn!(%job_id, error = %e, "could not renew the document lease"),
+                    }
+                }
+            }
+        });
+        Self { renewer, ops, job_id, holder }
+    }
+}
+
+impl Drop for Lease {
+    fn drop(&mut self) {
+        self.renewer.abort();
+        // Fire-and-forget: `Drop` cannot await, and a release that fails only means the
+        // lease expires on its own.
+        let (ops, job_id, holder) = (self.ops.clone(), self.job_id, self.holder.clone());
+        tokio::spawn(async move {
+            if let Err(e) = ops.release_lease(job_id, &holder).await {
+                tracing::debug!(%job_id, error = %e, "could not release the document lease; it will expire");
+            }
+        });
     }
 }
 

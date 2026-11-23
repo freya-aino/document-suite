@@ -31,6 +31,16 @@ use vs_vectors::{QdrantConfig, QdrantStore, VectorStore};
 /// Refuses a document this long before rendering any of it.
 pub const MAX_PAGES: u32 = 5_000;
 
+/// Who this process says it is when it claims a document.
+///
+/// Host and pid identify it to a person reading the table; the random suffix is what
+/// makes it *unique*, because two copies in two containers can share both — and a lease
+/// holder that is not unique is a lease that two processes think they hold.
+pub fn holder_id() -> String {
+    let host = std::env::var("HOSTNAME").ok().filter(|h| !h.is_empty()).unwrap_or_else(|| "host".into());
+    format!("{host}/{}/{}", std::process::id(), &uuid::Uuid::now_v7().simple().to_string()[..8])
+}
+
 /// Everything a handler needs that does not come out of the config file.
 pub struct Deps {
     pub pool: sqlx::PgPool,
@@ -81,6 +91,8 @@ pub async fn build_pipeline(cfg: &Config, deps: Deps) -> anyhow::Result<Pipeline
     let steps = Arc::new(vs_steps::production_registry(models.client.clone()));
     let classify = classify_config(cfg)?;
 
+    let default_visibility = vs_vault::Visibility::parse(cfg.api.default_visibility.trim())
+        .ok_or_else(|| anyhow::anyhow!("api.default_visibility {:?}: expected private, department, workspace or organization", cfg.api.default_visibility))?;
     let ingest = ingest::IngestHandler {
         blob: blob.clone(),
         vault: vault.clone(),
@@ -94,6 +106,7 @@ pub async fn build_pipeline(cfg: &Config, deps: Deps) -> anyhow::Result<Pipeline
         // disagree about what they are passing each other.
         thumbnail_px: classify.thumbnail_long_side_px,
         max_pages: MAX_PAGES,
+        default_visibility,
     };
 
     let vision: Option<Arc<dyn vs_classify::VisionClassifier>> = match &cfg.stage2.classifier_model {
@@ -128,6 +141,7 @@ pub async fn build_pipeline(cfg: &Config, deps: Deps) -> anyhow::Result<Pipeline
         api_key: cfg.qdrant.api_key_env.as_deref().and_then(|v| std::env::var(v).ok()),
         collection_prefix: cfg.qdrant.collection_prefix.clone(),
         batch_size: cfg.qdrant.batch_size,
+        idf: cfg.qdrant.idf,
     })?);
     // Collections are sized by the embedder, so this must happen after it is built and
     // before the first document: a wrong dimension is unrecoverable once points exist.
@@ -171,6 +185,8 @@ pub async fn build_pipeline(cfg: &Config, deps: Deps) -> anyhow::Result<Pipeline
             max_pages_in_flight: cfg.worker.max_in_flight,
             interactive_share: cfg.worker.interactive_share,
             page_attempts: cfg.worker.page_attempts,
+            holder: holder_id(),
+            lease_ttl: Duration::from_secs(cfg.worker.lease_ttl_s.max(10)),
         },
     ))
 }

@@ -77,6 +77,9 @@ async fn state(pool: PgPool, in_flight: u64) -> (AppState, Arc<FakeDispatch>) {
         blob,
         bucket: BUCKET.into(),
         api: ApiConfig { interactive_max_pending: 10, ..Default::default() },
+        // Off: these tests make many requests as one organization, and the limiter has
+        // its own tests in `limit`.
+        limiter: Arc::new(crate::limit::RateLimiter::new(0.0, 0.0)),
         // DAG-list uploads are validated against the production registry, which needs a
         // model registry; the activation test does not go through the upload route.
         steps: None,
@@ -309,4 +312,257 @@ async fn activating_a_dag_list_leaves_exactly_one_active_in_the_scope(pool: PgPo
         .expect("request");
     assert_eq!(send(&s, not_admin).await.0, StatusCode::FORBIDDEN);
     assert_eq!(ops.active_dag_list_version(&tenant).await.expect("version").as_deref(), Some("v2"));
+}
+
+// ───────────── read scoping inside the organization ─────────────
+
+// The organization boundary held all along; this is the part that did not exist. Every
+// test below has two members of **one** organization, which is the case the old API
+// could not express: `t1` reading `t1`'s documents was always allowed, whoever asked.
+
+use super::auth_tests::{other_admin_claims, other_member_claims, OTHER_SUBJECT};
+use vs_core::HashKey;
+use vs_vault::access::{GranteeKind, Visibility};
+
+/// A request as whichever member the claims name.
+fn as_member(method: &str, path: &str, claims: &Value, body: Option<Value>) -> Request<Body> {
+    let mut b = Request::builder().method(method).uri(path).header("authorization", format!("Bearer {}", token(claims)));
+    if body.is_some() {
+        b = b.header("content-type", "application/json");
+    }
+    b.body(body.map(|v| Body::from(v.to_string())).unwrap_or_else(Body::empty)).expect("request")
+}
+
+/// A document owned by the token's own subject, at the given visibility.
+async fn owned_document(ops: &Ops, visibility: Visibility) -> HashKey {
+    let hk = HashKey::document(&TenantId(TENANT.into()), &"a".repeat(64));
+    let owner = vs_core::Owner { subject: SUBJECT.into(), department: Some("dept-a".into()), workspaces: vec!["ws-red".into()] };
+    assert!(ops
+        .record_document_owner(&TenantId(TENANT.into()), &hk, Some(&owner), visibility)
+        .await
+        .expect("record owner"));
+    hk
+}
+
+/// The read reached the store: there is no vault row behind these hash keys, so a
+/// caller who passes the access check gets "not found" and one who does not gets 403.
+/// Distinguishing the two is the whole point — a 404 for both would hide a working check
+/// from a broken one.
+const PASSED_THE_CHECK: StatusCode = StatusCode::NOT_FOUND;
+
+#[sqlx::test(migrator = "vs_vault::MIGRATOR")]
+#[ignore = "needs Postgres from `devenv up`"]
+async fn a_private_document_is_not_readable_by_another_member_of_the_same_organization(pool: PgPool) {
+    let (s, _) = state(pool.clone(), 0).await;
+    let ops = Ops { pool: pool.clone() };
+    let hk = owned_document(&ops, Visibility::Private).await;
+    let doc = format!("/v1/documents/{hk}");
+
+    let (status, body) = send(&s, as_member("GET", &doc, &claims(), None)).await;
+    assert_eq!(status, PASSED_THE_CHECK, "the owner must reach the store: {body}");
+
+    let (status, body) = send(&s, as_member("GET", &doc, &other_member_claims(), None)).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "a colleague read a private document: {body}");
+    // The page bytes are the actual payload, so the same check has to be on that route.
+    let (status, _) = send(&s, as_member("GET", &format!("{doc}/pages/1"), &other_member_claims(), None)).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "the page route is not scoped");
+
+    // And an administrator of the organization does reach it, because `admin_reads_all`
+    // defaults to true — the setting that decides it is the deployment's.
+    let (status, _) = send(&s, as_member("GET", &doc, &other_admin_claims(), None)).await;
+    assert_eq!(status, PASSED_THE_CHECK, "an administrator is refused by default");
+}
+
+#[sqlx::test(migrator = "vs_vault::MIGRATOR")]
+#[ignore = "needs Postgres from `devenv up`"]
+async fn visibility_and_grants_open_a_document_and_close_it_again(pool: PgPool) {
+    let (s, _) = state(pool.clone(), 0).await;
+    let ops = Ops { pool: pool.clone() };
+    let hk = owned_document(&ops, Visibility::Private).await;
+    let (doc, other) = (format!("/v1/documents/{hk}"), other_member_claims());
+
+    // Widened to the whole organization: what every document used to be.
+    let (status, body) = send(&s, as_member("PUT", &format!("{doc}/access"), &claims(), Some(json!({ "visibility": "organization" })))).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(send(&s, as_member("GET", &doc, &other, None)).await.0, PASSED_THE_CHECK);
+
+    // Narrowed again. A share that cannot be withdrawn is not a share, and this is why
+    // the rows are in `ops` and not in the insert-only vault.
+    let (status, _) = send(&s, as_member("PUT", &format!("{doc}/access"), &claims(), Some(json!({ "visibility": "private" })))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(send(&s, as_member("GET", &doc, &other, None)).await.0, StatusCode::FORBIDDEN);
+
+    // One named exception, by person.
+    let grant = json!({ "kind": "subject", "id": OTHER_SUBJECT });
+    let (status, body) = send(&s, as_member("POST", &format!("{doc}/grants"), &claims(), Some(grant.clone()))).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(send(&s, as_member("GET", &doc, &other, None)).await.0, PASSED_THE_CHECK, "a grant did not open the document");
+    // Granting twice is one grant, not two rows and not an error.
+    assert_eq!(send(&s, as_member("POST", &format!("{doc}/grants"), &claims(), Some(grant))).await.0, StatusCode::CREATED);
+    assert_eq!(ops.document_grants(&TenantId(TENANT.into()), &hk).await.expect("grants").len(), 1);
+
+    let (status, _) = send(&s, as_member("DELETE", &format!("{doc}/grants/subject/{OTHER_SUBJECT}"), &claims(), None)).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(send(&s, as_member("GET", &doc, &other, None)).await.0, StatusCode::FORBIDDEN, "the grant was withdrawn");
+
+    // A workspace grant reaches a member through a workspace rather than by name.
+    let (status, _) =
+        send(&s, as_member("POST", &format!("{doc}/grants"), &claims(), Some(json!({ "kind": "workspace", "id": "ws-green" })))).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(send(&s, as_member("GET", &doc, &other, None)).await.0, PASSED_THE_CHECK);
+}
+
+#[sqlx::test(migrator = "vs_vault::MIGRATOR")]
+#[ignore = "needs Postgres from `devenv up`"]
+async fn only_the_owner_or_an_administrator_decides_who_reads_a_document(pool: PgPool) {
+    let (s, _) = state(pool.clone(), 0).await;
+    let ops = Ops { pool: pool.clone() };
+    let hk = owned_document(&ops, Visibility::Organization).await;
+    let access = format!("/v1/documents/{hk}/access");
+
+    // Readable by the whole organization, and still not re-shareable by anyone in it:
+    // reading a document and changing who else can are different powers.
+    let (status, body) = send(&s, as_member("PUT", &access, &other_member_claims(), Some(json!({ "visibility": "private" })))).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(
+        ops.document_access(&TenantId(TENANT.into()), &hk).await.expect("access").expect("row").visibility,
+        Visibility::Organization,
+        "a refused request changed the visibility anyway"
+    );
+
+    let (status, _) = send(&s, as_member("PUT", &access, &other_admin_claims(), Some(json!({ "visibility": "private" })))).await;
+    assert_eq!(status, StatusCode::OK, "an administrator must be able to fix a mis-shared document");
+
+    // A visibility that is not one of the four.
+    let (status, _) = send(&s, as_member("PUT", &access, &claims(), Some(json!({ "visibility": "everyone" })))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // The owner sees who owns it; another member is not handed a personal identifier.
+    let (_, body) = send(&s, as_member("GET", &access, &claims(), None)).await;
+    assert_eq!(body["owner"].as_str(), Some(SUBJECT));
+    let (_, body) = send(&s, as_member("GET", &access, &other_admin_claims(), None)).await;
+    assert_eq!(body["owner"].as_str(), Some(SUBJECT), "an administrator may ask whose it is");
+}
+
+#[sqlx::test(migrator = "vs_vault::MIGRATOR")]
+#[ignore = "needs Postgres from `devenv up`"]
+async fn the_document_listing_answers_what_this_caller_can_read(pool: PgPool) {
+    // Once a member cannot necessarily read everything, "what can I read" stops being
+    // answerable by the caller and has to be answered here.
+    let (s, _) = state(pool.clone(), 0).await;
+    let ops = Ops { pool: pool.clone() };
+    let tenant = TenantId(TENANT.into());
+    let owner = vs_core::Owner { subject: SUBJECT.into(), department: Some("dept-a".into()), workspaces: vec!["ws-red".into()] };
+    let mut keys = Vec::new();
+    for (i, v) in [Visibility::Private, Visibility::Organization, Visibility::Workspace, Visibility::Department].into_iter().enumerate() {
+        let hk = HashKey::document(&tenant, &format!("{i}").repeat(64));
+        ops.record_document_owner(&tenant, &hk, Some(&owner), v).await.expect("record");
+        keys.push((hk, v));
+    }
+    // A fifth with no owner at all: the shape every document had before scoping existed.
+    let legacy = HashKey::document(&tenant, &"f".repeat(64));
+    ops.record_document_owner(&tenant, &legacy, None, Visibility::Private).await.expect("record");
+
+    let hks = |body: &Value| -> Vec<String> {
+        body["documents"].as_array().expect("documents").iter().map(|d| d["document_hk"].as_str().expect("hk").to_string()).collect()
+    };
+    let (status, body) = send(&s, as_member("GET", "/v1/documents", &claims(), None)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(hks(&body).len(), 5, "the owner reads all of their own, and the ownerless one: {body}");
+
+    let (_, body) = send(&s, as_member("GET", "/v1/documents", &other_member_claims(), None)).await;
+    let visible = hks(&body);
+    // Organization-wide, plus the ownerless one. Not the private one, not the owner's
+    // department (`dept-a` against `dept-b`), not the owner's workspace (`ws-red`
+    // against `ws-green`).
+    assert_eq!(visible.len(), 2, "another member saw {visible:?}");
+    assert!(visible.contains(&legacy.to_string()));
+    assert!(visible.contains(&keys[1].0.to_string()));
+
+    // A grant shows up in the listing too, which is the case the SQL predicate and
+    // `may_read` have to agree about.
+    ops.grant_document(&tenant, &keys[0].0, GranteeKind::Subject, OTHER_SUBJECT, Some(SUBJECT)).await.expect("grant");
+    let (_, body) = send(&s, as_member("GET", "/v1/documents", &other_member_claims(), None)).await;
+    assert_eq!(hks(&body).len(), 3, "a granted document is missing from the listing: {body}");
+}
+
+#[sqlx::test(migrator = "vs_vault::MIGRATOR")]
+#[ignore = "needs Postgres from `devenv up`"]
+async fn a_jobs_status_belongs_to_the_person_who_asked_for_it(pool: PgPool) {
+    let (s, _) = state(pool.clone(), 0).await;
+    let (status, created) = send(&s, post("/v1/documents", json!({ "language": "en", "source_uri": "originals/t1/a" }))).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{created}");
+    let job = format!("/v1/jobs/{}", created["job_id"].as_str().expect("job id"));
+
+    assert_eq!(send(&s, as_member("GET", &job, &claims(), None)).await.0, StatusCode::OK, "the asker");
+    let (status, body) = send(&s, as_member("GET", &job, &other_member_claims(), None)).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "another member read someone else's job: {body}");
+    assert_eq!(send(&s, as_member("GET", &job, &other_admin_claims(), None)).await.0, StatusCode::OK, "an administrator");
+}
+
+#[sqlx::test(migrator = "vs_vault::MIGRATOR")]
+#[ignore = "needs Postgres from `devenv up`"]
+async fn erasure_removes_the_person_and_leaves_the_organizations_work(pool: PgPool) {
+    let (s, _) = state(pool.clone(), 0).await;
+    let ops = Ops { pool: pool.clone() };
+    let tenant = TenantId(TENANT.into());
+    let (status, created) = send(&s, post("/v1/documents", json!({ "language": "en", "source_uri": "originals/t1/a" }))).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{created}");
+    let hk = owned_document(&ops, Visibility::Private).await;
+
+    // Another member cannot erase a person; the person themselves can, without an
+    // administrator relaying it.
+    let path = format!("/v1/owners/{SUBJECT}");
+    assert_eq!(send(&s, as_member("DELETE", &path, &other_member_claims(), None)).await.0, StatusCode::FORBIDDEN);
+    let (status, body) = send(&s, as_member("DELETE", &path, &claims(), None)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["jobs"], 1);
+    assert_eq!(body["documents"], 1);
+
+    // The job row stays — the organization's record of what it processed is not the
+    // person's to erase — and carries no subject any more, in the column or in the spec.
+    let (subject, in_spec): (Option<String>, Option<String>) =
+        sqlx::query_as("SELECT owner_subject, spec->'owner'->>'subject' FROM ops.jobs").fetch_one(&pool).await.expect("job");
+    assert_eq!(subject, None, "the subject survived erasure in its own column");
+    assert_eq!(in_spec, None, "the subject survived erasure inside the spec");
+
+    // The document is still there and is now the organization's: a private document whose
+    // owner no longer exists would otherwise be readable by nobody.
+    let access = ops.document_access(&tenant, &hk).await.expect("access").expect("row");
+    assert_eq!(access.owner_subject, None);
+    assert_eq!(access.visibility, Visibility::Organization);
+    assert_eq!(send(&s, as_member("GET", &format!("/v1/documents/{hk}"), &other_member_claims(), None)).await.0, PASSED_THE_CHECK);
+
+    // And nothing in the vault had to be rewritten, which is what makes this short: no
+    // satellite stores an owner.
+    let vault_owners: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM information_schema.columns WHERE table_schema = 'vault' AND column_name IN ('owner_subject', 'owner')",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("columns");
+    assert_eq!(vault_owners, 0, "an owner column appeared in the insert-only vault, where erasure cannot reach it");
+}
+
+#[sqlx::test(migrator = "vs_vault::MIGRATOR")]
+#[ignore = "needs Postgres from `devenv up`"]
+async fn a_revocation_can_be_recorded_by_its_owner_and_an_administrator(pool: PgPool) {
+    let (s, _) = state(pool.clone(), 0).await;
+    s.auth.with_revocations(s.ops.clone());
+
+    // Anyone may end their own session: "log me out everywhere".
+    let own = json!({ "kind": "subject", "id": SUBJECT });
+    let (status, body) = send(&s, as_member("POST", "/v1/auth/revocations", &claims(), Some(own))).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+
+    // Not someone else's, without the admin role.
+    let theirs = json!({ "kind": "subject", "id": OTHER_SUBJECT });
+    assert_eq!(send(&s, as_member("POST", "/v1/auth/revocations", &claims(), Some(theirs.clone()))).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(send(&s, as_member("POST", "/v1/auth/revocations", &other_admin_claims(), Some(theirs))).await.0, StatusCode::CREATED);
+
+    // It took effect on this copy immediately, rather than at the next refresh.
+    assert_eq!(s.auth.revocation_count().await, 2);
+    let (status, body) = send(&s, as_member("GET", "/v1/auth/revocations", &admin_claims(), None)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["revocations"], 2, "{body}");
 }

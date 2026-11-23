@@ -25,6 +25,7 @@ async fn the_worker_endpoint_serves_what_the_workspace_records() {
         otlp_endpoint: None,
         metrics_addr: Some(format!("127.0.0.1:{port}")),
         json_logs: false,
+        sample_ratio: 1.0,
     };
     let t = vs_infra::telemetry::init(&cfg, "vs-worker-test").expect("init");
 

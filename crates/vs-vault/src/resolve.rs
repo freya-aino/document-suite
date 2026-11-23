@@ -454,6 +454,17 @@ mod tests {
             ) -> Result<Vec<EntityHit>, vs_vectors::VectorError> {
                 Ok(vec![])
             }
+            async fn search(
+                &self,
+                _: &TenantId,
+                _: vs_vectors::Scope,
+                _: &vs_vectors::HybridQuery,
+            ) -> Result<Vec<vs_vectors::Hit>, vs_vectors::VectorError> {
+                Ok(vec![])
+            }
+            async fn migrate_dimensions(&self, _: usize) -> Result<Vec<String>, vs_vectors::VectorError> {
+                Ok(vec![])
+            }
         }
         PgCorpusResolver::new(pool, Arc::new(NoVectors), Arc::new(TestEmbedder))
     }
