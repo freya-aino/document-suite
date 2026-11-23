@@ -16,30 +16,34 @@ repair, geometric enclosure, and form key/value pairing. Before this a page carr
 single linear `reading_order` and nothing else, so a two-column paper, a form and a flat
 memo were structurally indistinguishable.
 
+Also implemented since: **caption pairing on alignment** (horizontal overlap and the gap
+between boxes, with the figure-below / table-above convention breaking ties and stated in
+the confidence — centre distance alone paired a caption with the wrong figure on a page
+with two figures side by side); **footnote anchoring** (`FootnoteOf`, matching the
+footnote's marker in the forms a page uses — a superscript or a bracketed digit, never a
+bare one, so "Table 3" does not anchor footnote 3); **heading levels from the text
+layer's type sizes** when nothing numbered them, so an unnumbered document stops having a
+one-level section tree; **a consistent narrow gutter** read as two columns, because a
+journal page's gutter is tighter than `MIN_COLUMN_GAP` and the question that distinguishes
+it from a ragged column is "is there an x nothing crosses?"; and **key/value pairing that
+does not depend on the classifier agreeing** the page is a form, keeps both values when a
+label has two (a date range, a split amount), and tells a label from a value by the colon
+rather than by shape.
+
 Remaining:
-- [ ] Column detection is geometric and unvalidated against ground truth. The band
-      algorithm handles the common shape (spanning title, columns, spanning figure,
-      columns) but a page whose columns are separated by less than
-      `MIN_COLUMN_GAP` (2 % of the page) reads as one column, and a sidebar reads as a
-      column of its own.
-- [ ] Key/value pairing is gated on the **page's** type being form-like, so a form page
-      the classifier called `other` gets no pairs at all. It also pairs only the nearest
-      candidate right or below, so a label with two values (a range, a split amount)
-      keeps one.
+- [ ] **Nothing here is validated against ground truth.** Column bands, caption pairing,
+      footnote anchoring, key/value pairing and the link confidences (0.4–0.9, hand-set)
+      are all geometry and heuristics that behave correctly on the cases their tests
+      describe. Whether they are *right* on a corpus of real pages is unmeasured, because
+      `vs-adapt` scores block output rather than links and no labelled link set exists.
+      The synthetic corpus could be extended to label captions and columns, which is the
+      cheapest next step and still synthetic.
 - [ ] Enclosure finds nothing on a typical page, because most layout models emit
       non-overlapping sibling regions. That is the correct answer for those pages, but it
       means the relation is only exercised by models that nest.
-- [ ] Caption pairing ignores the above/below preference this spec describes below and the
-      horizontal-overlap test: the code only minimises absolute vertical-centre distance,
-      so a caption between two figures can attach to the wrong one.
-- [ ] Heading level falls back to numbering (`2.3.1`) only; font size from the text layer
-      is not used, so unnumbered headings all land at level 1.
-- [ ] Footnote anchoring: `Footnote` blocks are ordered but never linked to the reference
-      marker in the body text.
-- [ ] No intra-page structure beyond these links — see [`vs-graph`](../vs-graph/README.md)'s known limitations for the region
-      containment, column, form key/value and table cell work.
-- [ ] Link confidences (0.4–0.9) are hand-set constants, never validated against ground
-      truth, and nothing downstream thresholds on them.
+- [ ] A sidebar reads as a column of its own, which is the correct reading for ordering
+      and the wrong one for a reader that wants the main flow alone. Telling them apart
+      needs a notion of "main" that geometry does not supply.
 
 ## Input / output
 

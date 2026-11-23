@@ -17,23 +17,34 @@ integration tests — the best-covered crate in the workspace.
 **A model with no bespoke parser now needs no Rust.** `family = "auto"` plus a few
 capability fields in the registry is the whole integration. See "The `auto` family".
 
+**`coord_scale` reaches every family**, not only `auto` and `generic_json`: each family
+keeps its documented convention as its default and a registry entry overrides it. The
+declaration used to be read, logged about and ignored for the document-VLM families, with
+the boxes coming out scaled by the ratio of the page size to 1000 and nothing saying why.
+
+**`crop_dpi` works.** A step asks `StepContext::pages` for the page at a finer DPI and
+crops from that, so a figure occupying a tenth of the page is no longer described from a
+tenth of the page's pixels. Every way of not getting one — no capability, an original past
+its retention, a DPI below the page's — falls back to the page image and logs the reason.
+
+**Which parse path `auto` took is in the node's trace**, through `StepOutput::metrics`,
+and `vs-adapt`'s report names it per DAG and calls out pages that fell back to splitting
+Markdown. It used to go to a `tracing` target an operator could read and the scorer could
+not — so the one question `auto` exists to answer was the one thing nothing could score.
+
 Remaining:
-- [ ] Which parse path `auto` took is reported by a `tracing` event on the
-      `vs_models::metrics` target, not in the `NodeTrace`, because the `Step` trait has no
-      channel for per-node metadata. `vs-adapt` therefore cannot score it yet; threading
-      it properly means changing that trait signature for all 10 steps.
-- [ ] `coord_scale` is honoured only by `auto` and `generic_json`. The document-VLM
-      families hardcode their own convention, which is correct for them but means a
-      declared override is silently ignored if the family is one of those.
-- [ ] A higher-DPI re-crop is still not possible. `crop_dpi` now fails loudly instead of
-      doing nothing, which is as far as this can go without a step being able to read the
-      original document — a `StepContext` change, not a step change.
-- [ ] The model landscape below is from vendor-curated leaderboard snapshots, not from
-      our own measurement. `vs-adapt` is the thing that should decide, and it has not been
-      run on a real dataset.
-- [ ] No parser fixtures for the newer families (GLM-OCR, HunyuanOCR, LightOnOCR,
-      DeepSeek-OCR). `auto` covers them by falling back, but a bespoke parser would read
-      their structure rather than approximating it.
+- [ ] The model landscape below is from vendor-curated leaderboard snapshots, not from our
+      own measurement. `vs-adapt` is the thing that should decide, and it has only ever
+      run on the synthetic corpus `vs-adapt dataset` generates — which measures the
+      machinery, not the models.
+- [ ] `grounded_tags` is **written from the published output format, not from a capture**.
+      No sample from a running model has gone through it. What makes that safe rather than
+      reckless is the fallback: output that does not match the format reaches the Markdown
+      splitter exactly as it did before the family existed, and `auto`'s own test asserts
+      that MinerU's overlapping tag spelling still goes to MinerU. A captured sample from
+      each of GLM-OCR, HunyuanOCR, LightOnOCR and DeepSeek-OCR would turn this from
+      "reads the documented format" into "reads what the model emits", and needs the
+      models.
 
 ## The `auto` family
 

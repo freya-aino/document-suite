@@ -12,33 +12,46 @@ The CLI, the signals and the service that calls this are
 ## Status
 
 Implemented: all three stages, the pipeline that runs them (pages concurrently, with the
-interactive reservation and bounded per-page retries), and the cached DAG-list provider.
-The stages live in `lib.rs` behind `build_pipeline`, so a test builds what a deployment
-runs.
+interactive reservation and bounded per-page retries), the cached DAG-list provider,
+**document leases with a resume sweep**, **the document-type pass before the fan-out**,
+and **page re-rendering for `crop_dpi`**. The stages live in `lib.rs` behind
+`build_pipeline`, so a test builds what a deployment runs.
 
 17 unit tests pass, with Stage 2 covered over fakes for the extractor, resolver and
 embedder and the retry bound covered directly, plus `vs-suite`'s `tests/pipeline.rs`: one
 document through **all three stages** into a live Postgres and Qdrant, asserting exact row
-and point counts. That test now substitutes only the model tier — a fake
-OpenAI-compatible server on a real socket, answering from the prompt it was sent so
-grounding and verification actually run. There is nothing else left to fake between the
-stages.
+and point counts. That test substitutes only the model tier — a fake OpenAI-compatible
+server on a real socket, answering from the prompt it was sent so grounding and
+verification actually run. There is nothing else left to fake between the stages.
+
+**A crashed copy no longer abandons its documents.** Each job is leased by the process
+working on it and renewed while it works (a third of the TTL, so two lost renewals are
+survivable); a lease that stops being renewed is what a crash looks like from outside, and
+any copy's resume sweep claims it (`FOR UPDATE SKIP LOCKED`) and runs the document again.
+Re-running resumes rather than repeats: rendered pages are skipped when their signals are
+present and every vault write is idempotent. `worker.max_resumes` bounds it, so a document
+that kills the process reading it cannot take the fleet down one copy at a time — past the
+bound the job is failed with a reason the caller can read. The sweep lives in
+[`vs-suite`](../vs-suite/README.md), which is the half that has a dispatcher.
+
+**The document type is settled before the pages fan out.** When
+`stage2.doc_classifier_model` is configured, the ingest stage shows the opening thumbnails
+to the document classifier once per document, and every page is then classified knowing
+what document it belongs to. This is the cross-page smoothing `vs-classify` asked for, in
+the only place it can go: the page stage cannot do it (pages fan out with no shared state)
+and Stage 2 is after routing. A failure there is not fatal — the pages classify themselves,
+as they did before.
 
 Remaining:
-- [ ] Nothing samples traces: every stage span is exported. Affordable at one span per
-      stage, not necessarily once the per-attempt model spans under it are counted.
-- [ ] Sizing guidance below is a starting guess, never validated by a load test, and it
-      is now a guess about one process doing everything rather than three doing one thing
-      each.
-- [ ] **A crashed process abandons the documents it was carrying.** Nothing redelivers
-      them: the job rows stay mid-flight until the caller re-POSTs the upload, which
-      resumes. A resume sweep at startup would close this, and would need a lease column
-      so two copies cannot claim the same job — a small part of the queue that was
-      removed, deliberately not rebuilt yet.
-- [ ] The page stage takes `known_doc_type` from the caller's `JobSpec` and nowhere
-      else, so the cross-page smoothing `vs-classify` provides for happens only when the
-      caller already knew the type. Deliberate, and argued at `PageHandler::classify`:
-      pages fan out with no shared per-document state.
+- [ ] Sizing guidance below is a starting guess, never validated by a load test, and it is
+      a guess about one process doing everything rather than three doing one thing each.
+      The numbers that matter — pages per copy before the model tier saturates, memory per
+      concurrent document, how `max_documents` interacts with the render pool — need a
+      real corpus on real hardware.
+- [ ] Nothing samples *within* a stage. `telemetry.sample_ratio` applies to whole traces
+      and is enough for volume, but a deployment that wants "every failed document, one in
+      a thousand successful ones" needs a tail-based sampler in the collector rather than
+      a head-based ratio here.
 
 ## The pipeline
 

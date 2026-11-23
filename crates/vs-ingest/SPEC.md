@@ -9,8 +9,14 @@ Implemented: magic-byte format detection, the pdfium PDF rasterizer with a crash
 render-child pool (hangs killed on timeout, crashes retried once on a fresh child), the
 PNG/JPEG/TIFF rasterizer with bit-depth normalisation and WhiteIsZero inversion, EXIF
 orientation, native text-layer extraction, tier-0 page signals, classifier thumbnails, and
-4 CPU DAG steps. 17 unit tests pass, plus pool, raster and pre-processing integration
-tests (21 in all).
+4 CPU DAG steps. 20 unit tests pass, plus pool, raster and pre-processing integration
+tests.
+
+Tier-0 signals for a raster page now include **`ruling_lines`** and
+**`tone_continuity`** beyond ink coverage and rotation, which is what lets
+[`vs-classify`](../vs-classify/SPEC.md) tell a form from a photograph from prose before
+any model looks. Both are measured on the same downscaled copy as the other two: telling a
+ruled page from a photograph does not need full resolution.
 
 Also implemented: **pre-processing as DAG steps** (`preprocess`) — `page.orient`,
 `page.deskew`, `page.denoise`, `page.normalize`, `page.binarize`, `page.crop_margins`, on
@@ -53,10 +59,13 @@ Remaining:
       estimate.
 - [ ] Adaptive (Sauvola) binarisation. Only global Otsu is implemented, so a page with
       uneven lighting binarises badly even after `page.normalize`.
-- [ ] Higher-DPI re-crop from the original is not implemented (see "`figure.crop`" below),
-      so a small figure is described from page-DPI pixels. `vs-models`' `crop_dpi` param
-      now refuses rather than pretending; what it would need is a step that can read the
-      original document, which `StepContext` cannot.
+**Higher-DPI re-crop works**: `figure.crop` takes `crop_dpi` and cuts from a render of the
+page at that DPI, fetched through `StepContext::pages` — a capability the worker
+implements over the blob store and this crate's own render pool, so a step asks for "this
+page at 400 dpi" and learns nothing about where documents live. The cap is
+`worker.max_crop_dpi` (600), because a render is quadratic in DPI and a typo in a DAG
+should hit a limit rather than a minute of CPU. A deployment with it disabled, or an
+original past its retention, falls back to the page image and logs why.
 - [ ] `text_layer_coverage` is a stated v1 approximation; the connected-component estimate
       on the rendered page is the documented improvement path and is unbuilt.
 - [ ] Office formats via a LibreOffice-headless converter pool (A18, post-v1).

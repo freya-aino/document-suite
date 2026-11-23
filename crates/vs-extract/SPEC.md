@@ -15,20 +15,28 @@ embedding-based ontology type normalisation, in-document entity resolution, batc
 assertion verification, bibliography parsing with citation linking, result-table mining,
 and visual relations from figure descriptions. 31 unit tests pass.
 
+**A table value is cited as a cell**, not as a character span: `Evidence::Cell { block_hk,
+row, col }`, which resolves to the `hub_cell` row and the graph `Cell` node that already
+existed. A span into a table's flattened text was the wrong instrument — `92.1` twice in a
+results table gave two identical spans and the citation pointed at whichever came first,
+which for a table of numbers is most of them.
+
 Remaining:
 - [ ] **Quality has never been measured.** "Quality targets" below states a grounding rate
-      ≥ 0.97 and per-frame precision and recall targets; none of them has been run against
-      a labelled dataset, so the numbers below are aspirations, not results.
+      ≥ 0.97 and per-frame precision and recall targets; none has been run against a
+      labelled dataset, so the numbers below are aspirations, not results. The synthetic
+      corpus `vs-adapt dataset` writes does not help here: its pages carry no entities or
+      relations to extract, by construction.
 - [ ] `CorpusResolver` is implemented outside this crate, now as
       `vs_vault::PgCorpusResolver` over Postgres and Qdrant. The trait is store-neutral,
       so this crate did not change when the store did — keep it that way.
 - [ ] Stage 2 is one fixed pipeline with per-document-type prompt profiles; it is not part
       of the `vs-adapt` search (A17), so unlike Stage 1 nothing measures whether a
-      different Stage 2 shape would do better.
-- [ ] The document type that selects the prompt profile comes from a plurality vote over
-      page types in `vs-worker`, not from a document classifier — see `vs-classify`.
-- [ ] Tables reach extraction as opaque HTML, so a cell value cannot be cited
-      individually; result-table mining re-parses that HTML with its own heuristics.
+      different Stage 2 shape would do better. Putting it in the search means a second
+      objective (facts per document against cost), not a second search space.
+- [ ] Result-table mining re-parses the table's HTML — with the *same* parser the graph
+      layer uses (`vs_extract::tables::parse_html_table`), so the two cannot disagree
+      about what a cell is, which was the real risk.
 
 ## Assumptions this component rests on
 

@@ -8,29 +8,48 @@ language/content" knowledge is produced (G3). System spec:
 
 ## Status
 
-Implemented: all five commands (`generate`, `run`, `score`, `select`, `promote`), template
-× slot candidate generation validated against `vs_steps::production_registry`, successive
-halving with resumable `runs.jsonl`, the page metrics (edit-distance text similarity, TEDS
-for tables, LaTeX similarity, reading order, layout F1 at IoU 0.5), the judge path for
-unlabelled data, the objective with per-class back-off, and `report.md`. 33 unit tests
-pass.
+Implemented: all five commands (`generate`, `run`, `score`, `select`, `promote`), **two
+more** (`dataset`, `classify-score`), template × slot candidate generation validated
+against `vs_steps::production_registry`, successive halving with resumable `runs.jsonl`,
+the page metrics (edit-distance text similarity, TEDS for tables, LaTeX similarity,
+reading order, layout F1 at IoU 0.5), the judge path for unlabelled data, the objective
+with per-class back-off, and `report.md`. 43 unit tests pass.
 
-**It has never been run end to end on a real dataset.** Every metric is unit-tested
-against synthetic inputs, so the machinery is proven but its outputs are not calibrated.
+**The chain runs.** `tests/chain.rs` takes a generated corpus through
+`dataset → prepare → run → score → select → report` against an in-process fake model tier
+on a real socket, and asserts the selected DAG list loads in the production router — the
+same check the API's upload route makes. Before this, the five commands had never run as a
+chain, and the reason was that there was nothing to run them on.
+
+**There is a corpus.** `vs-adapt dataset` writes small PDFs of four page shapes — prose,
+two-column, form, ruled table — with the ground truth emitted from the same geometry the
+pages were written with, so the labels are mechanically exact rather than annotated.
+
+**The classifier is scored.** `vs-adapt classify-score` reports per-class precision and
+recall, a directional confusion table (a paper read as a form takes a cheap DAG and loses
+its tables; the reverse merely wastes GPU) and a calibration curve, with the classifier run
+*without* the manifest's hint — the hint is the label. Its first run found a real defect in
+`vs-classify`: a rules-only page claimed 0.85 confidence for a document type nothing had
+determined, and so sailed past the threshold meant to catch it.
+
+**What none of this is.** The corpus is clean, born-digital, one typeface, no skew, no
+handwriting, no photographs, and the chain test's model tier answers the same three lines
+to every page. A DAG that wins there has won on that, which is a statement about the
+machinery and not about document parsing.
 
 Remaining:
-- [ ] Run it on a real labelled corpus and check the selected DAGs beat the hand-written
-      `config/dag-list.example.json`. Until that happens, "content-aware routing" (G2) is
-      an untested claim.
-- [ ] No dataset exists in-repo or is referenced; the manifest format is specified but
-      there is nothing to point it at.
-- [ ] Classifier accuracy is specified as part of adaptation ("a wrong class costs quality
-      or speed") but is not actually scored — only DAG outputs are.
+- [ ] **Run it on a real labelled corpus and check the selected DAGs beat the hand-written
+      `config/dag-list.example.json`.** Until that happens, "content-aware routing" (G2) is
+      an untested claim. This is the one item here that no amount of code closes: it needs
+      documents, labels and a model tier.
 - [ ] The conditioning and cross-check templates in `search-space.example.json` are
-      validated but have never been scored on a real dataset, so whether deskewing or
+      validated and have never been scored on real pages, so whether deskewing or
       binarising helps any page class — or whether a second parser's corroboration
-      (`e2e-cross-checked`) is worth its doubled per-page cost — is still unmeasured,
-      which is the question they exist to answer.
+      (`e2e-cross-checked`) is worth its doubled per-page cost — is still the open
+      question they exist to answer.
+- [ ] Stage 2 is not in the search (A17), so nothing measures whether a different
+      extraction shape would do better. That needs a second objective — facts per document
+      against cost — rather than a second search space.
 - [ ] `promote` uploads as a candidate; activation stays a manual API call by design.
 
 ## Assumptions this component rests on
@@ -54,6 +73,8 @@ train → DAG list → prod upload → classification → selected DAG
 | `vs-adapt score` | `runs.jsonl`, ground truth (optional), `--judge-model` (optional) | `evals.jsonl` (`PageEval` per page × DAG) |
 | `vs-adapt select` | evals, objective, candidates, `--current` (optional) | `dag-list.json` + `report.md` |
 | `vs-adapt promote` | dag-list.json, `--api`, `--token` (`VS_API_TOKEN`) | uploads as `candidate` via `POST /v1/dag-lists` as a bearer token holding the admin role; the organization is the token's, not a flag (activation stays a manual step) |
+| `vs-adapt dataset` | `--out`, shape counts | `docs/*.pdf`, `ground-truth/*.json`, `manifest.jsonl` — a corpus labelled from the geometry it was written with |
+| `vs-adapt classify-score` | manifest, `--models`, optional `--classifier-model` | the page classifier's accuracy, confusions and calibration, as Markdown |
 
 ```
 vs-adapt generate --search-space config/search-space.example.json --out candidates.json [--models config/models.example.toml]
@@ -64,7 +85,24 @@ vs-adapt score --runs runs/runs.jsonl --out evals.jsonl [--weights w.json] [--ju
 vs-adapt select --evals evals.jsonl --candidates candidates.json --version 2026-11-06 --out dag-list.json
                 [--objective o.json] [--current active.json] [--report report.md]
 vs-adapt promote --dag-list dag-list.json --api http://localhost:8080 --tenant acme
+vs-adapt dataset --out corpus/ [--docs-per-shape 3] [--pages-per-doc 2] [--language en]
+vs-adapt classify-score --manifest corpus/manifest.jsonl --out classify/ [--models …]
+                        [--classifier-model page-classifier] [--split holdout] [--report classifier.md]
 ```
+
+The whole chain, from nothing:
+
+```sh
+vs-adapt dataset --out corpus/
+vs-adapt generate --search-space config/search-space.example.json --out candidates.json
+vs-adapt run --manifest corpus/manifest.jsonl --candidates candidates.json --out runs/ --models models.toml
+vs-adapt score --runs runs/runs.jsonl --out evals.jsonl
+vs-adapt select --evals evals.jsonl --candidates candidates.json --version $(date +%Y-%m-%d) \
+                --out dag-list.json --report report.md
+vs-adapt classify-score --manifest corpus/manifest.jsonl --out classify/ --report classifier.md
+```
+
+`tests/chain.rs` is that sequence as a test, against a fake model tier.
 
 `run` is a plain process on the stage cluster: it renders through a `vs_ingest::RenderPool`
 of `vs-render-child` processes (default: the binary next to `vs-adapt`), classifies with the
@@ -80,6 +118,17 @@ Manifest (JSONL), one line per document:
 `{ uri, language, doc_type_hint?, ground_truth_uri?, split: "train"|"holdout" }` (`split`
 defaults to `train`; `--split` filters). Public sets to seed: OmniDocBench, PureDocBench,
 ParseBench, Dr. DocBench, plus your own documents.
+
+**`vs-adapt dataset` writes one**, which is what makes the chain runnable with nothing to
+hand. Four page shapes, each a routing class worth telling apart — prose, two columns with
+a real gutter, a labelled field grid, a ruled table with a caption — as hand-written PDFs,
+with the ground truth derived from the same line positions and type sizes that placed the
+text. The one approximation is a line's width, from Helvetica's average advance: close
+enough to match at IoU 0.5 (what `layout_f1` uses) and far too crude to score a layout
+model at IoU 0.9, so nothing claims to.
+
+It is synthetic and says so: born-digital, clean, one typeface, no skew, no handwriting,
+no photographs, no entities to extract. It exercises the machinery and calibrates nothing.
 
 Ground truth (`ground_truth_uri`, local path): a JSON file with `{"pages": [page, …]}`, a
 bare array of pages, or one page object (single-page documents); or a directory with
@@ -98,7 +147,11 @@ bare array of pages, or one page object (single-page documents); or a directory 
 
 All pages are classified with the production classifier first, so scores are grouped by
 the **same `PageProfile` the router will see** in production (classifier errors are part
-of the measurement, not hidden). `doc_type_hint` is used when the vision tier does not run.
+of the measurement, not hidden). `doc_type_hint` reaches the classifier as a caller's hint
+would — except under `classify-score`, which withholds it, because there the hint is the
+label and a classifier handed its own label would score perfectly while saying nothing.
+A `doc_type` in a ground-truth page overrides the manifest's hint, for a corpus whose
+documents are not each one type.
 
 ## Candidate generation
 
@@ -225,7 +278,17 @@ For every (class, profile) with enough pages the best-utility DAG becomes a rule
   the DAG the list routes to.
 - **Candidates**: per DAG — pages, failures, quality, latency, GPU-seconds, trust,
   whether it is in the list.
+- **Parse paths** per DAG: which parser produced the blocks, from the node traces. A DAG
+  whose pages read `markdown` had its model's output split as prose because no family
+  parser recognised it — the blocks have no bounding boxes worth the name, so the layout
+  metrics for those pages are near-meaningless, and the report says so rather than leaving
+  a reader to wonder why a candidate scored badly. This is the question `family = "auto"`
+  exists to answer, and it was unanswerable until `StepOutput::metrics` existed.
 - **Comparison** with `--current`: list sizes, share of pages whose DAG changes per
   profile, and routed quality/latency/GPU of both lists over the evaluated pages.
 
 Promotion review uses this report.
+
+`classify-score` writes its own section — accuracy, per-class precision and recall,
+calibration bands and confusions — which is about the classifier rather than the DAGs and
+is therefore a separate command and a separate document.

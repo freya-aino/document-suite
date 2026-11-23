@@ -11,20 +11,43 @@ config loader and telemetry.
 
 ## Status
 
-Implemented: the S3/Garage blob store, TOML + environment config, and `telemetry`:
-structured logs, the one process-wide Prometheus recorder, and OTLP span export. 5 unit
-tests pass; 3 integration tests, one of which needs Garage from
+Implemented: the S3/Garage blob store with **server-side encryption** and **object
+retention**, TOML + environment config, and `telemetry`: structured logs, the one
+process-wide Prometheus recorder, OTLP span export and **parent-based trace sampling**.
+8 unit tests pass; 5 integration tests, two of which need Garage from
 `devenv --profile stack up`.
 
+**Encryption at rest** (§5.6) is configured here now rather than asserted: `blob.sse` is
+`none` (the default), `aes256`, `aws:kms`, `aws:kms:dsse` or `sse-c`, and a mode whose key
+is missing is a startup error rather than a silent fall back to plaintext — a deployment
+that asked for KMS and got nothing would believe it was encrypted. The default is `none`
+because a bucket policy is the better place for it where one exists, and because sending
+an encryption header a non-AWS implementation rejects would break the Garage and MinIO
+deployments that are already encrypting at the volume.
+
+**Retention** answers open question 4. `[blob.retention]` keeps each class of object for a
+number of days — page images 30, results 90, text layers 30, crops 7, the scratch images
+handed to models 1 — and `sweep_retention` prunes what is past it, every
+`sweep_interval_h` from every copy (deleting what is older than a cutoff is idempotent, so
+a race between two copies costs a wasted LIST). **Originals default to forever**: they are
+the tenant's input, and deleting it is not this software's decision to make.
+
+**Sampling**: `telemetry.sample_ratio`, parent-based, so a trace is never exported in
+pieces. 1.0 (the default) is `AlwaysOn` rather than a ratio sampler at probability 1, so
+the common case carries no sampling decision at all; 0.0 is an off switch and is tested as
+one. A ratio outside 0.0..=1.0 is clamped and logged rather than refused, because a typo
+in a telemetry setting should not stop the service.
+
 Remaining:
-- [ ] Nothing samples. Every span is exported, which is affordable at one span per task
-      and per DAG node and will not stay so once the model client's per-attempt span is
-      included at volume.
-- [ ] Encryption at rest for originals (§5.6) is asserted but not configured here.
-- [ ] The blob store is the only remaining adapter with no second implementation, which
-      is fine while it is S3-compatible everywhere. Nothing here is pluggable for the sake
-      of it any more: the `TaskBus` trait and its NATS implementation were deleted with
-      the bus rather than kept for a Kafka nobody asked for.
+- [ ] Neither exporter has run against a real Prometheus or a real collector. Both are
+      tested against sockets that answer — a listener that records what it was sent, and a
+      collector that asserts bytes arrive — which is what catches a setting that is read,
+      logged about and ignored. What it cannot catch is a dashboard that asks for a series
+      by the wrong name, or a sampling ratio that turns out to be too low to debug with.
+- [ ] The blob store is the only adapter with no second implementation, which is fine
+      while it is S3-compatible everywhere. Nothing here is pluggable for the sake of it:
+      the `TaskBus` trait and its NATS implementation were deleted with the bus rather
+      than kept for a Kafka nobody asked for.
 
 ## Assumptions this component rests on
 
@@ -34,8 +57,13 @@ Remaining:
 
 ## Blob store (`blob`)
 
-Trait `BlobStore`: `put(key, bytes, content_type)`, `get(key)`, `exists(key)`,
-`presign_get(key, ttl)`. Implementation via the `object_store` crate:
+Trait `BlobStore`: `put(key, bytes, content_type)`, `put_stream`, `get(key)`,
+`get_stream`, `exists(key)`, `size(key)`, `presign_get(key, ttl)`, `delete(key)` and
+`prune(prefix, cutoff)`. Deleting something that is not there is not an error: every
+caller here is making the store match a desired state, not asserting its history.
+`prune` takes a **cutoff** rather than a duration so the clock stays with the sweep that
+decides what "old" means, which is also what makes it testable without sleeping.
+Implementation via the `object_store` crate:
 `ObjectBlobStore::s3(&BlobConfig)` (credentials from `AWS_*` env, path-style requests,
 plain HTTP allowed when the endpoint is `http://`; Garage locally and in production)
 or `ObjectBlobStore::new(store)` for tests (no presigning).
@@ -53,13 +81,24 @@ results/<document_hk>/<run_id>/page-<page_no>.json  PageResult
 results/<document_hk>/<run_id>/doc.json             Stage 2 output (graph + assertions)
 ```
 
-Rendered pages are reused across runs at the same DPI (no re-render on reprocessing).
+Rendered pages are reused across runs at the same DPI (no re-render on reprocessing), and
+a page re-rendered at a *finer* DPI for `crop_dpi` is stored under that DPI, so the next
+step, the next page of the same document and the next run all find it rather than
+rendering it again.
+
+Each prefix has its own retention (`[blob.retention]`), and they differ because what they
+cost to lose differs: a page image is rebuilt by re-running the document, a result is the
+raw model output behind facts the vault already holds with their provenance, and an
+**original** is the tenant's input and is kept forever unless a deployment says
+otherwise.
 
 ## Config (`config`)
 
-TOML file + environment overrides (`VS__SECTION__KEY`). Sections: `bus`, `blob`,
-`postgres`, `qdrant`, `models` (path to model registry file), `classify`, `worker`,
-`stage2`, `api`, `telemetry`. Secrets only from environment. See `config/worker.example.toml`.
+TOML file + environment overrides (`VS__SECTION__KEY`). Sections: `blob` (with
+`blob.retention`), `postgres`, `qdrant`, `models` (path to the model registry file),
+`classify`, `worker`, `stage2`, `api`, `auth`, `telemetry`. There is no `bus` section any
+more — the bus is gone (D13). Secrets only from the environment. See
+`config/worker.example.toml`.
 
 `stage2` (`Stage2Config`, all keys defaulted) names the models of the `page` classifier and
 the `doc` role by registry id (`extraction_model`, `verify_model`, `embedding_model`,
@@ -77,20 +116,18 @@ inside the Tokio runtime. It installs the `tracing` subscriber (JSON logs on
 A second call returns an error rather than panicking or quietly shadowing the first,
 which is the only safe behaviour for something process-global.
 
-`service` becomes a **global label on every series** — `vs-suite` for a process running
-the whole service, `vs-suite-page` or `vs-suite-api-ingest` for one running part of it
-(`--roles`) — so one Prometheus scraping the whole fleet can tell
-whose counter it is reading. The worker's role is therefore part of the label, and `init`
-is called after the role is parsed.
+`service` becomes a **global label on every series** — `vs-suite` for the service — so one
+Prometheus scraping the whole fleet can tell whose counter it is reading. It is also the
+traces' `service.name`, so a counter and a span from the same process are joinable.
 
 Where the series are *served* is the asymmetry worth knowing:
 
-| Binary | `metrics_addr` | How `/metrics` is reached |
-|---|---|---|
-| without the `api` role | set | the exporter binds it and answers `GET /metrics` itself — there is no HTTP server in the process otherwise |
-| with the `api` role | unset | the handle `init` returns is rendered on the API's own `/metrics` route, which requires the admin role |
+| `metrics_addr` | How `/metrics` is reached |
+|---|---|
+| set | the exporter binds it and answers `GET /metrics` itself, with no authentication — bind it internally |
+| unset | the handle `init` returns is rendered on the API's own `/metrics` route, which requires the admin role |
 
-Setting `metrics_addr` *and* running the `api` role binds a second port serving the same
+Setting `metrics_addr` on the service binds a second port serving the same
 registry — and that port has no authentication, while `/metrics` does, so bind it
 internally or leave it unset;
 nothing stops it, but there is no reason for it. Leaving it unset on a worker is not an

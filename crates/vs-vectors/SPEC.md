@@ -11,38 +11,70 @@ crate holds only vectors and the payload needed to join a vector hit back to a g
 ## Status
 
 Implemented: the `VectorStore` trait (`ensure_ready`, `write_run`, `drop_run`,
-`search_entities`), `QdrantStore` over `qdrant-client` 1.20 (gRPC), collection bootstrap
-with the tenant payload index and per-tenant HNSW layout, the pure-Rust sparse encoder,
-the `[qdrant]` config section and a devenv service. 9 unit tests and 3 integration tests
-pass, the latter against a live Qdrant.
+`search_entities`, **`search`**, **`migrate_dimensions`**), `QdrantStore` over
+`qdrant-client` 1.20 (gRPC), collection bootstrap behind an **alias** with the tenant
+payload index and per-tenant HNSW layout, the pure-Rust sparse encoder, **hybrid search
+fused inside Qdrant**, the `[qdrant]` config section and a devenv service. 9 unit tests
+and 5 integration tests pass, the latter against a live Qdrant.
 
 Verified against the server, not just asserted here: the collection carries a `dense`
 named vector (size from the embedder, cosine) **and** a `sparse` one with
-`modifier: idf`; `hnsw_config` is `m = 0` with `payload_m = 16`; and `tenant` is a keyword
-payload index with `is_tenant: true`. Qdrant accepts the UUID-shaped point ids derived
-from graph keys, and a tenant-filtered search returns the stored vector that
-`search_entities` hands back for client-side scoring.
+`modifier: idf`; `hnsw_config` is `m = 0` with `payload_m = 16`; `tenant` is a keyword
+payload index with `is_tenant: true`; Qdrant accepts the UUID-shaped point ids derived
+from graph keys; a tenant-filtered search returns the stored vector that
+`search_entities` hands back for client-side scoring; and a dense query, a lexical query
+and a fused one each return what only they can find.
 
-This crate replaced the vector half of the HelixDB writer (decisions D6/D9).
+**The lexical half is no longer written-but-unqueried.** `search` takes a dense vector, a
+query text, or both, and when both are given each half is prefetched on its own index and
+the server fuses the two candidate lists with reciprocal rank fusion. Fusion belongs
+*inside* the store, in one request: a client handed two top-k lists cannot recover the
+ranking it would have got from the union, and RRF needs no per-corpus tuning because a
+cosine similarity and a BM25 score share neither scale nor distribution. The integration
+test writes one block a dense embedder finds and one an identifier search finds, and
+asserts each half finds its own and the fusion finds both.
+
+**A dimension change is guarded and has a path.** `ensure_ready` reads the live
+collection's vector size and refuses a mismatch with a message naming the way out — before
+the guard, Qdrant refused each *point* whose vector was the wrong length, so a mismatch
+surfaced as every document failing, one at a time, with nothing saying why. The
+configured name is an **alias** over a collection carrying its dimension
+(`vs_blocks__d1024`), so `migrate_dimensions` creates the next one and moves the alias,
+and readers follow without being reconfigured. What it cannot do is convert the old
+vectors: a different embedder is different geometry, so the documents have to be re-run,
+and the report it returns says so. A collection that predates the alias is used directly
+and left alone.
 
 Remaining:
 - [ ] **`pkgs.qdrant` does not build**, so the devenv process runs the official Docker
-      image and needs `docker` on the host. nixpkgs builds Qdrant from source and its 1.18.2
-      fails on an LLVM intrinsic signature mismatch in its AVX-512 quantization code;
-      naming it in `packages` made the entire dev shell unbuildable, taking Postgres and
-      Garage down with it.
-- [ ] Sparse vectors are written but nothing queries them, so the lexical half is stored
-      and unproven: no test fuses dense and sparse, because fusion belongs to the reader.
-- [ ] No hybrid-search helper. Dense and sparse points are both written, but fusing them
-      is left entirely to the reader (per decision 5), so nothing in-repo proves the two
-      halves are jointly queryable.
-- [ ] IDF statistics are shared across tenants (see "Sparse vectors"); no per-tenant
-      scoring.
-- [ ] A dimension change still means manually creating and back-filling a new collection;
-      there is no migration helper.
-- [ ] `ensure_ready` creates collections on first use, so the first `doc` worker to start
-      decides the dimension for everyone. A deliberate dimension change needs the old
-      collections dropped first, which nothing guards.
+      image and needs `docker` on the host. nixpkgs builds Qdrant from source and its
+      1.18.2 fails on an LLVM intrinsic signature mismatch in its AVX-512 quantization
+      code; naming it in `packages` made the entire dev shell unbuildable, taking Postgres
+      and Garage down with it.
+- [ ] Retrieval quality is unmeasured. Both halves work and fuse; whether the fused
+      ranking is better than either alone *on this corpus* is a question for a labelled
+      retrieval set, and there is none. `vs-adapt` scores page parsing, not search.
+
+### IDF across tenants: a decision, not a gap
+
+`modifier: idf` makes Qdrant supply the inverse-document-frequency half of BM25 from the
+collection's own statistics, which is what lets the lexical half work without an embedding
+model. A collection holds every tenant's points, so those statistics are **shared**: a
+term's rarity is computed across organizations.
+
+No content crosses a tenant boundary — every query is filtered, and the filter is an
+index with `is_tenant: true`, not a post-pass — but a ranking that depends on other
+organizations' corpora is a statistical side channel, and saying "it is only ranking" is
+not an argument that survives being asked about.
+
+Per-tenant collections would fix it and cost more than it buys: they contradict the
+payload-partitioned layout this collection is built for (`m = 0`, `payload_m = 16`), and a
+deployment with thousands of organizations would have thousands of collections with a
+Qdrant segment each. So the trade is offered instead: **`[qdrant].idf = false`** turns the
+modifier off and the lexical half becomes saturated term frequencies alone — a weaker
+ranking computed entirely from the document in front of it. It is a property of the
+collection, so changing it means a new collection (the same alias move
+`migrate_dimensions` performs).
 
 ## Collections
 
@@ -97,18 +129,31 @@ BM25-class lexical quality proves insufficient, the upgrade path is to serve a s
 encoder in the GPU tier behind `vs-models` — the `VectorStore` interface does not change,
 only where the sparse vector comes from.
 
-Known limitation: with payload-partitioned multitenancy, IDF statistics are computed over
-**all** tenants' points in a collection, not per tenant. A term that is rare for one tenant
-but common overall is scored as common. Acceptable while tenants hold similar document
-mixes; revisit with per-tenant scoring if that stops being true.
+IDF across tenants is a decision with a way out rather than a known limitation — see
+[the Status section](#idf-across-tenants-a-decision-not-a-gap) and `[qdrant].idf`.
 
 ## Dimensions
 
 The dense vector size is fixed per collection at creation time, taken from the embedding
 model's `dimensions` in the model registry (`vs-models` already refuses to construct an
 embedder for a model without it). Changing the embedding model changes the vector space,
-so it means a **new collection, back-filled, then switched** — never mixed vectors in one
-collection. `model_ref` is in every payload so a mixed collection is at least detectable.
+so it means a **new collection, then switched** — never mixed vectors in one collection.
+`model_ref` is in every payload so a mixed collection is at least detectable.
+
+Both halves of that are implemented. The configured name (`vs_blocks`) is an **alias**
+over a collection named for its dimension (`vs_blocks__d1024`), so:
+
+- `ensure_ready` refuses a dimension that does not match the live collection, naming the
+  command to run. Before the guard it left the collection alone and Qdrant refused each
+  point instead, so a mismatch surfaced as every document failing one at a time.
+- `migrate_dimensions(n)` creates the collection for `n`, moves the alias, leaves the old
+  collection untouched for rollback, and reports that the documents have to be re-run —
+  because nothing can convert a vector from one embedder's space to another's. That
+  re-run is the "back-fill", and it is the caller's to schedule.
+- A collection that predates the alias is used directly and never renamed: its points are
+  perfectly good, and a migration nobody asked for is not an improvement. Migrating such
+  a deployment means a new `collection_prefix` or dropping the collection first, and the
+  error says so.
 
 ## Joining back to the graph
 
@@ -124,7 +169,9 @@ The external RAG service queries Qdrant and Postgres **directly** — there is n
 in front of them. Consequences it owns, which HelixDB's compiled queries used to hide:
 
 - applying the tenant filter on every call;
-- fusing dense and sparse results (reciprocal rank fusion is the expected default);
+- choosing the lanes to fuse. `VectorStore::search` will do it — dense, lexical, or both
+  fused server-side with RRF in one request — and a reader that would rather fuse its own
+  way can still query the two named vectors directly;
 - filtering to the current run, via `vault.v_current_run`, when a document has been
   reprocessed and two runs' blocks are both present.
 

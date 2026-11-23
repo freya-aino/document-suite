@@ -12,30 +12,40 @@ aggregation in `document`, the `DocumentClassifier` trait (`VlmDocumentClassifie
 `vs-models`, one call over the opening thumbnails), and `resolve()`, which prefers the
 most trustworthy source available. 15 unit tests. Pure functions, no I/O.
 
+**Cross-page smoothing exists**, in the one place it can: the **ingest** stage, which
+holds the whole document before the pages fan out, shows the opening thumbnails to the
+document classifier once per document when `stage2.doc_classifier_model` is set, and every
+page is then classified knowing what document it belongs to. The page stage still cannot
+do it — pages fan out with no shared per-document state — and Stage 2 is after routing.
+
+**Tier 0 can tell a form from a photograph**, on a raster. Two measurements beyond ink
+coverage: `ruling_lines` (the longest unbroken dark run across a row or column — text
+never makes one, because a line of type is dark in short runs with white between the
+words) and `tone_continuity` (the mid-grey fraction, which a bimodal document does not
+have and a photograph does). A ruled page reads as a form with a table on it and a
+continuous-tone one as an image, with no model involved. Both are 0 for a PDF, which means
+"not measured" and never "none".
+
+**Confidence is about the document type**, because that is what the routing table
+thresholds on. A rules-only page whose type nobody determined reports
+`unknown_doc_type_confidence` (0.3, below the default threshold) instead of
+`rules_only_confidence` — it used to claim 0.85 for a type of `other` that nothing had
+looked for, so every such page sailed past `min_classifier_confidence`, which exists to
+catch exactly that page. Measured by `vs-adapt classify-score` at 85 % expected
+calibration error before, 30 % after.
+
 Remaining:
-- [ ] **No automatic cross-page smoothing, and it is not a small omission to fill.**
-      `known_doc_type` now comes from the caller's hint, which is the only source that
-      exists before a page is routed. Pages fan out as independent tasks across workers
-      with no shared per-document state, so page 7 cannot learn what page 1 concluded
-      without a round trip that would serialise the fan-out — the thing Stage 1 exists to
-      do in parallel. The document type is therefore settled in Stage 2, too late to
-      affect routing. Closing this properly means either a per-document cache the `page`
-      role writes and reads (racy, and only helps later pages) or a cheap first-page pass
-      during ingest (which calls no model today).
-- [ ] The document classifier's accuracy is unmeasured; `vs-adapt` scores DAG output, not
-      classifier verdicts.
-- [ ] Tier 0's measured signals for a scan are `ink_coverage` and `rotation_deg`, which
-      are enough to skip a blank page and to notice a sideways one, but not to tell a
-      photograph from a form. Everything else about a raster page still comes from the
-      tier-1 thumbnail.
-- [ ] `confidence` is never calibrated against the labelled datasets `vs-adapt` runs, so
-      `min_classifier_confidence` in the routing table is tuned blind.
+- [ ] **Accuracy on real documents is unmeasured.** `vs-adapt classify-score` is the thing
+      that measures it — per-class precision and recall, a directional confusion table and
+      a calibration curve — and it has only run against the synthetic corpus, where the
+      rule tier scores 0 % because it has no document-type opinion at all. That number is
+      honest and uninteresting; the interesting one needs labelled real documents and a
+      vision model.
+- [ ] Nothing *routes* on `rotation_deg` **by default**. The router can match on it now
+      (`rotated`, `rotated_deg`) and it is in `vs-adapt`'s class ladder, so the question is
+      answerable — but no shipped routing table uses it, because whether a sideways page
+      wants a DAG with `page.orient` is exactly the measurement nobody has made.
 - [ ] Language/script detection: the caller's hint is always trusted (assumption A19).
-- [ ] Nothing *routes* on `rotation_deg`. The signal is now real for rasters as well as
-      PDFs, and `page.orient` turns the page when a DAG includes it, but no routing rule
-      selects a DAG with that step because a page arrived sideways. Note what the field
-      means: how far the source page is rotated, not a correction to apply — see
-      `PageSignals::rotation_deg`.
 
 ## Assumptions this component rests on
 

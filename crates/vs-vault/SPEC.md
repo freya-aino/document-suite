@@ -21,22 +21,26 @@ and D6 (this is the single system of record *and* the graph projection).
 
 ## Status
 
-Implemented: the full raw vault (now 9 hubs, 12 links, 12 satellites), the `ops` schema
-(jobs, batches, page tasks, state log, idempotency keys), the `registry` schema (DAG
-lists, entity and relation types), role separation between the migration owner and the
-runtime role, `write_document`, `write_page`, `write_stage2`, `finish_run`, the
-`v_current_run` view, the graph layer (`graph.rs`, written inside `write_stage2`'s
-transaction) and corpus entity resolution (`PgCorpusResolver`).
-15 unit tests, plus 19 Postgres integration tests (`#[ignore]`d; they need a database).
-One of them is schema-wide rather than table-specific: it writes a whole document twice,
-20 ms apart, and asserts that **no** satellite in the `vault` schema gained a row, with
-the list of satellites read from the catalogue so it covers the one added next. Defect 2
-below was a `hash_diff` that covered the write timestamp, and that class of mistake is
-invisible until something is redelivered.
-All eight migrations apply, and every write path has been executed: `tests/graph.rs`
-covers the graph layer across all of 0005 to 0007 and `PgCorpusResolver` against real
-label rows. A document also reaches this schema through the whole pipeline, from
-[`vs-worker`](../vs-worker/SPEC.md)'s `tests/pipeline.rs`.
+Implemented: the full raw vault (9 hubs, 12 links, 12 satellites), the `ops` schema
+(jobs, batches, page tasks, state log, idempotency keys, **document access, grants, job
+leases and token revocations**), the `registry` schema (DAG lists, entity and relation
+types), role separation between the migration owner and the runtime role,
+`write_document`, `write_page`, `write_stage2`, `finish_run`, the `v_current_run` view,
+the graph layer (`graph.rs`, written inside `write_stage2`'s transaction) and corpus
+entity resolution (`PgCorpusResolver`).
+
+15 unit tests plus **26 Postgres integration tests** (`#[ignore]`d; they need a
+database). One of them is schema-wide rather than table-specific: it writes a whole
+document twice, 20 ms apart, and asserts that **no** satellite in the `vault` schema
+gained a row, with the list of satellites read from the catalogue so it covers the one
+added next. Defect 2 below was a `hash_diff` that covered the write timestamp, and that
+class of mistake is invisible until something is redelivered.
+
+All ten migrations apply, and every write path has been executed: `tests/graph.rs` covers
+the graph layer across 0005 to 0007 and `PgCorpusResolver` against real label rows,
+`tests/access.rs` covers leases, resume claims, revocation and erasure, and a document
+also reaches this schema through the whole pipeline, from
+[`vs-suite`](../vs-suite/README.md)'s `tests/pipeline.rs`.
 
 Running them for the first time found three defects that no unit test could have caught:
 
@@ -52,9 +56,37 @@ Running them for the first time found three defects that no unit test could have
 
 The first two predate the storage rewrite and had been latent since Stage 2 was written.
 
-This is now the suite's only graph store (D6), and it was already richer than the one it
+This is the suite's only graph store (D6), and it was already richer than the one it
 replaced: it keeps **both** span and region evidence, full `load_dts` history, block
 provenance, and the DAG and model hubs — none of which the graph projection held.
+
+### What is mutable, and where
+
+The raw vault is insert-only and the database enforces it. Everything that must *change*
+is in `ops`, which is the reasoning behind decision D14 and worth stating here because it
+is a question anyone extending this schema will ask:
+
+| State | Where | Why not the vault |
+|---|---|---|
+| Document ownership and visibility (`ops.document_access`) | `ops` | a share has to be withdrawable |
+| Shares (`ops.document_grants`) | `ops` | revoking one is a DELETE |
+| Job leases (`ops.jobs.lease_*`) | `ops` | taken, renewed and released many times per document |
+| Token revocations (`ops.revoked_tokens`) | `ops` | purged once the tokens they refuse have expired |
+| A person's identifier (`ops.jobs.owner_subject`, `spec.owner`) | `ops` | an erasure request cannot be served by a store that never forgets |
+
+No satellite stores an owner, which is what makes erasure a short operation rather than a
+rewrite of history — see [`vs-api`](../vs-api/SPEC.md)'s *Access* section.
+
+Remaining:
+- [ ] Sizing is unmeasured. Row counts per page, index growth and the cost of
+      `v_current_run` on a corpus of millions of blocks are all untested, because no
+      corpus that size has gone through this. Partitioning `sat_block_content` by
+      `load_dts` is the obvious first move and would be guesswork today.
+- [ ] `ops.jobs` and `ops.job_state_log` grow without bound. The retention sweep scrubs
+      the *owner* from old jobs (`api.job_retention_days`) and keeps the rows, because the
+      organization's record of what it processed is not the person's to erase — but
+      nothing ages the rows themselves out, and after a few million documents that is a
+      table worth partitioning.
 
 ### One transaction, one entry point
 
@@ -112,7 +144,7 @@ Deliberate non-goals here:
 | Role | Used by | Privileges |
 |------|---------|-----------|
 | schema owner (`vs` locally) | the migration deploy step, tests | owns `ops`, `registry`, `vault` |
-| `vs_app` | API and workers at runtime | `vault`: SELECT, INSERT only (no UPDATE/DELETE/TRUNCATE); `ops`, `registry`: SELECT, INSERT, UPDATE; no DDL |
+| `vs_app` | API and workers at runtime | `vault`: SELECT, INSERT only (no UPDATE/DELETE/TRUNCATE); `ops`, `registry`: SELECT, INSERT, UPDATE, plus DELETE on the three tables where removing a row *is* the operation — `document_access`, `document_grants`, `revoked_tokens` (migration 0009); no DDL |
 
 - Migrations are a **deploy step**: `vs-suite migrate` (owner credentials in
   `DATABASE_URL`) or `sqlx migrate run`. The API and workers never migrate; at startup
@@ -257,10 +289,12 @@ vault's read side for the API:
 
 ## Tests
 
-`tests/vault.rs` uses `#[sqlx::test]` (fresh migrated database per test) against the
-devenv Postgres; the `vs` role gets `CREATEDB` from a devenv task. Privilege tests
-connect to the test database as `vs_app`. Run with
-`cargo test -p vs-vault -- --ignored`.
+`tests/vault.rs` and `tests/access.rs` use `#[sqlx::test]` (a fresh migrated database per
+test) against the devenv Postgres; the `vs` role gets `CREATEDB` from a devenv task.
+Privilege tests connect to the test database as `vs_app`, inheriting everything but the
+credentials from the test's own pool — rebuilding the options from host and port alone
+turned a Unix-socket connection into a TCP one and failed as a pool timeout several
+seconds later. Run with `cargo test -p vs-vault -- --ignored`.
 
 ## Performance notes
 
