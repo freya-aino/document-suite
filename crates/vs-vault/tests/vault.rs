@@ -364,6 +364,11 @@ fn stage2_fixture(m: &DocumentMeta, r: &RunMeta) -> (StitchedDocument, Extractio
                 page_no: 1,
                 page_hk: page.page_hk.clone(),
                 global_order: i as u32,
+                // Two columns on this page, alternating, so the placement satellite has
+                // something to assert about: `repair_reading_order` would have recorded
+                // this, and the stitched document is built by hand here.
+                column: Some((i % 2) as u8),
+                page_columns: 2,
             })
             .collect(),
         furniture: HashSet::new(),
@@ -484,6 +489,57 @@ fn stage2_fixture(m: &DocumentMeta, r: &RunMeta) -> (StitchedDocument, Extractio
     (doc, ext)
 }
 
+/// Reading order is the one piece of the graph answered by a query, and the query was
+/// broken: `sat_block_content.global_order` is written only by Stage 1, which sees one
+/// page at a time and writes NULL, so `READING_ORDER_QUERY` ordered every block by NULL —
+/// invisible because nothing called it. Stage 2 writes `sat_block_placement` now, and
+/// this is the query running against it.
+#[sqlx::test(migrator = "vs_vault::MIGRATOR")]
+#[ignore = "needs Postgres from `devenv up`"]
+async fn the_reading_order_query_returns_the_body_in_order(pool: PgPool) {
+    let v = PgVault { pool: pool.clone() };
+    let (r, m) = (run(), meta(1));
+    v.write_document(&r, &spec(), &m).await.unwrap();
+    let page = page_result(&m, &r);
+    v.write_page(&page, Some("rule-1")).await.unwrap();
+
+    let (mut doc, ext) = stage2_fixture(&m, &r);
+    // The second block is furniture — a running header — and the first two are in
+    // different columns of a two-column page. Both facts are Stage 2's to know.
+    let furniture_hk = doc.blocks[1].block.block_hk.clone();
+    doc.furniture.insert(furniture_hk.clone());
+    // Reverse the reading order relative to the page's own, which is what a column
+    // repair does: the query must follow `global_order`, not the page order.
+    let n = doc.blocks.len() as u32;
+    for (i, b) in doc.blocks.iter_mut().enumerate() {
+        b.global_order = n - 1 - i as u32;
+    }
+    v.write_stage2(&r, &spec(), &doc, &ext, &DocGraph::default(), None).await.unwrap();
+
+    let order: Vec<String> = sqlx::query_scalar(vs_vault::READING_ORDER_QUERY)
+        .bind(m.document_hk.as_str())
+        .bind(r.run_id.0)
+        .fetch_all(&pool)
+        .await
+        .expect("the documented reading-order query must run");
+    let expected: Vec<String> = {
+        let mut body: Vec<&vs_stitch::DocBlock> =
+            doc.blocks.iter().filter(|b| b.block.block_hk != furniture_hk).collect();
+        body.sort_by_key(|b| b.global_order);
+        body.into_iter().map(|b| b.block.block_hk.to_string()).collect()
+    };
+    assert_eq!(order.iter().map(|s| s.trim_end().to_string()).collect::<Vec<_>>(), expected);
+    assert!(!order.is_empty(), "the fixture has body blocks");
+
+    // The column each block sat in survives the repair that reordered them.
+    let columns: Vec<(Option<i16>, Option<i16>)> =
+        sqlx::query_as("SELECT column_idx, page_columns FROM vault.sat_block_placement ORDER BY global_order")
+            .fetch_all(&pool)
+            .await
+            .expect("placements");
+    assert!(columns.iter().all(|(c, n)| c.is_some() && *n == Some(2)), "{columns:?}");
+}
+
 #[sqlx::test(migrator = "vs_vault::MIGRATOR")]
 #[ignore = "needs Postgres from `devenv up`"]
 async fn write_stage2_is_idempotent_and_versions_satellites(pool: PgPool) {
@@ -516,6 +572,8 @@ async fn write_stage2_is_idempotent_and_versions_satellites(pool: PgPool) {
     assert_eq!(count(&pool, "vault.lnk_assertion_arg").await, 2);
     assert_eq!(count(&pool, "vault.lnk_assertion_evidence").await, 3); // b0, b1, page
     assert_eq!(count(&pool, "vault.sat_evidence").await, 3);
+    // Block placement: one row per block, not two for the retry.
+    assert_eq!(count(&pool, "vault.sat_block_placement").await, doc.blocks.len() as i64);
     // sat_run: processing (ingest), writing (stage 2 rows in), done (every store in).
     // The middle row is the point: the vault must not record a finished run before
     // everything that run produced has been written, so `write_stage2` leaves it

@@ -63,6 +63,10 @@ fn fixture() -> Fixture {
         page_no: 1,
         page_hk: page_hk.clone(),
         global_order: i as u32,
+        // Single-column: `repair_reading_order` records a column only where it found
+        // several, so a page like this one carries none.
+        column: None,
+        page_columns: 0,
     };
 
     let table_html = "<table><tr><th>Model</th><th>F1</th></tr><tr><td>BERT</td><td>88.5</td></tr></table>";

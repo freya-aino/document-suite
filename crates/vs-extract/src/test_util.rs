@@ -63,7 +63,14 @@ impl DocBuilder {
             confidence: 0.9,
             provenance: prov(self.doc.run_id),
         };
-        self.doc.blocks.push(DocBlock { block, page_no: 1, page_hk: self.page_hk.clone(), global_order: i as u32 });
+        self.doc.blocks.push(DocBlock {
+            block,
+            page_no: 1,
+            page_hk: self.page_hk.clone(),
+            global_order: i as u32,
+            column: None,
+            page_columns: 0,
+        });
         if kind == BlockKind::Heading || kind == BlockKind::Title {
             let level = if kind == BlockKind::Title { 0 } else { 1 };
             let parent = self.doc.sections.iter().rposition(|s| s.level < level);

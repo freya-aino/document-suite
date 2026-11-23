@@ -213,6 +213,11 @@ pub fn build(doc: &StitchedDocument, ext: &ExtractionOutput, title: Option<&str>
             "kind": b.block.kind, "text": b.block.text, "bbox": b.block.bbox, "page_no": b.page_no,
             "global_order": b.global_order, "confidence": b.block.confidence, "content": b.block.content,
             "furniture": !doc.is_body(i),
+            // Which column of its page this block was in, and how many that page had.
+            // Reordering for multi-column flow *erases* the shape of the page it
+            // corrected, so without these a reader cannot tell a repaired two-column page
+            // from a single-column one.
+            "column": b.column, "page_columns": (b.page_columns > 0).then_some(b.page_columns),
         }));
         g.edge(EdgeKind::OnPage, bk, b.page_hk.as_str(), Value::Null);
         // A table becomes addressable cell by cell, so one number can be cited rather

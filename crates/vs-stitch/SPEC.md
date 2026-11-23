@@ -30,6 +30,12 @@ does not depend on the classifier agreeing** the page is a form, keeps both valu
 label has two (a date range, a split amount), and tells a label from a value by the colon
 rather than by shape.
 
+Column membership survives the repair: a block carries which column of its page it was in
+and how many that page had, because reordering for multi-column flow otherwise erases the
+fact that the page had columns at all — and the vault stores it
+(`vault.sat_block_placement`), which is also where the document-level reading order lives
+now. Stage 1 writes a block as one page saw it and cannot know either.
+
 Remaining:
 - [ ] **Nothing here is validated against ground truth.** Column bands, caption pairing,
       footnote anchoring, key/value pairing and the link confidences (0.4–0.9, hand-set)

@@ -440,6 +440,30 @@ impl VaultWriter for PgVault {
         let s2 = Stage2Columns::of(doc, ext, &src);
         let mut tx = self.pool.begin().await?;
 
+        // Block placement: reading order after column repair, furniture, and which column
+        // of its page each block sat in. Stage 1 wrote the block as one page saw it and
+        // left `global_order` NULL because it could not know; this is the document-level
+        // half, and `READING_ORDER_QUERY` reads it.
+        sqlx::query(AssertSqlSafe(format!(
+            "INSERT INTO vault.sat_block_placement
+                 (block_hk, load_dts, hash_diff, record_source, global_order, furniture, column_idx, page_columns)
+             SELECT v.block_hk, $1, v.hash_diff, v.record_source, v.global_order, v.furniture, v.column_idx, v.page_columns
+             FROM UNNEST($2::text[], $3::text[], $4::text[], $5::int[], $6::bool[], $7::smallint[], $8::smallint[])
+               AS v(block_hk, hash_diff, record_source, global_order, furniture, column_idx, page_columns)
+             WHERE {}",
+            latest_differs("vault.sat_block_placement", "block_hk")
+        )))
+        .bind(now)
+        .bind(&s2.pl_block_hk)
+        .bind(&s2.pl_hash_diff)
+        .bind(&s2.pl_record_source)
+        .bind(&s2.pl_global_order)
+        .bind(&s2.pl_furniture)
+        .bind(&s2.pl_column)
+        .bind(&s2.pl_page_columns)
+        .execute(&mut *tx)
+        .await?;
+
         // Stitch links.
         sqlx::query(
             "INSERT INTO vault.lnk_block_block (lnk_hk, from_block_hk, to_block_hk, link_kind, load_dts, record_source)
@@ -744,11 +768,38 @@ struct Stage2Columns {
     /// Table cell evidence: row and column, in place of a span or a box.
     se_row: Vec<Option<i32>>,
     se_col: Vec<Option<i32>>,
+
+    /// Where each block sits in the stitched document (`sat_block_placement`): the
+    /// reading order after multi-column repair, whether it is furniture, and which column
+    /// of its page it was in. Stage 1 knows none of this — it sees one page at a time —
+    /// and before this satellite existed Stage 2 had nowhere to put it, so
+    /// `READING_ORDER_QUERY` ordered every block by a NULL.
+    pl_block_hk: Vec<String>,
+    pl_hash_diff: Vec<String>,
+    pl_record_source: Vec<String>,
+    pl_global_order: Vec<i32>,
+    pl_furniture: Vec<bool>,
+    pl_column: Vec<Option<i16>>,
+    pl_page_columns: Vec<Option<i16>>,
 }
 
 impl Stage2Columns {
     fn of(doc: &StitchedDocument, ext: &ExtractionOutput, src: &str) -> Self {
         let mut c = Stage2Columns::default();
+
+        // Block placement: the document-level view of a block, which only Stage 2 has.
+        for (i, b) in doc.blocks.iter().enumerate() {
+            let furniture = !doc.is_body(i);
+            let column = b.column.map(|v| v as i16);
+            let page_columns = (b.page_columns > 0).then_some(b.page_columns as i16);
+            c.pl_block_hk.push(b.block.block_hk.to_string());
+            c.pl_hash_diff.push(hash_diff(&json!([b.global_order, furniture, column, page_columns])));
+            c.pl_record_source.push(src.to_string());
+            c.pl_global_order.push(b.global_order as i32);
+            c.pl_furniture.push(furniture);
+            c.pl_column.push(column);
+            c.pl_page_columns.push(page_columns);
+        }
 
         // Stitch links (deduplicated by key; the same pair may be linked twice with the same kind).
         let mut seen = BTreeSet::new();

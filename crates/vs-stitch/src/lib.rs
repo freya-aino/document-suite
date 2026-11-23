@@ -17,6 +17,21 @@ pub struct DocBlock {
     pub page_no: u32,
     pub page_hk: HashKey,
     pub global_order: u32,
+    /// Which column of its page this block sat in, 0-based left to right; `None` on a
+    /// page that is not multi-column.
+    ///
+    /// Recorded because repairing the reading order *reorders* the blocks, and then the
+    /// fact that the page had columns at all is gone: a reader cannot tell a repaired
+    /// two-column page from a single-column one, nor which blocks shared a column. A
+    /// spanning block — a title, a full-width figure — belongs to no column and keeps
+    /// `None` on a multi-column page.
+    #[serde(default)]
+    pub column: Option<u8>,
+    /// Columns found on this block's page. `0` means the page was not multi-column, so
+    /// `column_idx` can be read without inferring the page's shape from whichever blocks
+    /// a query happened to select.
+    #[serde(default)]
+    pub page_columns: u8,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -166,7 +181,16 @@ pub fn stitch(mut pages: Vec<PageResult>, pages_total: u32) -> Result<StitchedDo
         bs.sort_by_key(|b| b.reading_order);
         for b in bs {
             let global_order = blocks.len() as u32;
-            blocks.push(DocBlock { block: b, page_no: p.page_no, page_hk: p.page_hk.clone(), global_order });
+            blocks.push(DocBlock {
+                block: b,
+                page_no: p.page_no,
+                page_hk: p.page_hk.clone(),
+                global_order,
+                // Filled by `repair_reading_order`, which is the one place that works out
+                // a page's columns.
+                column: None,
+                page_columns: 0,
+            });
         }
     }
 
@@ -701,7 +725,7 @@ mod tests {
         let blocks = blocks
             .into_iter()
             .enumerate()
-            .map(|(i, block)| DocBlock { block, page_no: 1, page_hk: page_hk.clone(), global_order: i as u32 })
+            .map(|(i, block)| DocBlock { block, page_no: 1, page_hk: page_hk.clone(), global_order: i as u32, column: None, page_columns: 0 })
             .collect();
         StitchedDocument {
             document_hk: doc.clone(),

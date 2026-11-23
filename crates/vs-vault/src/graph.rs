@@ -474,10 +474,20 @@ pub(crate) async fn write_graph_layer(
     Ok(())
 }
 
-/// Unused today, kept because it documents the one piece of the graph that is answered by
-/// a query rather than a table: reading order.
-pub const READING_ORDER_QUERY: &str = "SELECT block_hk FROM vault.sat_block_content \
-     WHERE NOT furniture ORDER BY global_order";
+/// The one piece of the graph answered by a query rather than a table: reading order.
+///
+/// It reads `sat_block_placement`, which is where Stage 2 writes the document-level view
+/// of a block. It used to read `sat_block_content.global_order` — written only by Stage 1,
+/// which sees one page at a time and therefore writes NULL there — so it ordered every
+/// block by NULL and nothing noticed, because nothing called it. Migration 0011 has the
+/// whole story.
+pub const READING_ORDER_QUERY: &str = "SELECT p.block_hk \
+     FROM (SELECT DISTINCT ON (block_hk) block_hk, global_order, furniture \
+           FROM vault.sat_block_placement ORDER BY block_hk, load_dts DESC) p \
+     JOIN vault.hub_block b ON b.block_hk = p.block_hk \
+     JOIN vault.hub_page g ON g.page_hk = b.page_hk \
+     WHERE g.document_hk = $1 AND b.run_id = $2 AND NOT p.furniture \
+     ORDER BY p.global_order";
 
 #[cfg(test)]
 mod tests {

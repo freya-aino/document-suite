@@ -31,10 +31,12 @@ identical spans.
 
 ## Known limitations
 
-- Column flow is repaired by reordering `global_order` in `vs-stitch`, so the graph
-  records the *corrected* reading order but not that a page had columns, nor which
-  block sat in which column. A reader cannot tell a repaired two-column page from a
-  single-column one.
+- Column flow was repaired by reordering `global_order`, which recorded the *corrected*
+  reading order and erased the shape of the page it corrected. A block now carries
+  `column` and `page_columns`, and the vault stores both (`sat_block_placement`), so a
+  repaired two-column page is distinguishable from a single-column one and the blocks that
+  shared a column can be found. A *spanning* block belongs to no column and says so with
+  `None`, rather than being put in the column it happens to start in.
 - In-image text is matched to body text by case-insensitive containment **on word
   boundaries**, over fragments of three characters or more, and the same floor applies to
   the entity side: an entity named "IT" or "AI" is never matched. Both rules exist because

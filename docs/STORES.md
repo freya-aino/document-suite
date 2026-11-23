@@ -75,6 +75,31 @@ SELECT DISTINCT ON (run_hk) state, started_at, finished_at
 FROM vault.sat_run WHERE run_hk = $1 ORDER BY run_hk, load_dts DESC;
 ```
 
+### Reading order, and what a page's shape was
+
+```sql
+-- Body blocks of a run, in document reading order (the constant is
+-- `vs_vault::READING_ORDER_QUERY`).
+SELECT p.block_hk
+FROM (SELECT DISTINCT ON (block_hk) block_hk, global_order, furniture
+      FROM vault.sat_block_placement ORDER BY block_hk, load_dts DESC) p
+JOIN vault.hub_block b ON b.block_hk = p.block_hk
+JOIN vault.hub_page g ON g.page_hk = b.page_hk
+WHERE g.document_hk = $1 AND b.run_id = $2 AND NOT p.furniture
+ORDER BY p.global_order;
+```
+
+`vault.sat_block_placement` is the **document-level** view of a block, written by Stage 2:
+its order after multi-column repair, whether it is furniture (a running header, a footer, a
+page number), and `column_idx` / `page_columns` — which column of its page it sat in and
+how many that page had. `page_columns = NULL` means the page was not multi-column; a
+spanning block on a multi-column page has `column_idx = NULL`, because it belongs to no
+column.
+
+Do **not** order by `sat_block_content.global_order`. That satellite is written by Stage 1,
+which sees one page at a time and leaves the column NULL — the mistake this table exists to
+fix, and migration 0011 tells the story.
+
 ### Reading a satellite
 
 Satellites are versioned, never updated: one row per change, ordered by `load_dts`. The

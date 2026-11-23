@@ -212,11 +212,18 @@ fn split_on_consistent_gap(boxes: &[BBox], group: Vec<usize>) -> Vec<Vec<usize>>
     out
 }
 
-/// Repairs multi-column reading order in place, page by page.
+/// Repairs multi-column reading order in place, page by page, and records each block's
+/// column.
 ///
-/// Only acts when it would actually change something *and* the page really looks like
+/// Only *reorders* when it would change something **and** the page really looks like
 /// several columns, because the model's own order is usually right and overriding it on a
-/// single-column page could only make things worse. Returns the pages it reordered.
+/// single-column page could only make things worse. The column membership is recorded for
+/// every multi-column page either way, including one whose order was already correct:
+/// reordering is a repair, and "this page had two columns, and these blocks were in the
+/// left one" is a fact about the page that a reader cannot recover afterwards — the repair
+/// has by then made it look like any other linear page.
+///
+/// Returns the pages it reordered.
 pub fn repair_reading_order(doc: &mut StitchedDocument) -> Vec<u32> {
     let mut by_page: HashMap<u32, Vec<usize>> = HashMap::new();
     for (i, b) in doc.blocks.iter().enumerate() {
@@ -226,12 +233,26 @@ pub fn repair_reading_order(doc: &mut StitchedDocument) -> Vec<u32> {
     for (page_no, idx) in by_page {
         let boxes: Vec<BBox> = idx.iter().map(|i| doc.blocks[*i].block.bbox).collect();
         // A band with two or more columns is the only case worth touching.
-        let bands_have_columns = {
-            let narrow: Vec<usize> = (0..boxes.len()).filter(|i| width(&boxes[*i]) < FULL_WIDTH).collect();
-            columns_of(&boxes, &narrow).len() >= 2
-        };
+        let narrow: Vec<usize> = (0..boxes.len()).filter(|i| width(&boxes[*i]) < FULL_WIDTH).collect();
+        let columns = columns_of(&boxes, &narrow);
+        let bands_have_columns = columns.len() >= 2;
         if !bands_have_columns {
             continue;
+        }
+        // Column membership, recorded whether or not the order needed repairing. A
+        // spanning block is in no column and keeps `None`.
+        let n_columns = columns.len().min(u8::MAX as usize) as u8;
+        for (c, members) in columns.iter().enumerate() {
+            for local in members {
+                let b = &mut doc.blocks[idx[*local]];
+                b.column = Some(c.min(u8::MAX as usize) as u8);
+                b.page_columns = n_columns;
+            }
+        }
+        // Every block on the page learns the page's shape, including the spanning ones
+        // that belong to no column: `page_columns` is a fact about the page.
+        for &i in &idx {
+            doc.blocks[i].page_columns = n_columns;
         }
         let order = column_order(&boxes);
         let reordered: Vec<usize> = order.iter().map(|o| idx[*o]).collect();
@@ -742,6 +763,57 @@ mod tests {
         assert_eq!(columns_of(&boxes, &all).len(), 1);
     }
 
+    /// Repairing the order *erases* the shape of the page it corrected, so the column
+    /// each block was in is recorded — otherwise a reader cannot tell a repaired
+    /// two-column page from a single-column one, nor which blocks shared a column.
+    #[test]
+    fn a_repaired_page_remembers_that_it_had_columns() {
+        let doc = vs_core::HashKey::of(&["d"]);
+        let page_hk = vs_core::HashKey::page(&doc, 1);
+        let run = vs_core::RunId::new();
+        let place = |i: u32, bbox: BBox| {
+            let mut b = heading(i, "text", bbox);
+            b.kind = BlockKind::Paragraph;
+            b.block_hk = vs_core::HashKey::block(&page_hk, &run, i);
+            DocBlock { block: b, page_no: 1, page_hk: page_hk.clone(), global_order: i, column: None, page_columns: 0 }
+        };
+        // A spanning title, then two columns interleaved in the model's own order.
+        let mut d = StitchedDocument {
+            document_hk: doc,
+            run_id: run,
+            blocks: vec![
+                place(0, bb(0.05, 0.02, 0.95, 0.08)), // spans
+                place(1, bb(0.05, 0.10, 0.45, 0.20)), // left
+                place(2, bb(0.55, 0.10, 0.95, 0.20)), // right
+                place(3, bb(0.05, 0.25, 0.45, 0.35)), // left
+                place(4, bb(0.55, 0.25, 0.95, 0.35)), // right
+            ],
+            furniture: Default::default(),
+            sections: vec![],
+            links: vec![],
+            missing_pages: vec![],
+        };
+        let repaired = repair_reading_order(&mut d);
+        assert_eq!(repaired, vec![1], "the page needed reordering");
+
+        // Blocks are now in reading order, left column first.
+        let columns: Vec<Option<u8>> = d.blocks.iter().map(|b| b.column).collect();
+        assert_eq!(columns, vec![None, Some(0), Some(0), Some(1), Some(1)], "{columns:?}");
+        assert!(d.blocks.iter().all(|b| b.page_columns == 2), "every block on the page knows the page had two columns");
+        // The spanning title belongs to no column, which is the honest answer: it is not
+        // in the left one merely because it starts there.
+        assert_eq!(d.blocks[0].column, None);
+
+        // A single-column page records nothing, so `page_columns == 0` means "not
+        // multi-column" rather than "unknown".
+        let mut plain = StitchedDocument {
+            blocks: vec![place(0, bb(0.1, 0.1, 0.9, 0.2)), place(1, bb(0.1, 0.3, 0.9, 0.4))],
+            ..d.clone()
+        };
+        assert!(repair_reading_order(&mut plain).is_empty());
+        assert!(plain.blocks.iter().all(|b| b.column.is_none() && b.page_columns == 0));
+    }
+
     // ───────────── heading levels from type size ─────────────
 
     fn heading(i: u32, text: &str, bbox: BBox) -> vs_core::Block {
@@ -843,7 +915,7 @@ mod tests {
                 let mut b = heading(i as u32, text, bbox);
                 b.kind = kind;
                 b.block_hk = vs_core::HashKey::block(&page_hk, &run, i as u32);
-                DocBlock { block: b, page_no: 1, page_hk: page_hk.clone(), global_order: i as u32 }
+                DocBlock { block: b, page_no: 1, page_hk: page_hk.clone(), global_order: i as u32, column: None, page_columns: 0 }
             })
             .collect();
         StitchedDocument {
