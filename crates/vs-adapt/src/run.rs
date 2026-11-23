@@ -269,6 +269,8 @@ impl Runner {
             profile: page.profile.clone(),
             dag_ref: dag.reference(),
             node_id: String::new(),
+            // `pages` is `None`: offline runs read loose files, so there is no original to re-render from.
+            pages: None,
         };
         let t0 = Instant::now();
         let res = Executor::new(&self.registry).run(dag, &ctx, image, Artifact::TextLayer(page.text_layer.clone())).await;

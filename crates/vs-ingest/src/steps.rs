@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 
 use vs_core::{BBox, BlockContent, BlockKind};
-use vs_dag::{Artifact, ArtifactKind, BlockDraft, LayoutRegion, Signature, Step, StepContext, StepError, StepOutput, TextLayer};
+use vs_dag::{Artifact, ArtifactKind, BlockDraft, LayoutRegion, PageImage, Signature, Step, StepContext, StepError, StepOutput, TextLayer};
 
 /// `text_layer, layout, blocks → blocks`
 pub struct MergeNative;
@@ -89,6 +89,17 @@ pub const DEFAULT_CROP_PADDING: f32 = 0.02;
 #[derive(serde::Deserialize, Default)]
 struct FigureCropParams {
     padding: Option<f32>,
+    /// Cut the crops from a render of the page at this DPI instead of from the page
+    /// image.
+    ///
+    /// A figure occupying a tenth of the page is otherwise described from a tenth of the
+    /// page's pixels. The finer render comes from the original document through
+    /// `StepContext::pages`; where that is unavailable — a deployment with
+    /// `worker.max_crop_dpi = 0`, an original past its retention, an offline `vs-adapt`
+    /// run over loose files — the page image is used and the fallback is logged with its
+    /// reason, because "set it and nothing happened" is the failure this param had for
+    /// three revisions.
+    crop_dpi: Option<u32>,
 }
 
 #[async_trait]
@@ -116,13 +127,41 @@ impl Step for FigureCrop {
             return Err(StepError::InvalidParams(format!("padding must be within 0..=0.5, got {padding}")));
         }
         let uri_prefix = format!("crop://{}/{}", ctx.page_hk, ctx.node_id);
+        let source = finer_page(ctx, page, p.crop_dpi).await;
         // Decoding and re-encoding a 200 dpi page is CPU work; keep it off the async executor.
-        let bytes = page.bytes.clone();
+        let bytes = source.bytes.clone();
         let regions = layout.clone();
         let crops = tokio::task::spawn_blocking(move || crop_figures(&bytes, &regions, padding, &uri_prefix))
             .await
             .map_err(|e| StepError::Io(format!("figure.crop task failed: {e}")))??;
         Ok(StepOutput::plain(Artifact::FigureCrops(crops)))
+    }
+}
+
+/// The page to cut from, honouring `crop_dpi`.
+///
+/// Returns the page image itself unless a finer render was asked for *and* can be had.
+/// Each way of not getting one is a state rather than an error, and each is logged with
+/// its reason.
+async fn finer_page<'a>(ctx: &StepContext, page: &'a PageImage, crop_dpi: Option<u32>) -> std::borrow::Cow<'a, PageImage> {
+    let Some(dpi) = crop_dpi.filter(|d| *d > 0) else { return std::borrow::Cow::Borrowed(page) };
+    if dpi <= page.dpi {
+        tracing::debug!(crop_dpi = dpi, page_dpi = page.dpi, "crop_dpi is not finer than the page image");
+        return std::borrow::Cow::Borrowed(page);
+    }
+    let Some(pages) = ctx.pages.as_ref() else {
+        tracing::warn!(crop_dpi = dpi, "crop_dpi was asked for but this deployment cannot re-render pages");
+        return std::borrow::Cow::Borrowed(page);
+    };
+    match pages.page_at_dpi(ctx.page_no, dpi).await {
+        Ok(finer) => {
+            tracing::info!(node = %ctx.node_id, page_no = ctx.page_no, asked = dpi, got = finer.dpi, "cropping figures from a finer render");
+            std::borrow::Cow::Owned(finer)
+        }
+        Err(e) => {
+            tracing::warn!(crop_dpi = dpi, error = %e, "could not re-render the page; cropping from the page image");
+            std::borrow::Cow::Borrowed(page)
+        }
     }
 }
 
@@ -389,6 +428,7 @@ mod tests {
             },
             dag_ref: "t@1".into(),
             node_id: node_id.to_string(),
+            pages: None,
         }
     }
 

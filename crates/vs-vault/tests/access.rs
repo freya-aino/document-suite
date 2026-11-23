@@ -226,7 +226,13 @@ async fn a_revocation_lives_until_its_tokens_have_expired(pool: PgPool) {
         .expect("re-revoke");
     let live = ops.live_revocations().await.expect("live");
     assert_eq!(live.len(), 1);
-    assert!(live[0].not_before >= later, "re-revoking moved the instant backwards");
+    // A microsecond of slack: `timestamptz` keeps microseconds and `DateTime<Utc>` keeps
+    // nanoseconds, so a value that goes through Postgres comes back truncated, not equal.
+    assert!(
+        live[0].not_before >= later - chrono::TimeDelta::microseconds(1),
+        "re-revoking moved the instant backwards: {} < {later}",
+        live[0].not_before
+    );
 
     assert_eq!(ops.purge_revocations().await.expect("purge"), 1, "only the expired row goes");
     assert_eq!(ops.live_revocations().await.expect("live").len(), 1);

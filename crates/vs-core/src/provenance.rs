@@ -28,4 +28,13 @@ pub enum Evidence {
     Span { block_hk: HashKey, char_start: u32, char_end: u32 },
     /// Visual region (figure parts, stamps, handwriting without reliable text).
     Region { page_hk: HashKey, bbox: BBox },
+    /// One cell of a table block, by row and column.
+    ///
+    /// A table reaches extraction as HTML and its plain-text projection is the cells run
+    /// together, so a character span into that projection is the wrong instrument for a
+    /// table: `92.1` appearing twice in a results table gives two identical spans and the
+    /// citation points at whichever came first. The row and column are exactly what makes
+    /// a value citable — they are also what `vault.hub_cell` is keyed by and what the
+    /// graph's `Cell` nodes carry, so this evidence resolves to a node a reader can fetch.
+    Cell { block_hk: HashKey, row: u32, col: u32 },
 }

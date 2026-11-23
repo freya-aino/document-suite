@@ -24,26 +24,47 @@ use crate::prompts::{self, Prompt};
 // ---------------------------------------------------------------------------------------
 
 fn model_param(params: &Value) -> Result<&str, StepError> {
-    reject_unimplemented(params)?;
     params["model"].as_str().ok_or_else(|| StepError::InvalidParams("`model` is required".into()))
 }
 
-/// Refuses a param this crate documents and does not honour.
+/// The page to cut crops from, honouring `crop_dpi`.
 ///
-/// Called from `model_param` because every model step calls that, and the alternative is
-/// seven call sites one of which will be forgotten. A param that is accepted and ignored
-/// is worse than one that does not exist: a DAG author sets `crop_dpi`, sees no change,
-/// and has no way to tell whether the setting did nothing or the model did not care.
-fn reject_unimplemented(params: &Value) -> Result<(), StepError> {
-    if !params["crop_dpi"].is_null() {
-        return Err(StepError::InvalidParams(
-            "`crop_dpi` is documented but not implemented: re-rendering a region at a higher DPI needs the original \
-             document, and a step cannot reach it (`StepContext` has no blob store). Remove it, or raise the page's \
-             `worker.render_dpi`, which this crop is taken from."
-                .into(),
-        ));
+/// `crop_dpi` asks for the region to come from a *finer* render than the page image: a
+/// figure occupying a tenth of the page is otherwise described from a tenth of the page's
+/// pixels, which for a dense chart or a small formula is the difference between reading it
+/// and guessing. It was documented and rejected at runtime for three revisions, because a
+/// step had no way back to the original document. `StepContext::pages` is that way back.
+///
+/// Three things can make this fall back to the page image the step was given, and all
+/// three are states rather than errors: no `crop_dpi` at all, a deployment with
+/// re-rendering disabled (`worker.max_crop_dpi = 0`), and an original that is no longer in
+/// the store (past `blob.retention.originals_days`). A fallback is logged with its reason
+/// — "set it and nothing happened" is exactly the failure the old rejection existed to
+/// prevent, so it must not be silent.
+async fn crop_source<'a>(ctx: &StepContext, page: &'a PageImage, params: &Value, step: &str) -> std::borrow::Cow<'a, PageImage> {
+    let Some(dpi) = params["crop_dpi"].as_u64().map(|v| v as u32).filter(|d| *d > 0) else {
+        return std::borrow::Cow::Borrowed(page);
+    };
+    if dpi <= page.dpi {
+        // Not an error: a DAG written for a 200-dpi deployment running on a 400-dpi one
+        // asks for less than it already has.
+        tracing::debug!(step, crop_dpi = dpi, page_dpi = page.dpi, "crop_dpi is not finer than the page image; using the page image");
+        return std::borrow::Cow::Borrowed(page);
     }
-    Ok(())
+    let Some(pages) = ctx.pages.as_ref() else {
+        tracing::warn!(step, crop_dpi = dpi, "crop_dpi was asked for but this deployment cannot re-render pages; using the page image");
+        return std::borrow::Cow::Borrowed(page);
+    };
+    match pages.page_at_dpi(ctx.page_no, dpi).await {
+        Ok(finer) => {
+            tracing::info!(step, node = %ctx.node_id, page_no = ctx.page_no, asked = dpi, got = finer.dpi, "cropping from a finer render");
+            std::borrow::Cow::Owned(finer)
+        }
+        Err(e) => {
+            tracing::warn!(step, crop_dpi = dpi, error = %e, "could not re-render the page; cropping from the page image");
+            std::borrow::Cow::Borrowed(page)
+        }
+    }
 }
 
 fn max_tokens(params: &Value, default: u32) -> u32 {
@@ -494,7 +515,10 @@ impl Step for RegionStep {
         if selected.is_empty() {
             return Ok(StepOutput::from_model(Artifact::Blocks(vec![]), spec.model_ref(), prompt.reference));
         }
-        let crops = crop_regions(page, selected, padding).await?;
+        // `crop_dpi`: the regions are cut from a finer render of the page when one can be
+        // had. The bboxes are page-normalised, so nothing else in this step changes.
+        let source = crop_source(ctx, page, params, self.kind()).await;
+        let crops = crop_regions(source.as_ref(), selected, padding).await?;
         let parser = parser_or_none(spec);
         let max_tokens = max_tokens(params, self.default_max_tokens());
         let client = &self.client;

@@ -120,8 +120,9 @@ fn endpoints(kind: EdgeKind) -> Option<(NodeKind, NodeKind)> {
         Cites => (Block, Entity),
         HasCell => (Block, Cell),
         TextInImage => (Block, ImageText),
-        // `evidence` points at a block for a span and a page for a region, and
-        // `matches_text` at either a block or an entity, so neither has one shape.
+        // `evidence` points at a block for a span, a page for a region and a cell for a
+        // table value, and `matches_text` at either a block or an entity, so neither has
+        // one shape.
         Evidence | MatchesText => return None,
         // `has_section` is document → section at the top level and section → section
         // when nested.
@@ -346,6 +347,15 @@ pub fn build(doc: &StitchedDocument, ext: &ExtractionOutput, title: Option<&str>
                     g.edge(EdgeKind::Evidence, &ak, block_hk.as_str(), json!({ "char_start": char_start, "char_end": char_end }))
                 }
                 Evidence::Region { page_hk, bbox } => g.edge(EdgeKind::Evidence, &ak, page_hk.as_str(), json!({ "bbox": bbox })),
+                // Points at the cell node the page graph built for that row and column,
+                // so "which number is this claim about" resolves to one cell rather than
+                // to a table.
+                Evidence::Cell { block_hk, row, col } => g.edge(
+                    EdgeKind::Evidence,
+                    &ak,
+                    crate::page::cell_key(block_hk.as_str(), *row as usize, *col as usize),
+                    json!({ "row": row, "col": col }),
+                ),
             }
         }
         if a.kind == AssertionKind::Binary {

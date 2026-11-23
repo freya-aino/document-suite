@@ -4,11 +4,11 @@ use std::sync::Arc;
 
 use vs_core::{HashKey, PageProfile, RunId};
 
-use crate::artifact::Artifact;
+use crate::artifact::{Artifact, PageImage};
 use crate::dag::{Signature, StepSignatures};
 
 /// Read-only context passed to every step.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct StepContext {
     pub run_id: RunId,
     pub document_hk: HashKey,
@@ -17,6 +17,53 @@ pub struct StepContext {
     pub profile: PageProfile,
     pub dag_ref: String,
     pub node_id: String,
+    /// Re-renders this page at a requested DPI, when the deployment can.
+    ///
+    /// The one thing a step could not do and genuinely needed: `crop_dpi` — crop a
+    /// region from a *finer* render than the page image, so a small figure is not
+    /// described from page-DPI pixels — was documented, rejected at runtime, and
+    /// impossible to implement because a step had no way back to the original document.
+    /// This is that way back, and it is a capability rather than a store: a step asks for
+    /// a page at a DPI and does not learn where documents live.
+    ///
+    /// `None` wherever there is nothing behind it (`vs-adapt` running DAGs over loose
+    /// files, a unit test), and a step must then fall back to the page image it was
+    /// given rather than fail.
+    pub pages: Option<std::sync::Arc<dyn PageSource>>,
+}
+
+impl std::fmt::Debug for StepContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StepContext")
+            .field("run_id", &self.run_id)
+            .field("document_hk", &self.document_hk.as_str())
+            .field("page_no", &self.page_no)
+            .field("dag_ref", &self.dag_ref)
+            .field("node_id", &self.node_id)
+            .field("pages", &self.pages.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+/// Renders a page of the document being processed at a given DPI.
+///
+/// Implemented by the worker over the blob store and the render pool; see
+/// `vs_worker::page_source`.
+#[async_trait::async_trait]
+pub trait PageSource: Send + Sync {
+    /// The page at **at least** `dpi`, or the finest available if the source cannot go
+    /// that fine. The returned image carries its real DPI, so a caller can tell what it
+    /// got rather than assuming it got what it asked for.
+    async fn page_at_dpi(&self, page_no: u32, dpi: u32) -> Result<PageImage, PageSourceError>;
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum PageSourceError {
+    /// The original is gone — past its retention, or never stored.
+    #[error("the original document is not available: {0}")]
+    Unavailable(String),
+    #[error("re-rendering page {page_no} at {dpi} dpi failed: {reason}")]
+    Render { page_no: u32, dpi: u32, reason: String },
 }
 
 #[derive(Debug, Clone)]

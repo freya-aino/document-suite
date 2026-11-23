@@ -252,21 +252,18 @@ async fn page_counters_complete_job_exactly_once(pool: PgPool) {
     );
 }
 
-/// Connects to the same (test) database as the runtime role.
 /// A second pool on the same database as `pool`, connected as the runtime role.
 ///
-/// Host and port come from `pool`, not from constants: hardcoding 5432 meant this
-/// reached whatever happened to be listening there, which on a machine running more than
-/// one project is somebody else's database.
+/// Everything but the credentials is **inherited** from `pool` rather than rebuilt:
+/// hardcoding 5432 reached whatever happened to be listening there, which on a machine
+/// running more than one project is somebody else's database — and rebuilding from host
+/// and port alone turned a Unix-socket connection into a TCP one to a host named
+/// `/run/user/1000/...`, which fails as a pool timeout several seconds later. Only the
+/// user and password differ between the two roles, so only those are set.
 async fn as_app(pool: &PgPool) -> PgPool {
-    let opts = pool.connect_options();
-    let db = opts.get_database().unwrap().to_string();
-    let opts = sqlx::postgres::PgConnectOptions::new()
-        .host(opts.get_host())
-        .port(opts.get_port())
+    let opts = <sqlx::postgres::PgConnectOptions as Clone>::clone(&pool.connect_options())
         .username("vs_app")
-        .password(&std::env::var("VS__POSTGRES__PASSWORD").unwrap_or_else(|_| "vs_app".into()))
-        .database(&db);
+        .password(&std::env::var("VS__POSTGRES__PASSWORD").unwrap_or_else(|_| "vs_app".into()));
     sqlx::postgres::PgPoolOptions::new()
         .max_connections(1)
         .connect_with(opts)
@@ -313,7 +310,10 @@ async fn runtime_role_is_insert_only_on_the_vault(pool: PgPool) {
 #[ignore = "needs Postgres from `devenv up`"]
 async fn check_migrations_rejects_unmigrated_database(pool: PgPool) {
     let err = vs_vault::check_migrations(&pool).await.unwrap_err();
-    assert!(err.to_string().contains("vs-api migrate"), "{err}");
+    // The command is `vs-suite migrate`: there has been no `vs-api` binary since the
+    // suite became one service, and an error telling an operator to run a binary that
+    // does not exist is worse than no advice.
+    assert!(err.to_string().contains("vs-suite migrate"), "{err}");
 }
 
 fn page_result(m: &DocumentMeta, r: &RunMeta) -> PageResult {

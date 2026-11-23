@@ -37,6 +37,7 @@ fn ctx() -> StepContext {
         },
         dag_ref: "t@1".into(),
         node_id: "n1".into(),
+        pages: None,
     }
 }
 
@@ -64,7 +65,16 @@ fn sent_image(c: &Captured) -> (&'static str, u32, u32) {
     let img = image::load_from_memory(&bytes).unwrap().to_rgb8();
     let (w, h) = img.dimensions();
     let p = img.get_pixel(w / 2, h / 2);
-    (if p[0] > p[2] { "red" } else { "blue" }, w, h)
+    // Green is here for the `crop_dpi` tests, where the finer render is green and which
+    // bitmap a crop came from is the thing under test.
+    let colour = if p[1] > p[0] && p[1] > p[2] {
+        "green"
+    } else if p[0] > p[2] {
+        "red"
+    } else {
+        "blue"
+    };
+    (colour, w, h)
 }
 
 #[tokio::test]
@@ -114,19 +124,115 @@ async fn layout_detect_requires_model() {
     assert!(matches!(err, StepError::InvalidParams(_)));
 }
 
+/// A finer page, for the `crop_dpi` tests: four times the page's pixels, and green, so
+/// which bitmap a crop came from is visible in the image the model was sent.
+struct FinerPage {
+    asked: Arc<std::sync::Mutex<Vec<u32>>>,
+}
+
+#[async_trait::async_trait]
+impl vs_dag::PageSource for FinerPage {
+    async fn page_at_dpi(&self, _page_no: u32, dpi: u32) -> Result<PageImage, vs_dag::PageSourceError> {
+        self.asked.lock().expect("mutex").push(dpi);
+        let mut img = RgbImage::new(800, 400);
+        for (_, _, p) in img.enumerate_pixels_mut() {
+            *p = Rgb([0, 255, 0]);
+        }
+        let mut out = Cursor::new(Vec::new());
+        DynamicImage::ImageRgb8(img).write_to(&mut out, ImageFormat::Png).expect("encode");
+        Ok(PageImage { uri: "mem://finer".into(), bytes: Arc::from(out.into_inner()), width_px: 800, height_px: 400, dpi })
+    }
+}
+
+/// `crop_dpi` cuts the region from a finer render of the page.
+///
+/// For three revisions this param was documented and *rejected*, because a step had no
+/// way back to the original document. The test is that the crop the model receives comes
+/// from the finer bitmap — four times the pixels — and not from the page image.
 #[tokio::test]
-async fn a_documented_but_unimplemented_param_is_refused_rather_than_ignored() {
-    // `crop_dpi` was accepted and had no effect, so a DAG author could set it, see no
-    // change in the crops and have no way to tell whether the setting did nothing or the
-    // model did not care. The endpoint here is unreachable on purpose: the param has to
-    // be refused before any model is called, or the message arrives as a timeout.
-    let c = client(&registry_toml("vlm", "generic_json", &["http://127.0.0.1:1/v1"], ""));
-    let err = LayoutDetect { client: c }
-        .run(&ctx(), &[&Artifact::PageImage(page_png())], &json!({"model": "vlm", "crop_dpi": 600}))
+async fn crop_dpi_crops_from_a_finer_render_of_the_page() {
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let srv = MockServer::start({
+        let seen = seen.clone();
+        Arc::new(move |_, c| {
+            let (colour, w, h) = sent_image(c);
+            seen.lock().expect("mutex").push((colour, w, h));
+            (200, chat_ok("text"))
+        })
+    })
+    .await;
+    let c = client(&registry_toml("vlm", "generic_json", &[&srv.base_url], ""));
+    let asked = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut ctx = ctx();
+    ctx.pages = Some(Arc::new(FinerPage { asked: asked.clone() }));
+
+    let step = RegionStep::ocr(c);
+    let layout = Artifact::Layout(vec![region(BlockKind::Paragraph, (0.0, 0.0, 0.5, 1.0), 0)]);
+    let out = step
+        .run(&ctx, &[&Artifact::PageImage(page_png()), &layout], &json!({"model": "vlm", "crop_dpi": 400}))
         .await
-        .unwrap_err();
-    let StepError::InvalidParams(msg) = &err else { panic!("{err:?}") };
-    assert!(msg.contains("crop_dpi") && msg.contains("render_dpi"), "the message must say what to do instead: {msg}");
+        .expect("the param is honoured now, not refused");
+    assert!(matches!(out.artifact, Artifact::Blocks(ref b) if b.len() == 1));
+
+    assert_eq!(*asked.lock().expect("mutex"), vec![400], "the step did not ask for a finer render");
+    let sent = seen.lock().expect("mutex").clone();
+    assert_eq!(sent.len(), 1);
+    let (colour, w, h) = sent[0];
+    assert_eq!(colour, "green", "the crop came from the page image, not the finer render");
+    // Half the finer page's width and its full height, plus the crop padding: the bbox is
+    // normalised, so the same region is four times the pixels it would have been.
+    assert!((400..=420).contains(&w) && (400..=420).contains(&h), "got {w}x{h}");
+}
+
+/// And every way of *not* getting a finer render falls back to the page image rather than
+/// failing the page. Each is a state a deployment can be in, not a bug.
+#[tokio::test]
+async fn crop_dpi_falls_back_to_the_page_image_when_there_is_nothing_finer() {
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let srv = MockServer::start({
+        let seen = seen.clone();
+        Arc::new(move |_, c| {
+            seen.lock().expect("mutex").push(sent_image(c));
+            (200, chat_ok("text"))
+        })
+    })
+    .await;
+    let c = client(&registry_toml("vlm", "generic_json", &[&srv.base_url], ""));
+    let step = RegionStep::ocr(c);
+    let layout = Artifact::Layout(vec![region(BlockKind::Paragraph, (0.0, 0.0, 0.5, 1.0), 0)]);
+
+    // No page source at all: `worker.max_crop_dpi = 0`, or an offline run over loose
+    // files. The page is still processed.
+    let out = step
+        .run(&ctx(), &[&Artifact::PageImage(page_png()), &layout], &json!({"model": "vlm", "crop_dpi": 400}))
+        .await
+        .expect("a missing capability is not a failed page");
+    assert!(matches!(out.artifact, Artifact::Blocks(ref b) if b.len() == 1));
+
+    // A page source that cannot produce one — the original is past its retention.
+    struct Gone;
+    #[async_trait::async_trait]
+    impl vs_dag::PageSource for Gone {
+        async fn page_at_dpi(&self, _: u32, _: u32) -> Result<PageImage, vs_dag::PageSourceError> {
+            Err(vs_dag::PageSourceError::Unavailable("originals/t1/abc: not found".into()))
+        }
+    }
+    let mut ctx = ctx();
+    ctx.pages = Some(Arc::new(Gone));
+    let out = step
+        .run(&ctx, &[&Artifact::PageImage(page_png()), &layout], &json!({"model": "vlm", "crop_dpi": 400}))
+        .await
+        .expect("an absent original is not a failed page either");
+    assert!(matches!(out.artifact, Artifact::Blocks(ref b) if b.len() == 1));
+
+    // Both crops came from the page image: 100 x 100 of the 200 x 100 page.
+    let sent = seen.lock().expect("mutex").clone();
+    assert_eq!(sent.len(), 2);
+    for (colour, w, h) in sent {
+        assert_eq!(colour, "red", "the left half of the page image is red");
+        // The page image's own pixels (100 x 100 of a 200 x 100 page), plus padding.
+        assert!((100..=120).contains(&w) && (100..=110).contains(&h), "got {w}x{h}");
+    }
 }
 
 #[tokio::test]

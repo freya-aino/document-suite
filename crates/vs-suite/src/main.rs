@@ -127,6 +127,12 @@ async fn run() -> anyhow::Result<()> {
         let _ = stop_tx.send(true);
     });
 
+    // The limits this copy is working under, as gauges, because a reader of
+    // `worker_stage_in_flight` needs the denominator to make a fraction of it — which is
+    // what an autoscaler scales on (`deploy/firecracker/fleet.sh`).
+    metrics::gauge!("suite_max_documents").set(cfg.worker.max_documents as f64);
+    metrics::gauge!("suite_max_pages_in_flight").set(cfg.worker.max_in_flight as f64);
+
     let listener = tokio::net::TcpListener::bind(&args.addr).await?;
     tracing::info!(addr = %args.addr, max_documents = cfg.worker.max_documents, max_pages = cfg.worker.max_in_flight, "http api listening");
     let serving = axum::serve(listener, vs_api::router(state)).with_graceful_shutdown(async move {

@@ -30,6 +30,7 @@ fn ctx() -> StepContext {
         },
         dag_ref: "d@1".into(),
         node_id: "pre".into(),
+        pages: None,
     }
 }
 

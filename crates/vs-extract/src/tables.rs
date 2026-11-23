@@ -148,12 +148,15 @@ pub fn extract_tables(doc: &StitchedDocument, provenance_idx: usize) -> Fragment
         if metric_cols.is_empty() {
             continue;
         }
-        let body: Vec<&TableRow> = rows.iter().skip(header_idx + 1).filter(|r| !r.header && r.cells.len() > 1).collect();
+        // Kept with their row index, because a cell's citation is (row, column) and the
+        // filtered list's position is not the row's position in the table.
+        let body: Vec<(usize, &TableRow)> =
+            rows.iter().enumerate().skip(header_idx + 1).filter(|(_, r)| !r.header && r.cells.len() > 1).collect();
         if body.is_empty() {
             continue;
         }
         let (mut numeric, mut total) = (0usize, 0usize);
-        for r in &body {
+        for (_, r) in &body {
             for &k in &metric_cols {
                 if let Some(c) = r.cells.get(k) {
                     total += 1;
@@ -165,7 +168,7 @@ pub fn extract_tables(doc: &StitchedDocument, provenance_idx: usize) -> Fragment
             continue;
         }
         // Row labels must mostly be non-numeric.
-        if body.iter().filter(|r| parse_numeric_cell(&r.cells[0]).is_some()).count() * 2 > body.len() {
+        if body.iter().filter(|(_, r)| parse_numeric_cell(&r.cells[0]).is_some()).count() * 2 > body.len() {
             continue;
         }
         let caption = doc
@@ -176,6 +179,9 @@ pub fn extract_tables(doc: &StitchedDocument, provenance_idx: usize) -> Fragment
             .map(|c| c.block.text.trim().to_string());
         let text = &b.block.text;
         let text_len = text.chars().count() as u32;
+        // Used for the *mentions* of a column header and a row label, where a span is the
+        // right instrument: those are names, they occur once, and a reader highlighting
+        // them wants the characters. The numbers they intersect at are cited as cells.
         let span_of = |cell: &str| locate_span(text, cell).unwrap_or((0, text_len));
         let tbl = format!("tbl{i}");
 
@@ -190,7 +196,7 @@ pub fn extract_tables(doc: &StitchedDocument, provenance_idx: usize) -> Fragment
             frag.entities.push(DocEntity { local_id: eid.clone(), name, raw_type: "metric".into(), type_id: None, aliases: vec![], mentions: vec![mid], entity_hk: None, context: String::new() });
             metric_entities.push((k, eid));
         }
-        for r in &body {
+        for (row_idx, r) in &body {
             let label = r.cells[0].trim();
             if label.is_empty() {
                 continue;
@@ -206,7 +212,6 @@ pub fn extract_tables(doc: &StitchedDocument, provenance_idx: usize) -> Fragment
                 let Some((value, cell_unit)) = parse_numeric_cell(cell) else { continue };
                 let unit = cell_unit.or_else(|| header.cells[*k].contains('%').then(|| "%".to_string()));
                 ids += 1;
-                let (cs, ce) = span_of(cell.trim());
                 frag.assertions.push(Assertion {
                     local_id: format!("{tbl}.a{ids}"),
                     predicate: "result".into(),
@@ -218,7 +223,15 @@ pub fn extract_tables(doc: &StitchedDocument, provenance_idx: usize) -> Fragment
                         Arg { role: "value".into(), value: ArgValue::Literal { value, unit } },
                     ],
                     qualifiers: Qualifiers { condition: caption.clone(), ..Default::default() },
-                    evidence: vec![Evidence::Span { block_hk: b.block.block_hk.clone(), char_start: cs, char_end: ce }],
+                    // The cell itself, not a character span into the table's flattened
+                    // text. `92.1` in two rows of a results table gives two identical
+                    // spans, so the citation used to point at whichever came first —
+                    // which for a table of numbers is most of them.
+                    evidence: vec![Evidence::Cell {
+                        block_hk: b.block.block_hk.clone(),
+                        row: *row_idx as u32,
+                        col: *k as u32,
+                    }],
                     confidence: 0.6,
                     verified: false,
                     provenance_idx,
@@ -278,11 +291,28 @@ mod tests {
         assert_eq!(a.provenance_idx, 3);
         assert_eq!(a.qualifiers.condition.as_deref(), Some("Table 2: GLUE results."));
         assert_eq!(a.args[2].value, ArgValue::Literal { value: "92.1".into(), unit: Some("%".into()) });
-        let Evidence::Span { char_start, char_end, .. } = &a.evidence[0] else { panic!() };
-        let quote: String = text.chars().skip(*char_start as usize).take((*char_end - *char_start) as usize).collect();
-        assert_eq!(quote, "92.1");
+        // The cell, by row and column: row 1 (the header is row 0), column 1 (`Acc (%)`).
+        // A character span into the flattened table text cannot do this — `0.93` and a
+        // repeated `92.1` give identical spans — and the row and column are what
+        // `vault.hub_cell` and the graph's `Cell` nodes are keyed by, so the citation
+        // resolves to something a reader can fetch.
+        assert_eq!(a.evidence, vec![Evidence::Cell { block_hk: b.doc.blocks[t].block.block_hk.clone(), row: 1, col: 1 }]);
         let method = frag.entities.iter().find(|e| e.name == "BERT").unwrap();
         assert_eq!(method.raw_type, "method");
+        // The method's own *mention* is still a span, because a row label is a name and a
+        // reader highlighting it wants the characters.
+        let mention = &frag.mentions[frag.mentions.len() - 1];
+        let quote: String =
+            text.chars().skip(mention.char_start as usize).take((mention.char_end - mention.char_start) as usize).collect();
+        assert_eq!(quote, "RoBERTa");
+
+        // Every cell citation points at a cell that exists in the table.
+        let rows = parse_html_table(HTML);
+        for a in &frag.assertions {
+            let Evidence::Cell { row, col, .. } = &a.evidence[0] else { panic!("table assertions cite cells") };
+            let cell = rows.get(*row as usize).and_then(|r| r.cells.get(*col as usize)).expect("a cell that exists");
+            assert!(!cell.trim().is_empty(), "cited an empty cell at ({row}, {col})");
+        }
     }
 
     #[test]

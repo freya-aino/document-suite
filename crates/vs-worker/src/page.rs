@@ -27,6 +27,18 @@ pub struct PageHandler {
     pub vision: Option<Arc<dyn VisionClassifier>>,
     pub bucket: String,
     pub render_dpi: u32,
+    /// Re-rendering a page at a finer DPI, for `crop_dpi`. `None` disables it: a step
+    /// asking for a finer crop then gets the page image it was given, which is what
+    /// happened before this existed.
+    pub render: Option<ReRender>,
+}
+
+/// What a re-render needs beyond what the handler already has.
+pub struct ReRender {
+    pub pool: Arc<vs_ingest::RenderPool>,
+    pub scratch_dir: std::path::PathBuf,
+    /// Finest DPI a DAG may ask for (`worker.max_crop_dpi`).
+    pub max_dpi: u32,
 }
 
 pub(crate) struct PageTask<'a> {
@@ -79,6 +91,22 @@ impl PageHandler {
             profile: profile.clone(),
             dag_ref: dag_ref.clone(),
             node_id: String::new(),
+            // What makes `crop_dpi` possible: a step can ask for this page at a finer
+            // DPI, and gets it rendered from the original rather than upscaled from the
+            // bitmap it already has. Only this document's pages — the capability is built
+            // per task and carries the document with it.
+            pages: self.render.as_ref().map(|r| {
+                Arc::new(crate::page_source::RenderOnDemand {
+                    blob: self.blob.clone(),
+                    pool: r.pool.clone(),
+                    bucket: self.bucket.clone(),
+                    document_hk: t.document_hk.clone(),
+                    source_uri: t.spec.source_uri.clone(),
+                    scratch_dir: r.scratch_dir.clone(),
+                    max_pages: crate::MAX_PAGES,
+                    max_dpi: r.max_dpi,
+                }) as Arc<dyn vs_dag::PageSource>
+            }),
         };
         let image = Artifact::PageImage(PageImage {
             uri: t.page_image_uri.to_string(),

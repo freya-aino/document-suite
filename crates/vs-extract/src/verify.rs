@@ -49,7 +49,12 @@ pub fn evidence_text(a: &Assertion, texts: &HashMap<HashKey, &str>) -> Option<St
                 let t = texts.get(block_hk)?;
                 Some(t.chars().skip(*char_start as usize).take((*char_end - *char_start) as usize).collect::<String>())
             }
-            Evidence::Region { .. } => None,
+            // Neither a region nor a cell quotes text: a region is pixels, and a cell's
+            // own text is in the table's HTML rather than at a character offset into the
+            // block's flattened projection. The verifier is shown the assertion either
+            // way, with no quote — which is the honest input, and `verify` treats an
+            // assertion it cannot quote as unverifiable rather than as false.
+            Evidence::Region { .. } | Evidence::Cell { .. } => None,
         })
         .filter(|q| !q.trim().is_empty())
         .collect();

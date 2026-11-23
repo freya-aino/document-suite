@@ -612,10 +612,11 @@ impl VaultWriter for PgVault {
         .execute(&mut *tx)
         .await?;
         sqlx::query(AssertSqlSafe(format!(
-            "INSERT INTO vault.sat_evidence (lnk_hk, load_dts, sub_seq, hash_diff, record_source, char_start, char_end, bbox)
-             SELECT v.lnk_hk, $1, v.sub_seq, v.hash_diff, $4, v.char_start, v.char_end, v.bbox
-             FROM UNNEST($2::text[], $3::text[], $5::int[], $6::int[], $7::int[], $8::jsonb[])
-               AS v(lnk_hk, hash_diff, sub_seq, char_start, char_end, bbox)
+            "INSERT INTO vault.sat_evidence
+                 (lnk_hk, load_dts, sub_seq, hash_diff, record_source, char_start, char_end, bbox, row_idx, col_idx)
+             SELECT v.lnk_hk, $1, v.sub_seq, v.hash_diff, $4, v.char_start, v.char_end, v.bbox, v.row_idx, v.col_idx
+             FROM UNNEST($2::text[], $3::text[], $5::int[], $6::int[], $7::int[], $8::jsonb[], $9::int[], $10::int[])
+               AS v(lnk_hk, hash_diff, sub_seq, char_start, char_end, bbox, row_idx, col_idx)
              WHERE {}",
             latest_differs("vault.sat_evidence", "lnk_hk")
         )))
@@ -627,6 +628,8 @@ impl VaultWriter for PgVault {
         .bind(&s2.se_char_start)
         .bind(&s2.se_char_end)
         .bind(&s2.se_bbox)
+        .bind(&s2.se_row)
+        .bind(&s2.se_col)
         .execute(&mut *tx)
         .await?;
 
@@ -738,6 +741,9 @@ struct Stage2Columns {
     se_char_start: Vec<Option<i32>>,
     se_char_end: Vec<Option<i32>>,
     se_bbox: Vec<Option<Value>>,
+    /// Table cell evidence: row and column, in place of a span or a box.
+    se_row: Vec<Option<i32>>,
+    se_col: Vec<Option<i32>>,
 }
 
 impl Stage2Columns {
@@ -899,7 +905,10 @@ impl Stage2Columns {
             let mut ev: BTreeMap<(Option<String>, Option<String>), Vec<&Evidence>> = BTreeMap::new();
             for e in &a.evidence {
                 let key = match e {
-                    Evidence::Span { block_hk, .. } => (Some(block_hk.to_string()), None),
+                    // A cell is evidence about the table block it belongs to, so it is
+                    // grouped with that block's other evidence; the row and column go on
+                    // the satellite row beside the character span they replace.
+                    Evidence::Span { block_hk, .. } | Evidence::Cell { block_hk, .. } => (Some(block_hk.to_string()), None),
                     Evidence::Region { page_hk, .. } => (None, Some(page_hk.to_string())),
                 };
                 ev.entry(key).or_default().push(e);
@@ -907,25 +916,32 @@ impl Stage2Columns {
             for ((block_hk, page_hk), es) in ev {
                 let target = block_hk.clone().or_else(|| page_hk.clone()).unwrap_or_default();
                 let lnk = HashKey::of(&[hk.as_str(), &target]).to_string();
-                let rows: Vec<(Option<i32>, Option<i32>, Option<Value>)> = es
+                // (char_start, char_end, bbox, row, col) — a span fills the first two, a
+                // region the third, a cell the last two, and no evidence fills more than
+                // one shape.
+                type EvRow = (Option<i32>, Option<i32>, Option<Value>, Option<i32>, Option<i32>);
+                let rows: Vec<EvRow> = es
                     .iter()
                     .map(|e| match e {
-                        Evidence::Span { char_start, char_end, .. } => (Some(*char_start as i32), Some(*char_end as i32), None),
-                        Evidence::Region { bbox, .. } => (None, None, Some(serde_json::to_value(bbox).unwrap_or(Value::Null))),
+                        Evidence::Span { char_start, char_end, .. } => (Some(*char_start as i32), Some(*char_end as i32), None, None, None),
+                        Evidence::Region { bbox, .. } => (None, None, Some(serde_json::to_value(bbox).unwrap_or(Value::Null)), None, None),
+                        Evidence::Cell { row, col, .. } => (None, None, None, Some(*row as i32), Some(*col as i32)),
                     })
                     .collect();
-                let hd = hash_diff(&json!(rows.iter().map(|(s, e, b)| json!([s, e, b])).collect::<Vec<_>>()));
+                let hd = hash_diff(&json!(rows.iter().map(|(s, e, b, r, c)| json!([s, e, b, r, c])).collect::<Vec<_>>()));
                 c.ev_lnk_hk.push(lnk.clone());
                 c.ev_assertion_hk.push(hk.to_string());
                 c.ev_block_hk.push(block_hk);
                 c.ev_page_hk.push(page_hk);
-                for (i, (s, e, b)) in rows.into_iter().enumerate() {
+                for (i, (s, e, b, row, col)) in rows.into_iter().enumerate() {
                     c.se_lnk_hk.push(lnk.clone());
                     c.se_hash_diff.push(hd.clone());
                     c.se_sub_seq.push(i as i32);
                     c.se_char_start.push(s);
                     c.se_char_end.push(e);
                     c.se_bbox.push(b);
+                    c.se_row.push(row);
+                    c.se_col.push(col);
                 }
             }
         }

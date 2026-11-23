@@ -209,6 +209,14 @@ pub struct WorkerConfig {
     /// Abandoned documents claimed per sweep. Bounded so a copy that comes up after a
     /// fleet-wide outage does not take every orphaned document at once. Default 4.
     pub resume_batch: i64,
+    /// Finest DPI a DAG may ask for with `crop_dpi`, which re-renders the page from the
+    /// original so a small figure is not described from page-DPI pixels.
+    ///
+    /// A render is quadratic in DPI — 1200 dpi is nine times the pixels of 400 — so this
+    /// is the cap a typo in a DAG runs into rather than a page turning into minutes of
+    /// CPU. 0 disables re-rendering entirely, and `crop_dpi` then has no effect beyond a
+    /// logged warning. Default 600.
+    pub max_crop_dpi: u32,
     /// Times one document may be resumed before the job is failed. Stops a document that
     /// kills the process reading it from taking down the fleet one copy at a time.
     /// Default 3.
@@ -228,6 +236,7 @@ impl Default for WorkerConfig {
             max_documents: 4,
             page_attempts: 3,
             render_mem_limit_mb: None,
+            max_crop_dpi: 600,
             lease_ttl_s: 120,
             resume_interval_s: 60,
             resume_batch: 4,

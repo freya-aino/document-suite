@@ -11,6 +11,7 @@ pub mod doc;
 pub mod images;
 pub mod ingest;
 pub mod page;
+pub mod page_source;
 pub mod pipeline;
 
 use std::str::FromStr;
@@ -36,7 +37,16 @@ pub const MAX_PAGES: u32 = 5_000;
 /// Host and pid identify it to a person reading the table; the random suffix is what
 /// makes it *unique*, because two copies in two containers can share both — and a lease
 /// holder that is not unique is a lease that two processes think they hold.
+///
+/// `VS_HOLDER_ID` overrides it, for the one deployment shape where a *random* id is
+/// wrong: a Firecracker microVM restored from a snapshot is a copy of a process that
+/// already had one, so two restores of the same snapshot would share it. There the id
+/// belongs to the slot rather than to the process image, and the host agent passes it in
+/// (`deploy/firecracker/fleet.sh`).
 pub fn holder_id() -> String {
+    if let Some(id) = std::env::var("VS_HOLDER_ID").ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty()) {
+        return id;
+    }
     let host = std::env::var("HOSTNAME").ok().filter(|h| !h.is_empty()).unwrap_or_else(|| "host".into());
     format!("{host}/{}/{}", std::process::id(), &uuid::Uuid::now_v7().simple().to_string()[..8])
 }
@@ -110,12 +120,14 @@ pub async fn build_pipeline(cfg: &Config, deps: Deps) -> anyhow::Result<Pipeline
     };
     let default_visibility = vs_vault::Visibility::parse(cfg.api.default_visibility.trim())
         .ok_or_else(|| anyhow::anyhow!("api.default_visibility {:?}: expected private, department, workspace or organization", cfg.api.default_visibility))?;
+    let render_pool = Arc::new(render_pool(cfg, render_command)?);
+    let scratch = cfg.worker.scratch_dir.clone().unwrap_or_else(std::env::temp_dir);
     let ingest = ingest::IngestHandler {
         blob: blob.clone(),
         vault: vault.clone(),
         ops: ops.clone(),
-        pool: Arc::new(render_pool(cfg, render_command)?),
-        scratch_dir: cfg.worker.scratch_dir.clone().unwrap_or_else(std::env::temp_dir),
+        pool: render_pool.clone(),
+        scratch_dir: scratch.clone(),
         bucket: cfg.blob.bucket.clone(),
         render_dpi: cfg.worker.render_dpi,
         // From `[classify]`, not a constant here: the ingest stage renders the thumbnail
@@ -138,6 +150,10 @@ pub async fn build_pipeline(cfg: &Config, deps: Deps) -> anyhow::Result<Pipeline
             None
         }
     };
+    // One render pool for the process: the ingest stage rasterises whole documents with
+    // it, and a page step asking for a finer crop renders one page through the same
+    // bounded set of children, so the two cannot between them spawn twice the processes
+    // the configuration allows.
     let page = page::PageHandler {
         blob: blob.clone(),
         vault: vault.clone(),
@@ -148,6 +164,11 @@ pub async fn build_pipeline(cfg: &Config, deps: Deps) -> anyhow::Result<Pipeline
         vision,
         bucket: cfg.blob.bucket.clone(),
         render_dpi: cfg.worker.render_dpi,
+        render: (cfg.worker.max_crop_dpi > 0).then(|| page::ReRender {
+            pool: render_pool.clone(),
+            scratch_dir: scratch.clone(),
+            max_dpi: cfg.worker.max_crop_dpi,
+        }),
     };
 
     let s2 = &cfg.stage2;
