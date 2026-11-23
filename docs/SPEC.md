@@ -1,6 +1,6 @@
 # Visual Suite — System Specification
 
-Version: 0.6 · Status: implemented; one document verified end to end against live stores, with a fake model tier; authenticated against Keycloak · Date: 2026-11-17
+Version: 0.7 · Status: implemented; one document verified end to end against live stores with a fake model tier; authenticated against Keycloak, scoped per person, and recoverable after a crash · Date: 2026-11-23
 
 This is the top-level spec: purpose, architecture, the component map, the cross-cutting
 contracts, and the decisions. Each component has its own `SPEC.md` next to its code
@@ -92,9 +92,15 @@ every other copy.
 
 **One service** (decision D12): a deployment adds one unit and scales it by running more
 copies. Each copy takes whole documents, so scaling is per document rather than per page
-— the trade decision D13 made. In the Firecracker CPU tier nothing can be given work any
-more, which is why that tier is superseded (see
-[`deploy/firecracker`](../deploy/firecracker/SPEC.md)).
+— the trade decision D13 made.
+
+That is also what brought the Firecracker tier back. It was specified for queue consumers
+and marked superseded when the bus went, because a microVM takes no inbound connections
+and there was no way to push a document to one. A copy of the service *serves HTTP*, and a
+guest's address is reachable from its host across its own TAP device, so a load balancer on
+the host hands it uploads like any other copy — see
+[`deploy/firecracker`](../deploy/firecracker/SPEC.md), which now has a host agent and an
+autoscaler.
 
 **Key decision D1:** Firecracker has no GPU passthrough, so microVMs run CPU work only
 (I/O, rendering, classification rules, orchestration, parsing model output, writes).
@@ -134,8 +140,8 @@ DAG list. The five commands and their inputs and outputs are specified once, in
 | Crate / folder | Kind | Responsibility | Docs |
 |---|---|---|---|
 | `vs-core` | lib | Shared types: IDs, hash keys, geometry, blocks, page profile, provenance, jobs | [README](../crates/vs-core/README.md) |
-| `vs-infra` | lib | Task bus, blob store, config, telemetry | [SPEC](../crates/vs-infra/SPEC.md) |
-| `vs-api` | lib | Public HTTP API: uploads, batches, status, DAG-list admin | [SPEC](../crates/vs-api/SPEC.md) |
+| `vs-infra` | lib | Blob store (with encryption and retention), config, telemetry | [SPEC](../crates/vs-infra/SPEC.md) |
+| `vs-api` | lib | Public HTTP API: uploads, batches, status, access and sharing, DAG-list admin | [SPEC](../crates/vs-api/SPEC.md) |
 | `vs-ingest` | lib | Format detection, rasterization, native text layer, CPU steps | [SPEC](../crates/vs-ingest/SPEC.md) |
 | `vs-classify` | lib | Page classification → `PageProfile` | [SPEC](../crates/vs-classify/SPEC.md) |
 | `vs-dag` | lib | DAG model, step trait, validation, executor | [README](../crates/vs-dag/README.md) |
@@ -145,15 +151,15 @@ DAG list. The five commands and their inputs and outputs are specified once, in
 | `vs-stitch` | lib | Page results → one coherent document | [SPEC](../crates/vs-stitch/SPEC.md) |
 | `vs-extract` | lib | Mentions, assertions, entity resolution | [SPEC](../crates/vs-extract/SPEC.md) |
 | `vs-graph` | lib | Document graph model and builder | [README](../crates/vs-graph/README.md) |
-| `vs-vault` | lib | Data Vault 2.0 writer + migrations; graph projection and corpus entity resolution | [SPEC](../crates/vs-vault/SPEC.md) |
-| `vs-vectors` | lib | Vector store trait + Qdrant implementation (dense and sparse) | [SPEC](../crates/vs-vectors/SPEC.md) |
-| `vs-worker` | lib | The worker roles `ingest`, `page`, `doc` | [SPEC](../crates/vs-worker/SPEC.md) |
-| `vs-suite` | **bin** | **The service**: the API and all three roles in one process | [README](../crates/vs-suite/README.md) |
-| `vs-adapt` | bin | Workflow generation, scoring, selection | [SPEC](../crates/vs-adapt/SPEC.md) |
+| `vs-vault` | lib | Data Vault 2.0 writer + migrations; the graph layer, corpus entity resolution, and the `ops` tables that must be mutable (access, leases, revocations) | [SPEC](../crates/vs-vault/SPEC.md) |
+| `vs-vectors` | lib | Vector store trait + Qdrant implementation (dense, sparse, and the two fused) | [SPEC](../crates/vs-vectors/SPEC.md) |
+| `vs-worker` | lib | The three pipeline stages, their leases, and the document-type pass before the fan-out | [SPEC](../crates/vs-worker/SPEC.md) |
+| `vs-suite` | **bin** | **The service**: the API, all three stages, and the sweeps that keep them honest, in one process | [README](../crates/vs-suite/README.md) |
+| `vs-adapt` | bin | Workflow generation, scoring, selection; a generated corpus and the classifier's own score | [SPEC](../crates/vs-adapt/SPEC.md) |
 | `deploy/` | ops | Embedding the suite in another deployment: binaries, the configuration surface, what must exist first | [README](../deploy/README.md) |
 | `deploy/docker` | ops | The service image: multi-stage build, pinned pdfium, minimal baked config | [Dockerfile](../deploy/docker/Dockerfile) |
 | `deploy/keycloak` | ops | The development realm `vs-api` verifies against | [README](../deploy/keycloak/README.md) |
-| `deploy/firecracker` | ops | microVM image and fleet | [SPEC](../deploy/firecracker/SPEC.md) |
+| `deploy/firecracker` | ops | microVM image, the host agent and the autoscaler | [SPEC](../deploy/firecracker/SPEC.md) |
 | `deploy/gpu` | ops | Model serving tier | [SPEC](../deploy/gpu/SPEC.md) |
 | `config/` | config | Example models, worker and DAG-list files | — |
 
@@ -197,20 +203,38 @@ as fast as one copy can make it.
 ### 5.3 Priority
 
 `priority` is still `interactive` or `batch` on every upload (A20), and still means the
-same thing: interactive work must not queue behind a large batch. With the two queue lanes
-gone, it is enforced by reserving a share of the process's page slots
-(`worker.interactive_share`) for interactive documents —
-[`vs-worker`](../crates/vs-worker/SPEC.md). Admission and back-pressure:
-[`vs-api`](../crates/vs-api/SPEC.md).
+same thing: interactive work must not queue behind a large batch. It is enforced in two
+places, because one of them was never enough:
+
+- **In the process**, by reserving a share of its page slots
+  (`worker.interactive_share`) for interactive documents —
+  [`vs-worker`](../crates/vs-worker/SPEC.md). This stops a batch from filling a copy.
+- **At the GPU**, by sending interactive calls to replicas the batch cannot reach
+  (`interactive_endpoints` in the model registry, D15). Reserving slots in the service
+  does nothing about the batch's requests already queued in a vLLM instance: a thousand
+  batch pages and one interactive page queue together, and the page waits behind them.
+
+Admission and back-pressure: [`vs-api`](../crates/vs-api/SPEC.md).
 
 ### 5.4 Reliability
 
 **Every write is idempotent** — through hash keys and `ON CONFLICT DO NOTHING`. That was
-required when delivery was at-least-once, and it is what makes the weaker guarantee that
-replaced it usable: nothing redelivers a document now, so recovery is the caller re-POSTing
-the upload, which resumes rather than repeats (rendered pages are skipped when their
-signals are present, and no vault row is written twice). In-process retries for a transient
-page failure and the per-page give-up path:
+required when delivery was at-least-once, and it is what makes recovery cheap now that
+nothing redelivers: a document that is run again resumes rather than repeats (rendered
+pages are skipped when their signals are present, and no vault row is written twice).
+
+**A crashed copy's documents are picked up.** Each job is leased by the process working on
+it and renewed while it works; a lease that stops being renewed is what a crash looks like
+from outside, and every copy sweeps for lapsed leases and claims them with
+`FOR UPDATE SKIP LOCKED`. `worker.max_resumes` bounds how often one document may be picked
+up, so a document that kills the process reading it cannot take the fleet down one copy at
+a time — past the bound its job is failed with a reason the caller can read. This is what
+replaced redelivery when the bus went (D13), and it is deliberately less than a queue:
+nothing spreads one document's pages across machines, and a resumed document is processed
+by one copy like every other. The sweep: [`vs-suite`](../crates/vs-suite/README.md); the
+lease: [`vs-worker`](../crates/vs-worker/SPEC.md).
+
+In-process retries for a transient page failure and the per-page give-up path:
 [`vs-worker`](../crates/vs-worker/SPEC.md). Partial-document threshold:
 [`vs-worker`](../crates/vs-worker/SPEC.md). Per-step timeouts:
 [`vs-dag`](../crates/vs-dag/README.md). Insert-only history:
@@ -220,7 +244,9 @@ page failure and the per-page give-up path:
 
 Standard span fields on every trace: `job_id`, `run_id`, `document_hk`, `page_no`,
 `node_id`, plus `tenant` on an HTTP request — and **no identifier of a person**, which is
-a hard rule, not a default (§5.6). Exporters and the Prometheus
+a hard rule, not a default (§5.6). Traces are sampled parent-based at `telemetry.sample_ratio` (1.0 by default, so nothing is
+dropped until a deployment chooses to), which keeps a trace whole rather than exporting it
+in pieces. Exporters and the Prometheus
 endpoint: [`vs-infra`](../crates/vs-infra/SPEC.md). Each component's metric names are in
 its own spec, and both halves carry one name for the process — a `service` label on every
 series, the same string as the traces' `service.name` — so a counter and a trace from the
@@ -248,25 +274,39 @@ Where personal data *does* live, and nowhere else:
 
 | Store | What | Retention |
 |---|---|---|
-| `ops.jobs.spec` (JSONB) | `owner`: the caller's subject, department and workspaces, from the verified token — needed for per-person access control | **none implemented** |
+| `ops.jobs.owner_subject` and `ops.jobs.spec.owner` | the caller's subject, department and workspaces, from the verified token — what per-person access control is evaluated against | scrubbed from finished jobs after `api.job_retention_days` (90), and immediately on erasure |
+| `ops.document_access` | the uploader of each document, and how wide it is open | cleared on erasure; the document stays and becomes the organization's |
+| `ops.document_grants` | who a document was shared with, and by whom | deleted on erasure, either side |
 | ~~Task payloads on the bus~~ | — | **gone with the bus** (D13): the `JobSpec` no longer leaves the process, so there is no queue or dead-letter copy of it to age out |
 | Keycloak | the identity itself | the realm's own policy |
 
 The **Data Vault holds none of it**: no satellite stores the owner, which matters because
 the vault is insert-only by design (D5) and an erasure request cannot be served by a store
-that never forgets. Deleting a person's data therefore means `ops` rows and nothing else —
-removing the bus shrank this surface rather than growing it. Retention and an erasure path for those are **not implemented** — see
-[`deploy/README.md`](../deploy/README.md).
+that never forgets. Deleting a person's data therefore means `ops` rows and nothing else,
+and `DELETE /v1/owners/{subject}` is that operation — allowed to an administrator and to
+the person themselves, because an erasure request is the data subject's to make. Decision
+D14 is the reason the rows are where they are.
 
 Tenancy is part of every hash key, and the tenant never comes from a request body — nor
 from a header. **The tenant is the organization**, taken from a verified Keycloak token
 (D11), which makes it the isolation boundary: every document and entity key hashes it,
-every blob key is prefixed by it, and the Qdrant collections are partitioned on it. The
-rest of the caller's identity — person, department, workspaces — is recorded on the job
-(`JobSpec::owner`) but is **not yet enforced**: inside one organization, every member can
-read every document. Auth, the checks each request is held to, and that gap:
+every blob key is prefixed by it, and the Qdrant collections are partitioned on it.
+
+**Inside** an organization, access is the person's (D14). A document is private to its
+uploader by default (`api.default_visibility`), widened per document to a department, a
+workspace or the whole organization, with named grants as exceptions; a job is the asker's,
+plus whoever can read the document it produced. One function decides
+(`vs_vault::access::Reader::may_read`), the SQL behind the listing only narrows, and a
+`403` says so rather than a `404` pretending otherwise — a document's hash key is derived
+from its content, so a caller who can name one already has the bytes.
+
+A verified token is also no longer good until its `exp` whatever has happened to it:
+sessions, tokens and people can be revoked, written by Keycloak's own back-channel logout
+or by an administrator, with `api.revocation_refresh_s` as the stated window. Auth, the
+checks each request is held to, and the access rule in full:
 [`vs-api`](../crates/vs-api/SPEC.md); what a realm must provide and what an embedding
-deployment must configure: [`deploy/`](../deploy/README.md). Network isolation and the no-inbound-ports rule:
+deployment must configure: [`deploy/`](../deploy/README.md). Network isolation and the
+per-microVM egress allow-lists:
 [`deploy/firecracker`](../deploy/firecracker/SPEC.md). Secrets from the environment, and
 encryption at rest: [`vs-infra`](../crates/vs-infra/SPEC.md).
 
@@ -286,7 +326,14 @@ encryption at rest: [`vs-infra`](../crates/vs-infra/SPEC.md).
 | D10 | Authentication is Keycloak (OIDC) access tokens verified in `vs-api`, against the realm's published keys | The SSO that already holds the identity model; verifying a signature locally keeps Keycloak off the path of every request, unlike introspection |
 | D11 | **The tenant is the organization**, from a verified claim | The isolation boundary has to be the thing that `TenantId` already is: key material in every hash key, blob prefix and vector partition. Organization also makes one corpus per company, so entity resolution and duplicate detection work across colleagues — which a per-person tenant would break, since the same file uploaded twice would be two documents with two keys. Person, department and workspace are therefore read scoping *within* a tenant, not key material |
 | D12 | **One service**: `vs-suite` serves the API and runs the pipeline in one process | A deployment embedding the suite should add one service, not learn its internal shape. `vs-api` and `vs-worker` are libraries |
-| D13 | **No task bus.** The stages are function calls; an accepted upload is processed by the process that accepted it | The per-page DAG always ran in-process, so the queue's only unique contribution was spreading one document's pages across machines — paid for with a service, three deployable roles, redelivery, dead-lettering, lanes and de-duplication ids. Page work is dominated by waiting on the shared model tier, which one process can saturate. The cost, accepted knowingly: a large document is no longer spread over the fleet, and nothing redelivers after a crash — the caller re-POSTs, and the upload resumes rather than repeats (§5.4). Withdraws A6 and G8 |
+| D13 | **No task bus.** The stages are function calls; an accepted upload is processed by the process that accepted it | The per-page DAG always ran in-process, so the queue's only unique contribution was spreading one document's pages across machines — paid for with a service, three deployable roles, redelivery, dead-lettering, lanes and de-duplication ids. Page work is dominated by waiting on the shared model tier, which one process can saturate. The cost, accepted knowingly: a large document is no longer spread over the fleet. Recovery after a crash came back as a **lease and a resume sweep** rather than as a queue (§5.4). Withdraws A6 and G8 |
+| D14 | **Access control lives in `ops`, not in the vault.** Ownership, visibility, grants, job leases, token revocations and the one personal identifier are all mutable rows beside the jobs | The raw vault is insert-only by design (D5) and at the database level (migration 0003 grants the runtime role neither UPDATE nor DELETE), so a share could not be withdrawn there and an erasure request could not be served there. Putting ownership columns on satellites was the obvious reading of "scope the documents" and it is the wrong one: it would make every re-share a new satellite row and every erasure impossible. `ops` is also where the only other personal identifier already was, so there is one surface to erase rather than two. The cost: a read goes to `ops` as well as the vault, which is one indexed lookup on a primary key |
+| D15 | **A replica set reserved for interactive work**, declared per model as `interactive_endpoints` | Reserving page slots inside the service stops a batch from filling a *copy* and does nothing about the batch's requests already queued in a vLLM instance: a thousand batch pages and one interactive page queue together at the GPU, and the page waits behind them. Short of a scheduler inside the server, separate replicas are the only fix. A deployment with one pool declares nothing and is unaffected |
+
+**D14 is worth reading as a correction.** `vs-api`'s own status used to say that scoping
+reads "needs ownership columns in the vault and a migration". That was the obvious design
+and it was wrong for a reason the vault's own rules make plain, which is why the decision
+is recorded with the alternative it rejects rather than only with what was built.
 
 **D6/D9 replaced the original HelixDB decisions.** HelixDB held the current graph
 projection and the vectors. It has been removed in favour of Postgres (graph) and Qdrant
@@ -322,16 +369,23 @@ Where the rest went: A1, A2, A7 → [`vs-models`](../crates/vs-models/SPEC.md) a
 2. Which document types matter most after scientific papers, to seed the adaptation
    datasets → [`vs-adapt`](../crates/vs-adapt/SPEC.md).
 3. Ground-truth availability, especially relation-annotated scientific papers →
-   [`vs-adapt`](../crates/vs-adapt/SPEC.md).
-4. Retention rules for originals and page images →
-   [`vs-infra`](../crates/vs-infra/SPEC.md).
+   [`vs-adapt`](../crates/vs-adapt/SPEC.md). A *synthetic* corpus exists now
+   (`vs-adapt dataset`) and exercises the chain; it calibrates nothing, so this question
+   is unchanged for everything that matters.
 
-5. Whether read scoping inside an organization is per person, per department or per
-   workspace, and what a shared workspace means for a document — the question that
-   decides the ownership columns the vault would need →
-   [`vs-api`](../crates/vs-api/SPEC.md).
+Resolved, with the answers in the components that act on them:
 
-Resolved: the authentication design. It was "mTLS or a JWT from your service-api — to be
+- **Retention for originals and page images** (was question 4). `[blob.retention]`:
+  derived objects are kept for days-to-months by class and swept, and **originals are kept
+  forever** unless a deployment says otherwise — deleting a tenant's input is not this
+  software's decision to make. [`vs-infra`](../crates/vs-infra/SPEC.md).
+- **Read scoping inside an organization** (was question 5). All three, as a per-document
+  `visibility` — private, department, workspace, organization — with named grants as
+  exceptions, defaulting to private. A shared workspace is a snapshot taken at upload, so a
+  document shared with a workspace stays shared with it after the uploader leaves.
+  [`vs-api`](../crates/vs-api/SPEC.md), decision D14.
+
+Resolved earlier: the authentication design. It was "mTLS or a JWT from your service-api — to be
 decided"; it is now Keycloak tokens verified in `vs-api`, with the organization as the
 tenant (D10, D11). Also resolved: what the RAG service needs from the graph store. It now queries Postgres and
 Qdrant directly, and the contract it reads is [`docs/STORES.md`](STORES.md) — key

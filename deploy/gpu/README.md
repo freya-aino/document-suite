@@ -12,11 +12,40 @@ endpoints that serve it, and `vs-models` round-robins over them. Design: [SPEC.m
 | `classifier`  | `page-classifier`  | page_classify                          | `Qwen/Qwen3-VL-2B-Instruct` |
 | `llm-extract` | `extract-llm`      | extract, verify, type_normalise, entity_judge | `Qwen/Qwen3-32B` (TP 2) |
 | `embed`       | `embed-text`       | embed (`/v1/embeddings`)               | `Qwen/Qwen3-Embedding-0.6B` |
+| `doc-parse-interactive` | `paddleocr-vl-1.5` (the same id) | the same tasks, reserved for interactive uploads | the same weights as `doc-parse` |
 
 The weights are placeholders for the candidates `vs-adapt` evaluates; swap the Hugging
 Face id and pin `--revision` / `MODEL_REVISION`. **The registry's `revision` must match
 what is served** (it is recorded in provenance). Changing the `embed` model changes the
-vector space: the vector store needs a new collection, back-filled, before switching.
+vector space: `vs-vectors` refuses the new dimension against the live collection and
+`vs-suite vectors migrate` creates the next one behind the same alias — the documents then
+have to be re-run, because nothing converts a vector from one embedder's space to
+another's.
+
+## The reserved interactive pool
+
+`doc-parse-interactive` serves the same weights under the same name as `doc-parse`, and
+the registry sends only interactive uploads to it:
+
+```toml
+[[model]]
+id = "paddleocr-vl-1.5"
+endpoints = ["http://doc-parse.vs-gpu.svc:8000/v1"]
+interactive_endpoints = ["http://doc-parse-interactive.vs-gpu.svc:8000/v1"]
+```
+
+Why it is a second pool rather than a bigger first one: reserving page slots inside the
+service stops a batch from filling a copy and does nothing about the batch's requests
+already queued in a vLLM instance. A thousand batch pages and one interactive page queue
+together at the GPU, and the page waits behind them.
+
+```sh
+docker compose --profile interactive up -d doc-parse-interactive   # compose
+# k8s: it is in kustomization.yaml; drop the line for a batch-only deployment
+```
+
+Leave it out and interactive uploads share the pool, which is what happened before it
+existed.
 
 ## Without this tier at all
 

@@ -126,7 +126,7 @@ misrouting.
 
 ### Render children (`child`, `pool`)
 
-**pdfium never runs in the worker process.** The ingest role renders through a
+**pdfium never runs in the service process.** The ingest stage renders through a
 `RenderPool` of child processes (`vs-suite render-child`; `vs-render-child` for
 tests), one pdfium binding each:
 
@@ -143,7 +143,7 @@ tests), one pdfium binding each:
 
 ### Spooling
 
-The ingest role streams the original from the object store to `scratch_dir` (the
+The ingest stage streams the original from the object store to `scratch_dir` (the
 microVM scratch disk), hashing it on the way, and renders from that file; it is
 deleted when the task ends. Memory use does not grow with file size: at most one
 rendered page per child is held before upload.

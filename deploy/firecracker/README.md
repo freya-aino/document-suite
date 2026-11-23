@@ -1,25 +1,23 @@
 # deploy/firecracker — build and boot a vs-worker microVM
 
-> **Superseded** by decision D13, which removed the task bus: nothing can hand a document
-> to a microVM any more. Kept as the worked example of packaging `vs-suite` with its
-> shared-library closure. See `SPEC.md` next to this file.
-
-One microVM runs one `vs-worker` process in one role (`ingest`, `page`, `doc`).
-Design and sizing: [SPEC.md](SPEC.md). Files here:
+One microVM runs one copy of the **service**, and a load balancer on the host hands it
+uploads — the suite is one HTTP service (D12), and a guest is reachable across its own TAP
+device. Design and sizing: [SPEC.md](SPEC.md). Files here:
 
 | File | Purpose |
 |------|---------|
 | `build-rootfs.sh` | builds `rootfs.ext4` from the worker binary, pdfium, CA bundle and config |
 | `init.sh` | the guest's `/sbin/init`: mounts, scratch disk, network, MMDS secrets, starts the worker |
 | `vm-config.example.json` | Firecracker config: kernel args, drives, TAP interface, MMDS |
-| `firecracker-run.sh` | local wrapper: TAP device + NAT, config substitution, MMDS secrets, boot |
+| `firecracker-run.sh` | one VM: TAP device + NAT, config substitution, MMDS secrets, boot |
+| `fleet.sh` | several VMs on one host: boot, scale, status, endpoints, egress allow-lists, snapshots, autoscaling |
 | `devenv.nix` | `devenv --profile firecracker shell` with firecracker and e2fsprogs |
 
 ## 1. Build the pieces
 
 ```sh
-# glibc build of the worker (the rootfs ships its shared-library closure)
-cargo build --release -p vs-worker --target x86_64-unknown-linux-gnu
+# glibc build of the service (the rootfs ships its shared-library closure)
+cargo build --release -p vs-suite --target x86_64-unknown-linux-gnu
 
 # a guest kernel: Firecracker's CI kernels work out of the box
 curl -fLo vmlinux \
@@ -44,8 +42,9 @@ instead (`nix path-info -r`). `busybox` is taken from `PATH` or `--busybox`; a s
 busybox keeps the image small. The build needs no root: `mkfs.ext4 -d` populates the
 image from a directory.
 
-The baked `worker.toml` holds everything that is not secret (NATS, object store,
-Postgres URL without password, Qdrant URL, model registry path). Secrets arrive via MMDS.
+The baked `worker.toml` holds everything that is not secret (object store, Postgres URL
+without password, Qdrant URL, model registry path, `[auth]`). Secrets arrive via MMDS,
+along with the slot's own `VS_HOLDER_ID` and `VS_API_ADDR`.
 
 ## 2. Boot one VM locally
 
@@ -76,18 +75,38 @@ powers off when the worker exits (`reboot=k panic=1` makes Firecracker exit).
 
 1. mounts `/proc`, `/sys`, `/dev`, `/run`, `/tmp`; mounts (or formats and mounts) the
    second block device at `/scratch`;
-2. reads `vs.role=` from the kernel command line (a bare `VS_ROLE=…` boot argument also
-   works: the kernel exports unknown `KEY=VALUE` arguments to init's environment);
+2. (there are no roles to select: the service runs every stage);
 3. configures `eth0` from `vs.ip=`/`vs.gw=`/`vs.dns=` or the kernel's `ip=` argument;
 4. fetches a MMDS V2 session token and `GET /vs/env`, exports every well-formed
    `VS__NAME=value` line (nothing is sourced as shell);
-5. runs `/usr/bin/vs-worker --role $ROLE` with `VS_CONFIG=/etc/vs/worker.toml` and
-   `TMPDIR=/scratch`, forwards `SIGTERM`, reaps orphaned children (the ingest role's
-   render processes), and powers off when the worker exits.
+5. runs `/usr/bin/vs-suite` with `VS_CONFIG=/etc/vs/worker.toml` and `TMPDIR=/scratch`,
+   forwards `SIGTERM`, reaps orphaned children (the render processes), and powers off when
+   the service exits.
 
-Everything the worker needs is reachable from the TAP network only: NATS, PgBouncer,
-object store, Qdrant, the GPU tier's endpoints and the OTLP collector. No SSH, no
-inbound ports.
+What the guest reaches *out* to — PgBouncer, the object store, Qdrant, Keycloak, the GPU
+tier's endpoints and the OTLP collector — is restricted per VM by `fleet.sh --allow`,
+which builds a firewall chain per TAP with a default DROP. What reaches *in* is the host's
+load balancer, on the API port and nothing else: no SSH, and no port published beyond the
+TAP network.
+
+## Several VMs on one host (fleet.sh)
+
+```sh
+# four copies, each with its own scratch disk, reachable only where it needs to be
+./fleet.sh up --count 4 --kernel vmlinux --rootfs rootfs.ext4 \
+    --scratch-template scratch.ext4 --mmds-env secrets.env \
+    --allow pg.internal:6432 --allow s3.internal:443 --allow qdrant.internal:6334 \
+    --allow sso.internal:443 --allow doc-parse.gpu.internal:8000
+
+./fleet.sh status                 # id, guest address, document-slot load
+./fleet.sh endpoints              # 172.16.1.2:8080 … — feed this to the load balancer
+./fleet.sh scale --count 6
+./fleet.sh autoscale --min 2 --max 8 --target-load 0.7 &
+./fleet.sh down
+```
+
+`--dry-run` prints every command it would run and starts nothing, which is how to read
+what it does on a host without `/dev/kvm`.
 
 ## Driving the API by hand
 
@@ -104,5 +123,8 @@ curl --unix-socket /tmp/fc.sock -X PUT http://localhost/mmds           -d '{"vs"
 curl --unix-socket /tmp/fc.sock -X PUT http://localhost/actions        -d '{"action_type":"InstanceStart"}'
 ```
 
-Snapshots (`/snapshot/create` after the worker is idle, `/snapshot/load` for warm
-starts) and per-VM egress filtering are the host agent's job (SPEC.md "Fleet management").
+Snapshots and per-VM egress filtering are `fleet.sh`'s job: `fleet.sh snapshot --id N`
+pauses, writes `snapshot-N.vmstate` and `snapshot-N.mem`, and resumes. A restored snapshot
+needs its MMDS re-PUT before it resumes — its lease holder id comes from there, and two
+restores sharing one id would each believe they held the other's lease on a document
+(SPEC.md).

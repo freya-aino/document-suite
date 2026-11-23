@@ -26,9 +26,12 @@ is more copies, each taking whole documents.
 
 **What that gives up**, stated here because it is the kind of thing a reader should not
 have to discover: a single large document is processed by one copy rather than spread
-across the fleet, and nothing redelivers work after a crash. A failed or abandoned job is
-re-POSTed by the caller and resumes rather than repeats — rendered pages are skipped when
-their signals are present, and every vault write is idempotent.
+across the fleet.
+
+What it no longer gives up is recovery. Each document is **leased** by the copy working on
+it, and `resume.rs` — this crate's sweep — claims the ones whose leases lapsed, which is
+what a crashed copy leaves behind. Re-running resumes rather than repeats: rendered pages
+are skipped when their signals are present and every vault write is idempotent.
 
 ## What this crate is
 
@@ -72,14 +75,30 @@ dimension is a startup failure rather than a surprise at the first document that
 far. Config keys and their `VS__*` overrides:
 [`config/worker.example.toml`](../../config/worker.example.toml).
 
+## What runs beside the pipeline
+
+Four sweeps, all of them in every copy, because all four are idempotent and electing one
+owner would need a lock for jobs whose worst case is a wasted query:
+
+| Sweep | Every | What |
+|---|---|---|
+| resume (`resume.rs`) | `worker.resume_interval_s` | claims documents a crashed copy abandoned, and fails the ones past `worker.max_resumes` |
+| idempotency purge | 1 h | drops expired `Idempotency-Key` rows |
+| job retention | 6 h | scrubs the caller's subject from jobs finished longer ago than `api.job_retention_days` |
+| object retention | `blob.retention.sweep_interval_h` | prunes derived objects past their retention; originals are kept |
+
+The resume sweep claims nothing while this copy is already carrying
+`worker.max_documents`: a claim it cannot start is a lease held over a document nobody is
+working on, which is worse than leaving it for a copy with room.
+
 ## Known limitations
 
-- **A crash abandons the documents in flight.** Their job rows stay mid-flight until the
-  caller re-POSTs. A resume sweep at startup would close it and needs a lease column so
-  two copies cannot claim the same job — a small piece of the queue that was removed, and
-  deliberately not rebuilt yet.
 - **Admission control is per copy.** `api.interactive_max_pending` counts this process's
-  documents, so a load balancer can get a `429` from one copy while another is idle.
+  documents, so a load balancer can get a `429` from one copy while another is idle. The
+  same is true of `api.tenant_rate_per_s`: a fleet of N copies allows N × the rate.
+- **The resume sweep scales on occupancy, not demand.** It notices a document nobody is
+  working on; it cannot notice one nobody has uploaded yet. A burst is absorbed by
+  back-pressure at the API, not here.
 - **A stage that fails at startup fails the process.** Deliberate — a service that
   accepted uploads it could not finish would be worse — but it does mean the API will not
   serve while Stage 2's dependencies are down.
