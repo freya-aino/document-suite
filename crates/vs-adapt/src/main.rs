@@ -18,6 +18,56 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Write a ground-truthed synthetic corpus and its manifest.
+    ///
+    /// The manifest format was specified and there was nothing to point it at, so the
+    /// five commands had never run as a chain. These documents are born-digital, clean
+    /// and labelled from the geometry they were written with: enough to exercise
+    /// `generate → run → score → select → report` end to end, and not a substitute for
+    /// real documents — see `dataset.rs`.
+    Dataset {
+        /// Directory to write `docs/`, `ground-truth/` and `manifest.jsonl` into.
+        #[arg(long)]
+        out: PathBuf,
+        /// Documents per page shape (prose, two-column, form, table).
+        #[arg(long, default_value_t = 3)]
+        docs_per_shape: usize,
+        #[arg(long, default_value_t = 2)]
+        pages_per_doc: u32,
+        #[arg(long, default_value = "en")]
+        language: String,
+    },
+    /// Score the page classifier against the dataset's labels, and calibrate its
+    /// confidence.
+    ///
+    /// Everything else here scores DAG *output*; this scores the thing that chooses the
+    /// DAG. The classifier is run **without** the manifest's `doc_type_hint`, because
+    /// that hint is the label.
+    ClassifyScore {
+        #[arg(long)]
+        manifest: PathBuf,
+        /// Where page images are written (reused if already there).
+        #[arg(long)]
+        out: PathBuf,
+        #[arg(long, default_value = "config/models.example.toml")]
+        models: PathBuf,
+        /// Model id of the tier 1 vision classifier. Without it, only the rule tier is
+        /// scored — which is a number worth having on its own.
+        #[arg(long)]
+        classifier_model: Option<String>,
+        #[arg(long)]
+        render_child: Option<PathBuf>,
+        #[arg(long, default_value_t = 50)]
+        max_pages: u32,
+        #[arg(long, default_value_t = 200)]
+        dpi: u32,
+        /// Only documents of this split.
+        #[arg(long)]
+        split: Option<String>,
+        /// Write the Markdown section here as well as to stdout.
+        #[arg(long)]
+        report: Option<PathBuf>,
+    },
     /// Expand templates into validated candidate DAGs.
     Generate {
         #[arg(long)]
@@ -242,6 +292,10 @@ async fn main() -> anyhow::Result<()> {
                     parallel,
                     split,
                     keep_share: 1.0 / 3.0,
+                    // A normal run passes the manifest's hint to routing, because that is
+                    // exactly what a caller would send. `classify-score` is the one
+                    // command that withholds it.
+                    ignore_doc_type_hint: false,
                     objective: opt_json(objective)?,
                     weights: opt_json(weights)?,
                 },
@@ -251,6 +305,86 @@ async fn main() -> anyhow::Result<()> {
             let records = runner.run_all(&dags, &pages).await?;
             let ok = records.iter().filter(|r| r.ok).count();
             println!("wrote {} runs ({} ok, {} failed) to {}", records.len(), ok, records.len() - ok, out.join("runs.jsonl").display());
+            Ok(())
+        }
+        Cmd::Dataset { out, docs_per_shape, pages_per_doc, language } => {
+            let spec = vs_adapt::dataset::Spec { docs_per_shape, pages_per_doc, language, ..Default::default() };
+            let w = vs_adapt::dataset::write(&out, &spec)?;
+            println!("wrote {} documents ({} pages) and {}", w.documents, w.pages, w.manifest.display());
+            for (shape, n) in &w.by_shape {
+                println!("  {shape}: {n} documents");
+            }
+            println!("next: vs-adapt run --manifest {} --candidates <candidates.json> --out <run-dir>", w.manifest.display());
+            Ok(())
+        }
+        Cmd::ClassifyScore { manifest, out, models, classifier_model, render_child, max_pages, dpi, split, report } => {
+            let manifest: Vec<ManifestEntry> = read_jsonl(&manifest)?;
+            std::fs::create_dir_all(&out)?;
+            let client = client(&models)?;
+            let registry = vs_steps::production_registry(client.clone());
+            let child = match render_child {
+                Some(p) => p,
+                None => std::env::current_exe()?.parent().map(|d| d.join("vs-render-child")).ok_or_else(|| anyhow::anyhow!("cannot locate vs-render-child"))?,
+            };
+            let size = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2);
+            let pool = Arc::new(vs_ingest::RenderPool::new(
+                vs_ingest::ChildCommand { program: child, args: vec![], env: vec![] },
+                vs_ingest::PoolConfig { size, page_timeout: Duration::from_secs(60), open_timeout: Duration::from_secs(60) },
+            ));
+            let classify_cfg = vs_classify::ClassifyConfig::default();
+            let thumb_px = classify_cfg.thumbnail_long_side_px;
+            let classifier = classifier_model.map(|model| vs_classify::Classifier {
+                cfg: classify_cfg.clone(),
+                vision: Arc::new(vs_models::classifier::VlmPageClassifier { client: client.clone(), model }),
+            });
+            let runner = Runner {
+                registry,
+                pool,
+                classifier,
+                classify_cfg,
+                fetcher: Box::new(LocalFetcher),
+                cfg: RunConfig {
+                    out: out.clone(),
+                    sample: 0,
+                    rounds: 0,
+                    max_pages,
+                    dpi,
+                    thumb_px,
+                    parallel: 1,
+                    split,
+                    keep_share: 1.0,
+                    objective: Default::default(),
+                    weights: Default::default(),
+                    // The whole point: the label must not reach the classifier.
+                    ignore_doc_type_hint: true,
+                },
+            };
+            let pages = runner.prepare(&manifest).await?;
+            // A `doc_type` in the ground truth labels the page; otherwise the manifest
+            // entry that produced it labels the document. The page carries its manifest
+            // index, so there is no second derivation of a document id to get wrong.
+            let judged: Vec<vs_adapt::Judged> = pages
+                .iter()
+                .filter_map(|p| {
+                    let per_page = p
+                        .ground_truth_uri
+                        .as_deref()
+                        .and_then(|uri| vs_adapt::score::load_ground_truth_doc_type(uri, p.page_no));
+                    let label = per_page.or_else(|| manifest.get(p.manifest_index).and_then(|m| m.doc_type_hint))?;
+                    Some(vs_adapt::Judged { page_id: format!("{}/{}", p.doc, p.page_no), label, profile: p.profile.clone() })
+                })
+                .collect();
+            let unlabelled = pages.len() - judged.len();
+            let score = vs_adapt::score_classifier(&judged);
+            let md = vs_adapt::classify_score::render(&score);
+            print!("{md}");
+            if unlabelled > 0 {
+                println!("{unlabelled} of {} prepared pages carried no label and were not scored.", pages.len());
+            }
+            if let Some(path) = report {
+                std::fs::write(&path, &md)?;
+                println!("wrote {}", path.display());
+            }
             Ok(())
         }
         Cmd::Score { runs, out, weights, judge_model, models } => {

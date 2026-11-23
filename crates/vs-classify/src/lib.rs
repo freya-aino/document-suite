@@ -79,6 +79,14 @@ pub struct ClassifyConfig {
     /// table, a ledger. Six is two horizontals and four verticals, or the other way
     /// round: fewer than that is an underline and a page edge.
     pub ruled_min_lines: u16,
+    /// Confidence reported when the rules ran and nothing determined the document type:
+    /// no caller hint, no ruled page, no vision model.
+    ///
+    /// Deliberately below the routing table's default `min_classifier_confidence` (0.6),
+    /// so such a page takes the low-confidence DAG — which is what that DAG is for. The
+    /// alternative, which is what happened before, is a page claiming 0.85 confidence in
+    /// a document type of `other` that nothing ever looked for.
+    pub unknown_doc_type_confidence: f32,
     /// Mid-tone fraction at or above which a raster page is treated as a photograph.
     ///
     /// Well above a scan's own grey — paper and shadow put a few per cent in the middle —
@@ -100,6 +108,7 @@ impl Default for ClassifyConfig {
             // Deliberately low: a page with a faint signature or a pale logo must not be
             // mistaken for blank, so this only catches pages with essentially nothing.
             blank_ink_coverage: 0.002,
+            unknown_doc_type_confidence: 0.3,
             ruled_min_lines: 6,
             photo_min_tone_continuity: 0.35,
         }
@@ -178,7 +187,17 @@ pub fn combine(
             has_formulas: false,
             has_charts: false,
             rotation_deg: s.rotation_deg,
-            confidence: cfg.rules_only_confidence,
+            // The confidence is about the **document type**, because that is what the
+            // routing table thresholds on (`min_classifier_confidence`) — and on a
+            // rules-only page the type is either known or guessed, with nothing in
+            // between. Reporting `rules_only_confidence` for a page whose type nobody
+            // determined is how a page with no class at all used to sail past a threshold
+            // meant to catch exactly that: measured at 85 % expected calibration error on
+            // the first corpus this was ever scored against (`vs-adapt classify-score`).
+            //
+            // The flags are a different matter and are as reliable as ever: tier 0
+            // measures them. This number does not speak for them.
+            confidence: if known_doc_type.is_some() || t0.ruled { cfg.rules_only_confidence } else { cfg.unknown_doc_type_confidence },
             tier: ClassifierTier::Rules,
         },
         Some(v) => {
@@ -265,6 +284,36 @@ mod tests {
             Tier0 { born_digital: true, has_images: false, needs_vision: false, blank: false, ruled: false, photographic: false },
             "a PDF page reports neither ruling lines nor tone, so tier 0 must claim nothing about either"
         );
+    }
+
+    /// The confidence on a rules-only page is about the **document type**, because that
+    /// is what the routing table thresholds on. A page whose type nobody determined used
+    /// to claim 0.85 — and so sailed past `min_classifier_confidence`, which exists to
+    /// catch exactly that page. Measured at 85 % expected calibration error the first
+    /// time a corpus was scored against it (`vs-adapt classify-score`).
+    #[test]
+    fn a_rules_only_page_whose_type_nobody_determined_says_so() {
+        let cfg = ClassifyConfig::default();
+        let digital = PageSignals { text_chars: 2000, text_layer_coverage: 0.95, ..Default::default() };
+        let t0 = tier0(&digital, &cfg);
+        let lang = || LanguageTag::parse("en").expect("lang");
+
+        let guessed = combine(lang(), &digital, t0, None, None, &cfg);
+        assert_eq!(guessed.doc_type, DocType::Other);
+        assert!(
+            guessed.confidence < 0.6,
+            "a page with no determined type must fall below the routing table's default threshold, got {}",
+            guessed.confidence
+        );
+
+        // A caller who said what it is, and a page whose rules *did* determine a type,
+        // both report the rules-only confidence — they determined something.
+        let hinted = combine(lang(), &digital, t0, None, Some(DocType::Invoice), &cfg);
+        assert_eq!(hinted.confidence, cfg.rules_only_confidence);
+        let scan = PageSignals { image_count: 1, image_area_ratio: 1.0, ink_coverage: 0.08, ruling_lines: 12, ..Default::default() };
+        let ruled = combine(lang(), &scan, tier0(&scan, &cfg), None, None, &cfg);
+        assert_eq!(ruled.doc_type, DocType::Form);
+        assert_eq!(ruled.confidence, cfg.rules_only_confidence, "ruling lines are a determination, not a guess");
     }
 
     /// What tier 0 could not say before: whether a page nobody has read is a form, a

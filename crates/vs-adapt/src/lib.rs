@@ -1,5 +1,7 @@
 //! Workflow generation, scoring and selection. See `SPEC.md`.
 
+pub mod classify_score;
+pub mod dataset;
 pub mod generate;
 pub mod metrics;
 pub mod records;
@@ -8,6 +10,7 @@ pub mod run;
 pub mod score;
 pub mod select;
 
+pub use classify_score::{score as score_classifier, ClassifierScore, Judged};
 pub use generate::{generate, Generated, SearchSpace, Template};
 pub use records::{read_jsonl, write_jsonl, AdaptPageResult, RunRecord};
 pub use score::{Judge, MetricWeights, ScoreOptions};

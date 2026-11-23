@@ -71,6 +71,10 @@ pub struct GtBlock {
 pub struct GtPage {
     #[serde(alias = "layout_dets")]
     pub blocks: Vec<GtBlock>,
+    /// What this page is, when the corpus labels it. Read by `classify-score`, ignored by
+    /// everything that scores DAG output.
+    #[serde(default)]
+    pub doc_type: Option<vs_core::DocType>,
     #[serde(default)]
     pub width_px: Option<f32>,
     #[serde(default)]
@@ -133,6 +137,16 @@ pub fn gt_blocks(page: &GtPage) -> Vec<EvalBlock> {
             Some(EvalBlock { kind, bbox, order: b.order.unwrap_or(i as u32), text, html: b.html.clone(), latex: b.latex.clone() })
         })
         .collect()
+}
+
+/// The document type a page's ground truth labels it with, if it carries one.
+///
+/// Optional and per page, because a corpus whose documents are each one type is the easy
+/// case and a corpus of mixed documents — a contract with an invoice stapled to the back
+/// — is the one worth scoring. The manifest's `doc_type_hint` is the fallback.
+pub fn load_ground_truth_doc_type(uri: &str, page_no: u32) -> Option<vs_core::DocType> {
+    let page = load_ground_truth(uri, page_no).ok().flatten()?;
+    page.doc_type
 }
 
 /// Loads the ground truth for one page. `uri` is a local path to either a JSON file

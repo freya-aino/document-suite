@@ -51,6 +51,13 @@ pub struct RunConfig {
     pub split: Option<String>,
     /// Share of candidates kept per round.
     pub keep_share: f32,
+    /// Classify pages **without** the manifest's `doc_type_hint`.
+    ///
+    /// For scoring the classifier, and only for that: the hint is the label, and a
+    /// classifier handed its own label would score perfectly while saying nothing. Off
+    /// for a normal run, where the hint is exactly what a caller would send and routing
+    /// should see it.
+    pub ignore_doc_type_hint: bool,
     pub objective: Objective,
     pub weights: MetricWeights,
 }
@@ -59,6 +66,12 @@ pub struct RunConfig {
 #[derive(Debug, Clone)]
 pub struct PageCtx {
     pub doc: String,
+    /// Index of this page's document in the manifest that produced it.
+    ///
+    /// Carried because a caller scoring the classifier needs the manifest's label for
+    /// this page, and re-deriving the document id from the URI is a second
+    /// implementation of `doc_ids` waiting to disagree with the first.
+    pub manifest_index: usize,
     pub document_hk: HashKey,
     pub page_no: u32,
     pub image_path: PathBuf,
@@ -161,22 +174,25 @@ impl Runner {
 
     /// Renders and classifies every page of the manifest (page images → `out/pages`).
     pub async fn prepare(&self, manifest: &[ManifestEntry]) -> anyhow::Result<Vec<PageCtx>> {
-        let docs: Vec<&ManifestEntry> = manifest.iter().filter(|m| self.cfg.split.as_ref().is_none_or(|s| &m.split == s)).collect();
+        // The manifest index travels with each document, so a caller holding the manifest
+        // can find this page's entry — its label, for one — without re-deriving an id.
+        let docs: Vec<(usize, &ManifestEntry)> =
+            manifest.iter().enumerate().filter(|(_, m)| self.cfg.split.as_ref().is_none_or(|s| &m.split == s)).collect();
         let spool = self.cfg.out.join("spool");
         std::fs::create_dir_all(&spool)?;
         let mut paths = vec![];
         let mut shas = vec![];
-        for m in &docs {
+        for (_, m) in &docs {
             let p = self.fetcher.fetch(&m.uri, &spool).await?;
             shas.push(content_sha256(&std::fs::read(&p)?));
             paths.push(p);
         }
-        let uris: Vec<&str> = docs.iter().map(|m| m.uri.as_str()).collect();
+        let uris: Vec<&str> = docs.iter().map(|(_, m)| m.uri.as_str()).collect();
         let ids = doc_ids(&uris, &shas);
         let tenant = TenantId("vs-adapt".into());
 
         let mut pages = vec![];
-        for (((m, path), sha), id) in docs.iter().zip(&paths).zip(&shas).zip(&ids) {
+        for ((((index, m), path), sha), id) in docs.iter().zip(&paths).zip(&shas).zip(&ids) {
             let language = LanguageTag::parse(&m.language)?;
             let format = Self::format_of(path)?;
             let count = self.pool.page_count(path, format, self.cfg.max_pages.max(1) * 100).await?;
@@ -194,7 +210,8 @@ impl Runner {
                 };
                 let image_path = page_dir.join(format!("{page_no}.png"));
                 std::fs::write(&image_path, &assets.image.bytes)?;
-                let profile = self.classify(&language, &assets, m.doc_type_hint).await;
+                let hint = if self.cfg.ignore_doc_type_hint { None } else { m.doc_type_hint };
+                let profile = self.classify(&language, &assets, hint).await;
                 let ground_truth = match &m.ground_truth_uri {
                     Some(uri) => match load_ground_truth(uri, page_no) {
                         Ok(Some(p)) => Some(gt_blocks(&p)),
@@ -208,6 +225,7 @@ impl Runner {
                 };
                 pages.push(PageCtx {
                     doc: id.clone(),
+                    manifest_index: *index,
                     document_hk: document_hk.clone(),
                     page_no,
                     image_path,
@@ -447,6 +465,7 @@ mod tests {
     fn page(doc: &str, no: u32, key: &str) -> PageCtx {
         PageCtx {
             doc: doc.into(),
+            manifest_index: 0,
             document_hk: HashKey::of(&[doc]),
             page_no: no,
             image_path: PathBuf::from("x.png"),
