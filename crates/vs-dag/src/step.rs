@@ -17,6 +17,14 @@ pub struct StepContext {
     pub profile: PageProfile,
     pub dag_ref: String,
     pub node_id: String,
+    /// Whether this page belongs to an interactive upload.
+    ///
+    /// It decides which replica set at the model tier serves the page's calls. The suite
+    /// reserves page *slots* for interactive documents on its own side, which stops a
+    /// batch from filling a copy and does nothing about the batch's requests already
+    /// queued at the GPU — so the priority has to reach the model client, and this is how
+    /// it gets there.
+    pub interactive: bool,
     /// Re-renders this page at a requested DPI, when the deployment can.
     ///
     /// The one thing a step could not do and genuinely needed: `crop_dpi` — crop a

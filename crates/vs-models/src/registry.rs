@@ -14,6 +14,18 @@ pub struct ModelSpec {
     #[serde(default)]
     pub task: Vec<String>,
     pub endpoints: Vec<String>,
+    /// Endpoints reserved for interactive work.
+    ///
+    /// The suite reserves *page slots* for interactive documents on its own side
+    /// (`worker.interactive_share`), which stops a batch from filling this copy — and does
+    /// nothing at the GPU, where the batch's requests and the interactive one queue
+    /// together. A replica set that only interactive work is sent to is the half that was
+    /// missing: `deploy/gpu` runs it, and this is how a model declares it.
+    ///
+    /// Empty (the default) means every request goes to `endpoints`, which is what happened
+    /// before and remains right for a deployment with one pool.
+    #[serde(default)]
+    pub interactive_endpoints: Vec<String>,
     #[serde(default = "default_concurrency")]
     pub max_concurrency: usize,
     #[serde(default = "default_timeout")]

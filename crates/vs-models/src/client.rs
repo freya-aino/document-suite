@@ -102,6 +102,13 @@ pub struct ChatRequest {
     pub images: Vec<(Arc<[u8]>, &'static str)>,
     pub max_tokens: u32,
     pub json_schema: Option<Value>,
+    /// Whether this call is on behalf of an interactive upload.
+    ///
+    /// It decides which replica set serves it, when the model declares
+    /// `interactive_endpoints`. Without that, reserving page slots in the suite stops a
+    /// batch from filling *this copy* and does nothing about the batch's requests already
+    /// queued at the GPU — the starvation the deployment spec names.
+    pub interactive: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -158,7 +165,9 @@ impl OpenAiClient {
                 let state = ModelState {
                     limit: Arc::new(Semaphore::new(m.max_concurrency.max(1))),
                     rr: AtomicUsize::new(0),
-                    health: m.endpoints.iter().map(|_| Mutex::new(EndpointHealth::default())).collect(),
+                    // One health slot per endpoint across both lanes, the shared set
+                    // first: `lane` returns the offset into this array.
+                    health: (0..m.endpoints.len() + m.interactive_endpoints.len()).map(|_| Mutex::new(EndpointHealth::default())).collect(),
                 };
                 (m.id.clone(), state)
             })
@@ -252,7 +261,7 @@ impl OpenAiClient {
             (false, _) => Self::data_urls(&images),
         };
         let body = Self::build_body_with_images(spec, req, &urls);
-        let v = self.post_json(spec, "chat/completions", &body).await?;
+        let v = self.post_json_in(spec, "chat/completions", &body, req.interactive).await?;
         parse_chat_response(&v)
     }
 
@@ -267,12 +276,17 @@ impl OpenAiClient {
             "input": texts,
             "encoding_format": "float",
         });
-        let v = self.post_json(spec, "embeddings", &body).await?;
+        // Embeddings are Stage 2 work on a whole document: batch by nature, never
+        // competing with an interactive page for the reserved replicas.
+        let v = self.post_json_in(spec, "embeddings", &body, false).await?;
         parse_embeddings_response(&v, texts.len())
     }
 
     /// Shared request path: semaphore, endpoint selection, retries, health accounting, metrics.
-    async fn post_json(&self, spec: &ModelSpec, path: &str, body: &Value) -> Result<Value, ModelError> {
+    ///
+    /// `interactive` picks the lane; everything that is not a chat request on behalf of an
+    /// upload (embeddings, in particular) is batch work by nature.
+    async fn post_json_in(&self, spec: &ModelSpec, path: &str, body: &Value, interactive: bool) -> Result<Value, ModelError> {
         let state = self.models.get(&spec.id).ok_or_else(|| ModelError::UnknownModel(spec.id.clone()))?;
         let _permit = state.limit.acquire().await.expect("semaphore never closed");
         let in_flight = spec.max_concurrency.max(1).saturating_sub(state.limit.available_permits());
@@ -281,7 +295,7 @@ impl OpenAiClient {
         let t0 = Instant::now();
         let mut attempt: u32 = 0;
         loop {
-            let (idx, endpoint) = self.pick_endpoint(spec, state);
+            let (idx, endpoint) = self.pick_endpoint(spec, state, interactive);
             let span = tracing::debug_span!("model_call", model = %spec.id, endpoint = %endpoint, path, attempt);
             let _g = span.enter();
             let outcome = self.send_once(spec, endpoint, path, body).await;
@@ -350,15 +364,31 @@ impl OpenAiClient {
         }
     }
 
+    /// The endpoint list this request is served from.
+    ///
+    /// Interactive work goes to the reserved set when the model declares one, and to the
+    /// shared set when it does not; batch work never touches the reserved set, which is
+    /// what makes it reserved. Returned with the offset into `health`, because the two
+    /// lists share one health array — an endpoint's ejection is a property of the
+    /// endpoint, not of the lane that happened to notice.
+    fn lane<'s>(&self, spec: &'s ModelSpec, interactive: bool) -> (&'s [String], usize) {
+        if interactive && !spec.interactive_endpoints.is_empty() {
+            (&spec.interactive_endpoints, spec.endpoints.len())
+        } else {
+            (&spec.endpoints, 0)
+        }
+    }
+
     /// Round-robin over healthy endpoints; if every endpoint is ejected, the one whose
     /// ejection ends first is used anyway (better to try than to fail without a request).
-    fn pick_endpoint<'s>(&self, spec: &'s ModelSpec, state: &ModelState) -> (usize, &'s str) {
-        let n = spec.endpoints.len();
+    fn pick_endpoint<'s>(&self, spec: &'s ModelSpec, state: &ModelState, interactive: bool) -> (usize, &'s str) {
+        let (endpoints, base) = self.lane(spec, interactive);
+        let n = endpoints.len();
         let start = state.rr.fetch_add(1, Ordering::Relaxed);
         let now = Instant::now();
         let mut fallback: Option<(usize, Instant)> = None;
         for k in 0..n {
-            let i = (start + k) % n;
+            let i = base + (start + k) % n;
             let mut h = state.health[i].lock().expect("health lock");
             match h.ejected_until {
                 Some(until) if until > now => {
@@ -370,13 +400,13 @@ impl OpenAiClient {
                     // Ejection expired: give it one probe.
                     h.ejected_until = None;
                     h.consecutive_failures = 0;
-                    return (i, &spec.endpoints[i]);
+                    return (i, &endpoints[i - base]);
                 }
-                None => return (i, &spec.endpoints[i]),
+                None => return (i, &endpoints[i - base]),
             }
         }
-        let i = fallback.map(|(i, _)| i).unwrap_or(start % n);
-        (i, &spec.endpoints[i])
+        let i = fallback.map(|(i, _)| i).unwrap_or(base + start % n);
+        (i, &endpoints[i - base])
     }
 
     fn record_success(&self, state: &ModelState, idx: usize) {
@@ -405,7 +435,9 @@ impl OpenAiClient {
     pub fn is_ejected(&self, model: &str, endpoint: &str) -> bool {
         let Some(spec) = self.registry.get(model) else { return false };
         let Some(state) = self.models.get(model) else { return false };
-        let Some(i) = spec.endpoints.iter().position(|e| e == endpoint) else { return false };
+        // Both lanes, because an endpoint's health belongs to the endpoint: the shared
+        // list first, then the reserved one, which is the order `health` is built in.
+        let Some(i) = spec.endpoints.iter().chain(&spec.interactive_endpoints).position(|e| e == endpoint) else { return false };
         let h = state.health[i].lock().expect("health lock");
         h.ejected_until.is_some_and(|u| u > Instant::now())
     }
@@ -599,12 +631,12 @@ mod tests {
     fn served_model_carries_a_provider_prefix() {
         let mut s = spec();
         assert_eq!(OpenAiClient::build_body(&s, &ChatRequest {
-            system: None, prompt: "p".into(), images: vec![], max_tokens: 8, json_schema: None,
+            system: None, prompt: "p".into(), images: vec![], max_tokens: 8, json_schema: None, interactive: false,
         })["model"], "m");
         s.served_name = Some("GLM-OCR".into());
         s.provider = Some("hosted_vllm".into());
         let body = OpenAiClient::build_body(&s, &ChatRequest {
-            system: None, prompt: "p".into(), images: vec![], max_tokens: 8, json_schema: None,
+            system: None, prompt: "p".into(), images: vec![], max_tokens: 8, json_schema: None, interactive: false,
         });
         assert_eq!(body["model"], "hosted_vllm/GLM-OCR");
     }
@@ -656,6 +688,7 @@ mod tests {
             images: vec![(png(4, 4), "image/png")],
             max_tokens: 8,
             json_schema: None,
+            interactive: false,
         };
         // The base64 path inlines a data URL ...
         let inlined = OpenAiClient::build_body(&s, &req);

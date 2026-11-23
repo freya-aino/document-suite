@@ -204,7 +204,17 @@ impl LlmExtractor {
             .enumerate()
             .map(|(wi, w)| {
                 let rendered = render_window(doc, w, title.as_deref());
-                let req = ChatRequest { system: Some(system.clone()), prompt: rendered.text(), images: vec![], max_tokens: self.config.max_tokens, json_schema: Some(schema.clone()) };
+                // Stage 2 runs over a whole document after every page is in: batch work by
+                // nature, whatever priority the upload had, so it never takes a replica
+                // reserved for an interactive page.
+                let req = ChatRequest {
+                    system: Some(system.clone()),
+                    prompt: rendered.text(),
+                    images: vec![],
+                    max_tokens: self.config.max_tokens,
+                    json_schema: Some(schema.clone()),
+                    interactive: false,
+                };
                 (wi, rendered, req)
             })
             .collect();
@@ -277,7 +287,14 @@ impl LlmExtractor {
                 let items: Vec<&Assertion> = batch.iter().map(|&i| &out.assertions[i]).collect();
                 let rendered = verify::render_items(&items, &out.entities, texts);
                 let prompt = VERIFY_PROMPT.render(&[("language", self.language()), ("items", &rendered)]);
-                let req = ChatRequest { system: None, prompt, images: vec![], max_tokens: self.config.max_tokens.min(2048), json_schema: Some(schema.clone()) };
+                let req = ChatRequest {
+                    system: None,
+                    prompt,
+                    images: vec![],
+                    max_tokens: self.config.max_tokens.min(2048),
+                    json_schema: Some(schema.clone()),
+                    interactive: false,
+                };
                 (bi, rendered, req)
             })
             .collect();

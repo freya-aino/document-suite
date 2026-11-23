@@ -9,6 +9,10 @@ revision = "2026-01"
 family = "paddleocr_vl"
 task = ["page_parse", "region_ocr", "table", "formula"]
 endpoints = ["http://localhost:8001/v1"]      # service doc-parse
+# Only interactive uploads are sent here (service doc-parse-interactive, the
+# `interactive` compose profile). Comment it out and interactive pages queue behind the
+# batch in the shared pool, which is what happens without a reserved lane.
+interactive_endpoints = ["http://localhost:8011/v1"]
 max_concurrency = 256
 timeout_ms = 60000
 languages = ["*"]

@@ -136,6 +136,7 @@ fn ctx() -> StepContext {
         },
         dag_ref: String::new(),
         node_id: String::new(),
+        interactive: false,
         pages: None,
     }
 }

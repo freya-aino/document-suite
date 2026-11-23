@@ -91,6 +91,11 @@ impl PageHandler {
             profile: profile.clone(),
             dag_ref: dag_ref.clone(),
             node_id: String::new(),
+            // The upload's priority, carried to the model tier: reserving page slots here
+            // keeps a batch from filling this copy, and does nothing about the batch's
+            // requests already queued at the GPU. A model declaring
+            // `interactive_endpoints` is what closes that half.
+            interactive: t.spec.priority == vs_core::Priority::Interactive,
             // What makes `crop_dpi` possible: a step can ask for this page at a finer
             // DPI, and gets it rendered from the original rather than upscaled from the
             // bitmap it already has. Only this document's pages — the capability is built

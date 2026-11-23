@@ -146,3 +146,81 @@ async fn embedder_batches_and_checks_dimensions() {
     let emb3 = OpenAiEmbedder::new(c3, "e", 4).unwrap();
     assert!(matches!(emb3.embed_texts(&texts[..1]).await, Err(ModelError::Response(_))));
 }
+
+/// Interactive work goes to the reserved replicas and batch work never does.
+///
+/// The suite reserves page *slots* for interactive uploads on its own side, which stops a
+/// batch from filling a copy and does nothing about the batch's requests already queued
+/// at the GPU — the starvation `deploy/gpu` names. A model that declares
+/// `interactive_endpoints` gets a replica set only interactive pages are sent to, and
+/// this is the test that the lane is real: two servers, and which one saw the request.
+#[tokio::test]
+async fn an_interactive_request_takes_the_reserved_lane_and_a_batch_one_never_does() {
+    let batch_hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let reserved_hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let batch = MockServer::start({
+        let n = batch_hits.clone();
+        Arc::new(move |_, _| {
+            n.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            (200, chat_ok("from the shared pool"))
+        })
+    })
+    .await;
+    let reserved = MockServer::start({
+        let n = reserved_hits.clone();
+        Arc::new(move |_, _| {
+            n.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            (200, chat_ok("from the reserved pool"))
+        })
+    })
+    .await;
+
+    let toml = format!(
+        "{}interactive_endpoints = [{:?}]\n",
+        registry_toml("vlm", "generic_json", &[&batch.base_url], ""),
+        reserved.base_url
+    );
+    let client = OpenAiClient::new(ModelRegistry::from_toml(&toml).expect("registry"));
+
+    let req = |interactive: bool| ChatRequest {
+        prompt: "p".into(),
+        max_tokens: 8,
+        interactive,
+        ..Default::default()
+    };
+    let r = client.chat("vlm", &req(true)).await.expect("interactive");
+    assert_eq!(r.text, "from the reserved pool");
+    let r = client.chat("vlm", &req(false)).await.expect("batch");
+    assert_eq!(r.text, "from the shared pool");
+    // Several batch requests must not leak into the reserved set, which is the whole
+    // point of reserving it.
+    for _ in 0..5 {
+        client.chat("vlm", &req(false)).await.expect("batch");
+    }
+    assert_eq!(reserved_hits.load(std::sync::atomic::Ordering::Relaxed), 1, "batch work reached the reserved replicas");
+    assert_eq!(batch_hits.load(std::sync::atomic::Ordering::Relaxed), 6);
+
+    // Embeddings are Stage 2 work on a whole document and are batch by nature, whatever
+    // the upload's priority was.
+    let embedder_toml = format!(
+        "{}interactive_endpoints = [{:?}]\ndimensions = 3\n",
+        registry_toml("embed", "generic_json", &[&batch.base_url], ""),
+        reserved.base_url
+    );
+    let embedder = OpenAiClient::new(ModelRegistry::from_toml(&embedder_toml).expect("registry"));
+    let _ = embedder.embeddings("embed", &["a".to_string()]).await;
+    assert_eq!(reserved_hits.load(std::sync::atomic::Ordering::Relaxed), 1, "an embedding call took a reserved replica");
+}
+
+/// A model with no reserved set serves interactive work from the shared one — which is
+/// every deployment with a single pool, and must not become an error.
+#[tokio::test]
+async fn without_a_reserved_set_interactive_work_uses_the_shared_one() {
+    let srv = MockServer::start(Arc::new(|_, _| (200, chat_ok("ok")))).await;
+    let client = OpenAiClient::new(ModelRegistry::from_toml(&registry_toml("vlm", "generic_json", &[&srv.base_url], "")).expect("registry"));
+    let r = client
+        .chat("vlm", &ChatRequest { prompt: "p".into(), max_tokens: 8, interactive: true, ..Default::default() })
+        .await
+        .expect("interactive on a single-pool model");
+    assert_eq!(r.text, "ok");
+}

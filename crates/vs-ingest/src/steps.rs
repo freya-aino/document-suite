@@ -428,6 +428,7 @@ mod tests {
             },
             dag_ref: "t@1".into(),
             node_id: node_id.to_string(),
+            interactive: false,
             pages: None,
         }
     }

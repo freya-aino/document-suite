@@ -337,6 +337,9 @@ impl Judge {
             prompt,
             images: vec![],
             max_tokens: 32,
+            // Corpus resolution runs in Stage 2, after every page: batch work, never
+            // competing with an interactive page for a reserved replica.
+            interactive: false,
             json_schema: Some(json!({
                 "type": "object",
                 "properties": { "same": { "type": "boolean" } },

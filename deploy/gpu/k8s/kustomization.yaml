@@ -4,6 +4,9 @@ namespace: vs-gpu
 resources:
   - namespace.yaml
   - doc-parse.yaml
+  # The reserved interactive lane. Drop this line for a deployment that only does batch
+  # work: it costs a GPU, and without it interactive pages share the pool above.
+  - doc-parse-interactive.yaml
   - layout.yaml
   - vlm-general.yaml
   - classifier.yaml

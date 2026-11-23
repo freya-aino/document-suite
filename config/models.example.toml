@@ -7,6 +7,11 @@ revision = "2026-01"
 family = "paddleocr_vl"
 task = ["page_parse", "region_ocr", "table", "formula"]
 endpoints = ["http://doc-parse-a.gpu.internal:8000/v1", "http://doc-parse-b.gpu.internal:8000/v1"]
+# Replicas only interactive uploads are sent to (`deploy/gpu`'s doc-parse-interactive).
+# Without them, reserving page slots in the service stops a batch from filling a copy and
+# does nothing about the batch's requests already queued at the GPU — an interactive page
+# then waits behind a thousand batch pages. Leave it out for a single-pool deployment.
+interactive_endpoints = ["http://doc-parse-interactive.gpu.internal:8000/v1"]
 max_concurrency = 256
 timeout_ms = 60000
 languages = ["*"]

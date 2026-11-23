@@ -288,6 +288,8 @@ impl Runner {
             dag_ref: dag.reference(),
             node_id: String::new(),
             // `pages` is `None`: offline runs read loose files, so there is no original to re-render from.
+            // `interactive` is false: an offline run has no upload behind it, so it is batch work.
+            interactive: false,
             pages: None,
         };
         let t0 = Instant::now();

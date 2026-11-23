@@ -5,6 +5,7 @@
 #   HF_TOKEN=hf_... docker compose up -d                 # all pools
 #   docker compose up -d doc-parse embed                 # a subset
 #   docker compose --profile monitoring up -d            # + Prometheus
+#   docker compose --profile interactive up -d           # + the reserved interactive pool
 #
 # GPU assignment: `device_ids` per service below; change to match the host. Weights are
 # pinned by revision (`--revision`): the registry's `revision` must match what is served.
@@ -52,6 +53,45 @@ services:
           devices:
             - driver: nvidia
               device_ids: ["0"]
+              capabilities: [gpu]
+
+  # ── doc-parse-interactive: the reserved lane ───────────────────────────────────
+  #
+  # The same weights as `doc-parse`, on its own GPU, serving **only** interactive
+  # uploads: the registry's `interactive_endpoints` points here and nothing else does.
+  #
+  # Why a second service rather than a bigger first one: the suite reserves page slots
+  # for interactive documents on its own side, which stops a batch from filling a copy —
+  # and does nothing about the batch's requests already sitting in this pool's queue. A
+  # batch of a thousand pages and one interactive page queue together at the GPU, and the
+  # page waits behind them. Separate replicas are the only thing that fixes that without
+  # a scheduler inside vLLM.
+  #
+  # Behind a `profile`, because it costs a GPU and a deployment that only does batch work
+  # should not be made to run it.
+  doc-parse-interactive:
+    <<: *vllm
+    profiles: ["interactive"]
+    command:
+      - PaddlePaddle/PaddleOCR-VL-1.5
+      - --served-model-name=paddleocr-vl-1.5
+      - --revision=${DOC_PARSE_REVISION:-main}
+      # Smaller batches than the shared pool: this lane exists for latency, and a long
+      # queue of concurrent sequences is what it is avoiding.
+      - --max-num-seqs=32
+      - --enable-prefix-caching
+      - --limit-mm-per-prompt={"image":1}
+      - --gpu-memory-utilization=0.92
+      - --max-model-len=16384
+      - --trust-remote-code
+      - --port=8000
+    ports: ["8011:8000"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["4"]
               capabilities: [gpu]
 
   # ── layout: a doc VLM in layout mode (layout.detect); also doc-parse candidate C ──

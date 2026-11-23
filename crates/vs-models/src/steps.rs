@@ -343,6 +343,7 @@ impl Step for PageParseE2e {
                 images: vec![(page.bytes.clone(), "image/png")],
                 max_tokens: max_tokens(params, 8192),
                 json_schema,
+                interactive: ctx.interactive,
                 ..Default::default()
             })
             .await
@@ -523,11 +524,13 @@ impl Step for RegionStep {
         let max_tokens = max_tokens(params, self.default_max_tokens());
         let client = &self.client;
         let prompt_text = &prompt.text;
+        let interactive = ctx.interactive;
         let results = run_bounded(crops, spec.max_concurrency, |crop| async move {
             let req = ChatRequest {
                 prompt: prompt_text.clone(),
                 images: vec![(crop.png.clone(), "image/png")],
                 max_tokens,
+                interactive,
                 ..Default::default()
             };
             let res = client.chat(model, &req).await;
@@ -595,12 +598,14 @@ impl Step for FigureDescribe {
         let max_tokens = max_tokens(params, 1024);
         let client = &self.client;
         let (prompt_text, schema) = (&prompt.text, &schema);
+        let interactive = ctx.interactive;
         let results = run_bounded(crops.iter().collect::<Vec<_>>(), spec.max_concurrency, |crop| async move {
             let req = ChatRequest {
                 prompt: prompt_text.clone(),
                 images: vec![(crop.bytes.clone(), "image/png")],
                 max_tokens,
                 json_schema: Some(schema.clone()),
+                interactive,
                 ..Default::default()
             };
             (crop, client.chat(model, &req).await)
@@ -673,12 +678,14 @@ impl Step for ChartToTable {
         let max_tokens = max_tokens(params, 2048);
         let client = &self.client;
         let (prompt_text, schema) = (&prompt.text, &schema);
+        let interactive = ctx.interactive;
         let results = run_bounded(selected, spec.max_concurrency, |crop| async move {
             let req = ChatRequest {
                 prompt: prompt_text.clone(),
                 images: vec![(crop.bytes.clone(), "image/png")],
                 max_tokens,
                 json_schema: Some(schema.clone()),
+                interactive,
                 ..Default::default()
             };
             (crop, client.chat(model, &req).await)
