@@ -50,8 +50,8 @@ config/             example models, worker, DAG list, search space, LiteLLM
 
 ## Status
 
-All 18 crates compile together and the workspace is green: **401 tests pass with nothing
-running**, and **434 with the stack up** — the 33 extra touch a live Postgres, Qdrant,
+All 18 crates compile together and the workspace is green: **404 tests pass with nothing
+running**, and **456 with the stack up** — the 52 extra touch a live Postgres, Qdrant,
 Garage or Keycloak, one of them takes a document through the whole pipeline into both
 stores, one asks the development realm for a token and verifies it, and two take a
 generated corpus through the entire adaptation chain. `cargo clippy --workspace
@@ -224,8 +224,8 @@ isolation with. What each request is verified against is in
 
 ### Tests
 
-`cargo test --workspace` runs the 401 tests that need nothing (PDF tests need
-`PDFIUM_DYNAMIC_LIB_PATH`, set by devenv). The other 33 touch a real service, or render a
+`cargo test --workspace` runs the 404 tests that need nothing (PDF tests need
+`PDFIUM_DYNAMIC_LIB_PATH`, set by devenv). The other 52 touch a real service, or render a
 corpus, and are `#[ignore]`d; with the stack profile running:
 
 ```sh

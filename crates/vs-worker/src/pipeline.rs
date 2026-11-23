@@ -261,13 +261,22 @@ impl Drop for Lease {
     fn drop(&mut self) {
         self.renewer.abort();
         // Fire-and-forget: `Drop` cannot await, and a release that fails only means the
-        // lease expires on its own.
+        // lease expires on its own — which is the whole point of it having a TTL.
+        //
+        // `Handle::try_current` rather than `tokio::spawn`, which panics when there is no
+        // runtime: a drop can happen while the runtime is shutting down, and a panic in
+        // `Drop` during shutdown would replace a clean exit with an abort.
         let (ops, job_id, holder) = (self.ops.clone(), self.job_id, self.holder.clone());
-        tokio::spawn(async move {
-            if let Err(e) = ops.release_lease(job_id, &holder).await {
-                tracing::debug!(%job_id, error = %e, "could not release the document lease; it will expire");
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                handle.spawn(async move {
+                    if let Err(e) = ops.release_lease(job_id, &holder).await {
+                        tracing::debug!(%job_id, error = %e, "could not release the document lease; it will expire");
+                    }
+                });
             }
-        });
+            Err(_) => tracing::debug!(%job_id, "no runtime to release the document lease on; it will expire"),
+        }
     }
 }
 

@@ -17,7 +17,7 @@ interactive back-pressure (`429` with `Retry-After`), source-URI tenant-prefix c
 DAG-list admin with `vs_router::Router::load` validation, `/metrics`, **authentication
 against Keycloak**, **read scoping inside the organization**, **token revocation**,
 **per-organization rate limiting**, and **retention and erasure** for the one place a
-person's identifier is stored. **39 tests that need no service** and **13 `#[ignore]`d**
+person's identifier is stored. **39 tests that need no service** and **15 `#[ignore]`d**
 against a real Postgres and a real Keycloak.
 
 There is no configuration in which these routes answer a request without verifying a
