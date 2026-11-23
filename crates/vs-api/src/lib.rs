@@ -340,18 +340,32 @@ async fn enqueue(s: &AppState, spec: JobSpec, document_hk: Option<HashKey>) -> R
     Ok(Accepted { job_id, document_hk: document_hk.map(|h| h.to_string()), run_id: run_id.0, status_url: format!("/v1/jobs/{job_id}") })
 }
 
-/// `?skip_if_processed=true`: the tenant's current run of this document, unless it failed.
-async fn existing_run(s: &AppState, tenant: &TenantId, document_hk: &HashKey) -> Result<Option<Accepted>, ApiError> {
-    let Some(cur) = s.ops.current_run(tenant, document_hk).await.map_err(internal)? else { return Ok(None) };
+/// `?skip_if_processed=true`: this caller's current run of this document, unless it failed.
+///
+/// **Only a run the caller may see.** The document hash key is derived from the content,
+/// so two members uploading the same file reach the same key — and handing the second one
+/// the first one's job id would both reveal that a colleague uploaded that file and let
+/// them watch a run that is not theirs. When the existing run is not visible to them, the
+/// upload proceeds as a new run of the same document, which is what reprocessing already
+/// is: same keys, new run, no row written twice.
+async fn existing_run(s: &AppState, caller: &auth::Principal, document_hk: &HashKey) -> Result<Option<Accepted>, ApiError> {
+    let Some(cur) = s.ops.current_run(&caller.tenant, document_hk).await.map_err(internal)? else { return Ok(None) };
     if cur.state == vs_vault::enum_name(&JobState::Failed) {
         return Ok(None);
     }
-    Ok(Some(Accepted {
-        job_id: cur.job_id,
-        document_hk: Some(document_hk.to_string()),
-        run_id: cur.run_id.0,
-        status_url: format!("/v1/jobs/{}", cur.job_id),
-    }))
+    let job = s.ops.get_job(&caller.tenant, cur.job_id).await.map_err(internal)?;
+    match job {
+        Some(job) if require_job(s, caller, &job).await.is_ok() => Ok(Some(Accepted {
+            job_id: cur.job_id,
+            document_hk: Some(document_hk.to_string()),
+            run_id: cur.run_id.0,
+            status_url: format!("/v1/jobs/{}", cur.job_id),
+        })),
+        _ => {
+            tracing::debug!(%document_hk, "a run of this document exists but is not this caller's; uploading as a new run");
+            Ok(None)
+        }
+    }
 }
 
 fn spec_from(tenant: TenantId, owner: Owner, opts: &UploadOptions, source_uri: String) -> JobSpec {
@@ -414,7 +428,7 @@ async fn create_document(
                 let _ = tokio::fs::remove_file(&up.path).await;
                 result?;
                 if q.skip_if_processed {
-                    if let Some(existing) = existing_run(&s, &tenant, &document_hk).await? {
+                    if let Some(existing) = existing_run(&s, &caller, &document_hk).await? {
                         return Ok((StatusCode::OK, existing));
                     }
                 }
@@ -436,7 +450,7 @@ async fn create_document(
                 if q.skip_if_processed {
                     let sha = hash_blob(&s, &key).await?;
                     let hk = HashKey::document(&tenant, &sha);
-                    if let Some(existing) = existing_run(&s, &tenant, &hk).await? {
+                    if let Some(existing) = existing_run(&s, &caller, &hk).await? {
                         return Ok((StatusCode::OK, existing));
                     }
                     document_hk = Some(hk);
@@ -601,21 +615,34 @@ async fn get_job(State(s): State<AppState>, Caller(caller): Caller, Path(job_id)
 /// Whether this caller may see a job's status.
 ///
 /// A job is the asker's. It is also visible to anyone who may read the document it
-/// produced, because a status that disappears the moment someone else can read the result
-/// would be a strange shape — and to an administrator. A job with no recorded owner is
-/// the organization's, like its documents.
+/// produced, because a status that disappeared the moment someone else could read the
+/// result would be a strange shape — and to an administrator. A job with no recorded owner
+/// is the organization's, like its documents.
+///
+/// The ordering matters and a test found it the hard way: the document is consulted only
+/// when it **has** an access record. A job whose document has not been ingested yet has
+/// none, and `Reader::may_read` reads a missing record as "the organization's" — which is
+/// right for a document uploaded before scoping existed and wrong for one that is simply
+/// still rendering. So when there is no record, the job's own owner decides, and it says
+/// no.
 async fn require_job(s: &AppState, caller: &auth::Principal, job: &vs_vault::ops::JobRow) -> Result<(), ApiError> {
+    let refuse = || {
+        metrics::counter!("vs_api_access_refusals_total", "object" => "job").increment(1);
+        Err((StatusCode::FORBIDDEN, "this job belongs to another member of the organization".to_string()))
+    };
     let owner = job.spec.owner.as_ref().map(|o| o.subject.as_str());
     if caller.admin || owner.is_none() || owner == Some(caller.subject.as_str()) {
         return Ok(());
     }
-    // Still running, or failed before it had a document: there is nothing to share yet,
-    // so the asker is the only one who sees it.
+    // Still running, or failed before it had a document: nothing to share yet.
     let Some(hk) = job.document_hk.as_deref().and_then(vs_vault::hash_key_from_hex) else {
-        metrics::counter!("vs_api_access_refusals_total", "object" => "job").increment(1);
-        return Err((StatusCode::FORBIDDEN, "this job belongs to another member of the organization".into()));
+        return refuse();
     };
-    scope::require_read(s, caller, &hk).await
+    match s.ops.document_access(&caller.tenant, &hk).await.map_err(internal)? {
+        Some(access) if caller.reader(s.api.admin_reads_all).may_read(Some(&access)) => Ok(()),
+        Some(_) => refuse(),
+        None => refuse(),
+    }
 }
 
 /// Postgres and blob store reachable (the bus connection is checked at startup and
@@ -815,16 +842,35 @@ struct BatchJob {
 
 async fn get_batch(
     State(s): State<AppState>,
-    Tenant(tenant): Tenant,
+    Caller(caller): Caller,
     Path(batch_id): Path<uuid::Uuid>,
     Query(q): Query<PageQuery>,
 ) -> Result<Json<BatchStatus>, ApiError> {
+    let tenant = caller.tenant.clone();
     let b = s
         .ops
         .get_batch(&tenant, batch_id, q.page, q.page_size)
         .await
         .map_err(internal)?
         .ok_or((StatusCode::NOT_FOUND, "batch not found".into()))?;
+    // A batch is the asker's, like the jobs in it. Scoped by the *jobs* rather than by a
+    // column on the batch: `ops.batches` has no owner, and the jobs do — so a batch is
+    // visible to whoever may see at least one job of it, which for a single-caller batch
+    // is exactly its creator.
+    //
+    // The jobs are then filtered individually, because a batch whose documents have been
+    // shared differently should show the ones this caller may see and no more.
+    let mut visible = Vec::with_capacity(b.jobs.len());
+    for job in b.jobs {
+        if require_job(&s, &caller, &job).await.is_ok() {
+            visible.push(job);
+        }
+    }
+    if visible.is_empty() && b.total_jobs > 0 {
+        metrics::counter!("vs_api_access_refusals_total", "object" => "batch").increment(1);
+        return Err((StatusCode::FORBIDDEN, "this batch belongs to another member of the organization".into()));
+    }
+    let b = vs_vault::ops::BatchPage { jobs: visible, ..b };
     Ok(Json(BatchStatus {
         batch_id: b.batch_id,
         created_at: b.created_at,

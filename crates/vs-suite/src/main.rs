@@ -8,8 +8,8 @@
 //! then the pages concurrently, then Stage 2, as function calls.
 //!
 //! What that gives up, stated plainly: a single large document is now processed by one
-//! copy rather than spread over the fleet, and nothing redelivers work after a crash —
-//! a failed job is re-POSTed by the caller, which resumes rather than repeats.
+//! copy rather than spread over the fleet. What it does *not* give up is recovery — each
+//! document is leased, and `resume` claims the ones a crashed copy left behind.
 //!
 //! What must exist around it is in `deploy/README.md`.
 

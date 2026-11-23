@@ -15,8 +15,10 @@
 //! fleet of page workers did.
 //!
 //! What is genuinely gone: a single large document can no longer be spread over several
-//! copies, and nothing redelivers work after a crash. Recovery is the caller re-POSTing
-//! the upload, which resumes rather than repeats — see [`crate::TaskError`].
+//! copies. Recovery came back as a lease rather than as a queue — each document is claimed
+//! by the copy working on it, renewed while it works, and reclaimed by another copy's
+//! sweep when the renewals stop (`vs-suite`'s `resume`). Re-running resumes rather than
+//! repeats — see [`crate::TaskError`].
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};

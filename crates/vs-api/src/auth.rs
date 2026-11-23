@@ -9,9 +9,13 @@
 //!
 //! **The tenant is the organization.** It comes from a verified claim, never from a
 //! header or a body, and it is the isolation boundary: it is hashed into every document
-//! and entity key, prefixes every blob key, and partitions the Qdrant collections. The
-//! rest of the caller's identity — person, department, workspaces — is recorded on the
-//! job as a [`vs_core::Owner`] but is not yet enforced; see `SPEC.md`.
+//! and entity key, prefixes every blob key, and partitions the Qdrant collections.
+//!
+//! The rest of the caller's identity — person, department, workspaces — is recorded on the
+//! job as a [`vs_core::Owner`] **and enforced**: see [`crate::scope`] for the read rule
+//! and `SPEC.md` for what each check is for. This module's job ends at establishing who
+//! the caller is, and now also at refusing a token that has been revoked since it was
+//! issued.
 
 use std::str::FromStr;
 use std::sync::Arc;

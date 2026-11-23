@@ -194,17 +194,23 @@ rendered page per child is held before upload.
   collapse to zero pixels are skipped. Decoding/encoding runs on a blocking thread.
 - Output `FigureCrop { region, uri, bytes }`: `region` keeps the source kind, score and
   reading order but its `bbox` is the **padded** crop area, i.e. the exact page area the
-  crop bytes show (the unpadded bbox is the matching layout region). `StepContext` has no
-  blob store, so crops stay in memory for the length of the run and `uri` is the
+  crop bytes show (the unpadded bbox is the matching layout region). `StepContext` still
+  has no blob *store* — only the narrow `PageSource` capability — so crops stay in memory
+  for the length of the run and `uri` is the
   in-process placeholder `crop://<page_hk>/<node_id>/<n>.png`. The `page` worker is what
   stores them: `upload_crops` (`vs-worker/src/page.rs`) cuts every figure and chart block
   from the page image, writes it to `crops/<page_hk>/<run_id>/<block_index>.png` and
   replaces `BlockContent::Figure.crop_uri` with that key, so what reaches the vault
   resolves. Blocks from a whole-page parser never pass through `figure.crop` and get a
   crop there too.
-- Crops are taken from the rendered page image at render DPI; re-cropping from the
-  original at a higher DPI is not implemented, and `vs-models`' `crop_dpi` param rejects
-  the request rather than quietly cropping at page DPI anyway.
+- Crops are taken from the rendered page image at render DPI **by default**, and from a
+  finer render when a DAG asks for one: `crop_dpi` reaches `StepContext::pages`, which the
+  worker implements over the blob store and this crate's render pool. A figure occupying a
+  tenth of the page is otherwise described from a tenth of the page's pixels. Where the
+  finer render cannot be had — `worker.max_crop_dpi = 0`, an original past its retention,
+  an offline run over loose files — the page image is used and the fallback is logged with
+  its reason, because the failure this param had for three revisions was being accepted
+  and doing nothing.
 
 ## Errors
 

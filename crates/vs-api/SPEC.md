@@ -189,8 +189,26 @@ so a caller who can name one already has the bytes — a refusal is therefore `4
 explanation, not a `404` pretending the document is not there.
 
 A **job** is the asker's, plus anyone who can read the document it produced, plus an
-administrator. A job that has not produced a document yet is the asker's alone; there is
-nothing to share.
+administrator. Two cases are the asker's alone, and the ordering between them is a thing a
+test found rather than a thing anyone designed:
+
+- a job that has not produced a document yet — nothing to share;
+- a job whose document has no access record *yet*, because ingest has not reached it.
+  A missing record reads as "the organization's" for a document uploaded before scoping
+  existed, and that reading must not extend to one that is merely still rendering, so the
+  job's own owner decides.
+
+A **batch** is scoped by its jobs rather than by a column of its own: `ops.batches` has no
+owner and the jobs do, so a batch is visible to whoever may see at least one job in it, and
+the jobs listed are filtered individually. For the ordinary single-caller batch that is
+exactly its creator and an administrator.
+
+`?skip_if_processed=true` returns an existing run **only when the caller may see it**.
+A document's hash key is derived from its content, so two members uploading the same file
+reach the same key; handing the second one the first one's job id would reveal that a
+colleague uploaded that file and let them watch a run that is not theirs. Instead the
+upload proceeds as a new run of the same document — which is what reprocessing already
+is: same keys, new run, no row written twice.
 
 **Erasure.** `DELETE /v1/owners/{subject}`, allowed to an administrator and to the person
 themselves — an erasure request is the data subject's to make, and requiring a relay would

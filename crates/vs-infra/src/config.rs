@@ -192,7 +192,8 @@ pub struct WorkerConfig {
     pub max_documents: usize,
     /// Attempts per page before it is recorded failed. Replaces the queue's
     /// `max_deliver`: a transient failure (a busy model endpoint) is retried in process,
-    /// and nothing redelivers the page later. 1 disables retrying.
+    /// and the page is not retried later by anything else: a resumed *document* re-runs
+    /// every page that is not already final. 1 disables retrying.
     pub page_attempts: u32,
     /// Address-space limit per render child.
     pub render_mem_limit_mb: Option<u64>,
@@ -395,11 +396,14 @@ pub struct AuthConfig {
     /// boundary. Dotted paths index nested objects (`koki.org`).
     #[serde(default = "org_claim")]
     pub org_claim: String,
-    /// Claim holding the caller's department. Recorded on the job, not yet enforced.
+    /// Claim holding the caller's department. Recorded on the job, and what
+    /// `visibility = department` is evaluated against.
     #[serde(default = "department_claim")]
     pub department_claim: String,
     /// Claim holding the caller's workspaces: an array of strings, or one
-    /// space-separated string. Recorded on the job, not yet enforced.
+    /// space-separated string. Recorded on the job, and what `visibility = workspace` is
+    /// evaluated against — snapshotted at upload, so a share survives the uploader
+    /// leaving the workspace.
     #[serde(default = "workspaces_claim")]
     pub workspaces_claim: String,
     /// Realm or client role required by the admin routes and `/metrics`.

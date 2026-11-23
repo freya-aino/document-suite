@@ -4,7 +4,7 @@
 ///
 /// Transient errors are retried inside the process a bounded number of times; permanent
 /// ones (bad input, an unsupported format) fail immediately. There is no dead-letter
-/// queue any more, and so nothing redelivers a document later: a failure leaves the job
+/// queue any more, so a failure within a process leaves the job
 /// row `failed` with this message, and the caller re-POSTs the upload to try again. That
 /// retry is cheap because the parts already done are not redone — rendered pages are
 /// skipped when their signals are present, and every vault write is idempotent.

@@ -566,3 +566,56 @@ async fn a_revocation_can_be_recorded_by_its_owner_and_an_administrator(pool: Pg
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["revocations"], 2, "{body}");
 }
+
+#[sqlx::test(migrator = "vs_vault::MIGRATOR")]
+#[ignore = "needs Postgres from `devenv up`"]
+async fn a_batch_and_its_jobs_belong_to_whoever_asked_for_them(pool: PgPool) {
+    let (s, _) = state(pool.clone(), 0).await;
+    let batch = json!({ "options": { "language": "en" }, "documents": [{ "source_uri": "originals/t1/a" }, { "source_uri": "originals/t1/b" }] });
+    let (status, created) = send(&s, post("/v1/batches", batch)).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{created}");
+    let path = format!("/v1/batches/{}", created["batch_id"].as_str().expect("batch id"));
+
+    let (status, body) = send(&s, as_member("GET", &path, &claims(), None)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["jobs"].as_array().expect("jobs").len(), 2, "the asker sees their own batch whole");
+
+    // Another member of the same organization: the batch is not theirs, and its job ids,
+    // states and external refs are not theirs to read either.
+    let (status, body) = send(&s, as_member("GET", &path, &other_member_claims(), None)).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(send(&s, as_member("GET", &path, &other_admin_claims(), None)).await.0, StatusCode::OK, "an administrator");
+}
+
+#[sqlx::test(migrator = "vs_vault::MIGRATOR")]
+#[ignore = "needs Postgres from `devenv up`"]
+async fn skip_if_processed_does_not_hand_over_another_members_run(pool: PgPool) {
+    // A document hash key is derived from the content, so two members uploading the same
+    // file reach the same key. Handing the second one the first one's job would reveal
+    // that a colleague uploaded that file *and* let them watch a run that is not theirs.
+    let (s, dispatch) = state(pool.clone(), 0).await;
+    let body = json!({ "language": "en", "source_uri": "originals/t1/a" });
+    let upload = |claims: &Value| as_member("POST", "/v1/documents?skip_if_processed=true", claims, Some(body.clone()));
+
+    let (status, first) = send(&s, upload(&claims())).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{first}");
+    // The same caller again: their own run, replayed rather than repeated.
+    let (status, again) = send(&s, upload(&claims())).await;
+    assert_eq!(status, StatusCode::OK, "{again}");
+    assert_eq!(again["job_id"], first["job_id"]);
+
+    // Another member: a new run of the same document, not a window onto the first.
+    let (status, theirs) = send(&s, upload(&other_member_claims())).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{theirs}");
+    assert_ne!(theirs["job_id"], first["job_id"], "the second member was handed the first member's job");
+    assert_eq!(dispatch.count(), 2, "the second upload must actually run");
+
+    // Both jobs are the same document — reprocessing, which is a supported shape — and
+    // each caller sees only their own.
+    let hks: Vec<Option<String>> = sqlx::query_scalar("SELECT document_hk FROM ops.jobs ORDER BY created_at")
+        .fetch_all(&pool)
+        .await
+        .expect("jobs");
+    assert_eq!(hks.len(), 2);
+    assert_eq!(hks[0], hks[1], "the same file is the same document, whoever uploaded it");
+}
