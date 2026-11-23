@@ -41,7 +41,7 @@ its own list — a candidate it cannot validate here is a candidate production c
 | `page.deskew` | CPU | `vs_ingest::preprocess::Deskew` |
 | `page.denoise` | CPU | `vs_ingest::preprocess::Denoise` |
 | `page.normalize` | CPU | `vs_ingest::preprocess::Normalize` |
-| `page.binarize` | CPU | `vs_ingest::preprocess::Binarize` |
+| `page.binarize` | CPU | `vs_ingest::preprocess::Binarize` — global Otsu, or Sauvola per neighbourhood with `adaptive = true` |
 | `page.crop_margins` | CPU | `vs_ingest::preprocess::CropMargins` |
 | `page.parse_e2e` | GPU | `vs_models::steps::PageParseE2e` |
 | `layout.detect` | GPU | `vs_models::steps::LayoutDetect` |

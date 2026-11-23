@@ -326,13 +326,17 @@
     },
     {
       "id": "binarized-region-ocr",
-      "description": "Faint or bleed-through scans: crop the scanner border, binarise, then per-region OCR. Whether binarisation helps is model-dependent, which is exactly what this template exists to measure.",
+      "description": "Faint or bleed-through scans: crop the scanner border, binarise, then per-region OCR. Whether binarisation helps is model-dependent, which is exactly what this template exists to measure. Binarisation is scored both ways: a global threshold is cheaper and an adaptive one (Sauvola) is the only one that survives a page lit from one side, so which wins is a property of the corpus rather than a thing to assume.",
       "slots": {
         "layout_model": [
           "mineru-2.5"
         ],
         "ocr_model": [
           "paddleocr-vl-1.5"
+        ],
+        "binarize_adaptive": [
+          false,
+          true
         ]
       },
       "dag": {
@@ -352,7 +356,9 @@
             "inputs": [
               "trimmed"
             ],
-            "params": {}
+            "params": {
+              "adaptive": "{binarize_adaptive}"
+            }
           },
           {
             "id": "layout",

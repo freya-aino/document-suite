@@ -53,22 +53,39 @@ be hard-coded to 0, which told the classifier every scan was upright. Note the f
 meaning: it is how far the *source* page is rotated, not a correction to apply, and for a
 PDF pdfium has already applied it to the bitmap.
 
+**Adaptive binarisation is implemented**: `page.binarize` takes `adaptive = true` and
+thresholds per neighbourhood (Sauvola, with integral images so the cost does not depend on
+the window size) instead of once for the whole page. That is the case global Otsu cannot
+do — a photograph of a page, a book's gutter shadow, a page lit from one side, where one
+threshold puts the shadowed half below it and takes the text there with it. Both modes are
+in `search-space.example.json`, because adaptive costs more and only pays off on unevenly
+lit pages, so which one wins is a property of the corpus and not a thing to assume.
+
+**Higher-DPI re-crop works**: `figure.crop` takes `crop_dpi` and cuts from a render of the
+page at that DPI, fetched through `StepContext::pages` — a capability the worker implements
+over the blob store and this crate's own render pool, so a step asks for "this page at 400
+dpi" and learns nothing about where documents live. The cap is `worker.max_crop_dpi` (600),
+because a render is quadratic in DPI and a typo in a DAG should hit a limit rather than a
+minute of CPU. A deployment with it disabled, or an original past its retention, falls back
+to the page image and logs why.
+
 Remaining:
 - [ ] **No dewarping.** Correcting page curl in a photograph needs the page boundary
       estimated first, which is the hard half; `imageproc` supplies the warp but not the
-      estimate.
-- [ ] Adaptive (Sauvola) binarisation. Only global Otsu is implemented, so a page with
-      uneven lighting binarises badly even after `page.normalize`.
-**Higher-DPI re-crop works**: `figure.crop` takes `crop_dpi` and cuts from a render of the
-page at that DPI, fetched through `StepContext::pages` — a capability the worker
-implements over the blob store and this crate's own render pool, so a step asks for "this
-page at 400 dpi" and learns nothing about where documents live. The cap is
-`worker.max_crop_dpi` (600), because a render is quadratic in DPI and a typo in a DAG
-should hit a limit rather than a minute of CPU. A deployment with it disabled, or an
-original past its retention, falls back to the page image and logs why.
-- [ ] `text_layer_coverage` is a stated v1 approximation; the connected-component estimate
-      on the rendered page is the documented improvement path and is unbuilt.
+      estimate. Deliberate, and the reasoning is in the step catalogue
+      (`vs-steps/README.md`) rather than only here, because that is where someone looking
+      for the step will land.
+- [ ] `text_layer_coverage` is a stated v1 approximation: the ratio of text-span area to
+      text-span-plus-image area, which calls a page with a full-page image and a caption
+      mostly-image whether the image is a photograph or a scanned page of text. The
+      documented improvement — connected components on the rendered page — is unbuilt, and
+      the signals that now exist for rasters (`ruling_lines`, `tone_continuity`) cover part
+      of what it was wanted for.
 - [ ] Office formats via a LibreOffice-headless converter pool (A18, post-v1).
+- [ ] Nothing here is validated against a real scan corpus. Deskew, orient, denoise,
+      normalise and both binarisations behave correctly on the cases their tests construct;
+      which of them *helps* a given page class is exactly what `vs-adapt` exists to measure
+      and has not measured, because the corpus it can generate is born-digital and clean.
 
 ## Assumptions this component rests on
 

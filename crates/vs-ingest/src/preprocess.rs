@@ -203,6 +203,72 @@ pub fn ruling_lines(gray: &GrayImage) -> u16 {
     count
 }
 
+/// Sauvola's adaptive threshold: one level per neighbourhood rather than one per page.
+///
+/// `T(x,y) = m(x,y) · (1 + k · (s(x,y)/R − 1))` with `R = 128`, where `m` and `s` are the
+/// mean and standard deviation of the `window` × `window` neighbourhood. A pale patch has
+/// a low local spread, so its threshold sits close to its own mean and the patch stays
+/// white instead of going solid black — which is the whole difference from a global
+/// threshold on a page lit from one side.
+///
+/// Computed with **integral images** (summed-area tables) for the sum and the sum of
+/// squares, so the cost is two passes over the page regardless of the window size. The
+/// naive form is `window²` per pixel, which at 31 × 31 on a 200 dpi page is about two
+/// billion operations and takes long enough to trip the step's timeout.
+///
+/// `u64` accumulators: a 300 dpi A4 page is ~8.7 M pixels, and a sum of squares over it
+/// reaches ~5.7 × 10¹¹, well past `u32`.
+pub fn sauvola(gray: &GrayImage, window: u32, k: f32) -> GrayImage {
+    let (w, h) = (gray.width(), gray.height());
+    if w == 0 || h == 0 {
+        return gray.clone();
+    }
+    // Odd and at least 3, so a neighbourhood has a centre.
+    let win = window.max(3) | 1;
+    let r = (win / 2) as i64;
+    let (wi, hi) = (w as i64, h as i64);
+
+    // Integral images, padded by one row and column so a window's sum is four lookups
+    // with no bounds juggling.
+    let stride = (w + 1) as usize;
+    let mut sum = vec![0u64; stride * (h + 1) as usize];
+    let mut sq = vec![0u64; stride * (h + 1) as usize];
+    for y in 0..h {
+        let (mut row, mut row_sq) = (0u64, 0u64);
+        for x in 0..w {
+            let v = gray.get_pixel(x, y).0[0] as u64;
+            row += v;
+            row_sq += v * v;
+            let i = (y as usize + 1) * stride + x as usize + 1;
+            sum[i] = sum[i - stride] + row;
+            sq[i] = sq[i - stride] + row_sq;
+        }
+    }
+    let area = |t: &[u64], x0: i64, y0: i64, x1: i64, y1: i64| -> u64 {
+        let (x0, y0) = (x0.max(0) as usize, y0.max(0) as usize);
+        let (x1, y1) = ((x1 + 1).min(wi) as usize, (y1 + 1).min(hi) as usize);
+        t[y1 * stride + x1] + t[y0 * stride + x0] - t[y0 * stride + x1] - t[y1 * stride + x0]
+    };
+
+    let mut out = GrayImage::new(w, h);
+    for y in 0..hi {
+        for x in 0..wi {
+            let (x0, y0, x1, y1) = (x - r, y - r, x + r, y + r);
+            let n = ((x1.min(wi - 1) - x0.max(0) + 1) * (y1.min(hi - 1) - y0.max(0) + 1)) as f64;
+            let s1 = area(&sum, x0, y0, x1, y1) as f64;
+            let s2 = area(&sq, x0, y0, x1, y1) as f64;
+            let mean = s1 / n;
+            // Clamped at zero: a uniform neighbourhood's variance is zero and floating
+            // point can make it a very small negative.
+            let var = (s2 / n - mean * mean).max(0.0);
+            let threshold = mean * (1.0 + k as f64 * (var.sqrt() / 128.0 - 1.0));
+            let v = gray.get_pixel(x as u32, y as u32).0[0] as f64;
+            out.put_pixel(x as u32, y as u32, image::Luma([if v > threshold { 255 } else { 0 }]));
+        }
+    }
+    out
+}
+
 /// Fraction of pixels in the mid-grey band: how **continuous-tone** the page is.
 ///
 /// What separates a photograph from a document. A scanned or born-digital page of text is
@@ -711,14 +777,31 @@ impl Step for Normalize {
 #[serde(default)]
 pub struct BinarizeParams {
     /// Fixed threshold instead of Otsu's, for a corpus where Otsu is known to misbehave.
+    /// Ignored when `adaptive` is set, which has no single threshold.
     pub threshold: Option<u8>,
+    /// Threshold per neighbourhood (Sauvola) instead of one for the whole page.
+    ///
+    /// Global Otsu picks one level from the page's histogram, which is the right
+    /// instrument for an evenly lit scan and the wrong one for a photograph of a page, a
+    /// book's gutter shadow or a page lit from one side: the shadowed half goes solid
+    /// black and takes the text with it. `page.normalize` flattens *some* of that and
+    /// cannot fix a gradient steeper than its own window.
+    pub adaptive: bool,
+    /// Side of the neighbourhood, in pixels, for `adaptive`. Roughly twice the stroke
+    /// width of the text works; the default suits 200–300 dpi.
+    pub window_px: Option<u32>,
+    /// Sauvola's `k`: how far below the local mean the threshold sits, scaled by the local
+    /// spread. Higher keeps less ink. 0.2 is the value from the paper and a reasonable
+    /// default for text.
+    pub k: Option<f32>,
 }
 
-/// Otsu binarisation.
+/// Binarisation: global Otsu, or Sauvola per neighbourhood with `adaptive = true`.
 ///
 /// Helps some recognition models and hurts others, which is the clearest case in the
-/// catalogue for being a scored step rather than an assumption. **Outputs greyscale**, so
-/// it must not feed a figure or chart branch.
+/// catalogue for being a scored step rather than an assumption — and the two modes are
+/// themselves a thing to score, because adaptive costs more and only pays off on unevenly
+/// lit pages. **Outputs greyscale**, so it must not feed a figure or chart branch.
 pub struct Binarize;
 
 #[async_trait]
@@ -737,8 +820,12 @@ impl Step for Binarize {
         let p: BinarizeParams = params_of(params)?;
         map_page(&page, "page.binarize", move |img| {
             let gray = img.to_luma8();
-            let level = p.threshold.unwrap_or_else(|| imageproc::contrast::otsu_level(&gray));
-            let out = imageproc::contrast::threshold(&gray, level, imageproc::contrast::ThresholdType::Binary);
+            let out = if p.adaptive {
+                sauvola(&gray, p.window_px.unwrap_or(31), p.k.unwrap_or(0.2))
+            } else {
+                let level = p.threshold.unwrap_or_else(|| imageproc::contrast::otsu_level(&gray));
+                imageproc::contrast::threshold(&gray, level, imageproc::contrast::ThresholdType::Binary)
+            };
             Some(DynamicImage::ImageLuma8(out))
         })
         .await
@@ -833,6 +920,64 @@ mod tests {
     /// A ruled table: full-width horizontal rules and full-height vertical ones. Text
     /// never makes a row that dark across the page, which is what the measurement rests
     /// on — so a page of type must come back with no rules at all.
+    /// The case global Otsu cannot do: a page lit from one side. One threshold for the
+    /// whole page puts the shadowed half below it and takes the text there with it;
+    /// Sauvola compares each pixel to its own neighbourhood and keeps both halves.
+    #[test]
+    fn sauvola_keeps_text_in_a_shadow_that_otsu_loses() {
+        // A left-to-right lighting gradient from white to mid-grey, with dark text marks
+        // spread evenly across it.
+        let (w, h) = (240u32, 120u32);
+        let page = GrayImage::from_fn(w, h, |x, y| {
+            let paper = 250 - (x * 130 / w) as u8; // 250 … 120
+            let on_mark = (y / 6) % 3 == 0 && (x / 4) % 3 == 0;
+            // Ink is 60 below the local paper, so it is *locally* dark everywhere and
+            // *globally* dark only on the lit side.
+            Luma([if on_mark { paper.saturating_sub(60) } else { paper }])
+        });
+
+        let global = {
+            let level = imageproc::contrast::otsu_level(&page);
+            imageproc::contrast::threshold(&page, level, imageproc::contrast::ThresholdType::Binary)
+        };
+        let adaptive = sauvola(&page, 15, 0.2);
+
+        // Count the ink each one found in the lit third and in the shadowed third.
+        let ink = |img: &GrayImage, from: u32, to: u32| -> usize {
+            img.enumerate_pixels().filter(|(x, _, p)| *x >= from && *x < to && p.0[0] == 0).count()
+        };
+        let (lit, shadow) = (0, w / 3);
+        let (dark_from, dark_to) = (w * 2 / 3, w);
+
+        let g_shadow = ink(&global, dark_from, dark_to);
+        let g_lit = ink(&global, lit, shadow);
+        let a_shadow = ink(&adaptive, dark_from, dark_to);
+        let a_lit = ink(&adaptive, lit, shadow);
+
+        // Otsu drowns the shadowed third: everything there is below one global level, so
+        // it is all "ink".
+        assert!(g_shadow > g_lit * 3, "the test page does not reproduce the failure: lit {g_lit}, shadow {g_shadow}");
+        // Sauvola finds comparable amounts of ink in both, which is what the page has.
+        assert!(a_shadow < a_lit * 3, "adaptive thresholding drowned the shadow too: lit {a_lit}, shadow {a_shadow}");
+        assert!(a_lit > 0 && a_shadow > 0, "found no ink at all: lit {a_lit}, shadow {a_shadow}");
+        // And it is two-tone, like any binarisation.
+        assert!(adaptive.pixels().all(|p| p.0[0] == 0 || p.0[0] == 255));
+    }
+
+    #[test]
+    fn sauvola_handles_degenerate_inputs() {
+        assert_eq!(sauvola(&GrayImage::new(0, 0), 15, 0.2).dimensions(), (0, 0));
+        // A blank page has no local spread anywhere, so every pixel sits above its own
+        // threshold and nothing is ink — the right answer, and the one a naive variance
+        // calculation turns into a divide-by-zero.
+        let blank = sauvola(&blank(50, 50), 15, 0.2);
+        assert!(blank.pixels().all(|p| p.0[0] == 255));
+        // An even window is made odd rather than refused, and a window larger than the
+        // page is clamped to it.
+        assert_eq!(sauvola(&lined_page(40, 40), 8, 0.2).dimensions(), (40, 40));
+        assert_eq!(sauvola(&lined_page(40, 40), 999, 0.2).dimensions(), (40, 40));
+    }
+
     #[test]
     fn ruling_lines_find_a_table_and_not_a_page_of_text() {
         let table = GrayImage::from_fn(300, 300, |x, y| {
