@@ -1,0 +1,47 @@
+[package]
+name = "vs-mcp"
+description = "Model Context Protocol server over the suite's HTTP API"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+name = "vs_mcp"
+path = "src/lib.rs"
+
+[dependencies]
+# `vs-infra` for telemetry in HTTP mode, and nothing else of the suite's: this service
+# talks to it over HTTP like any other client and links none of its internals — no
+# database, no blob store, no model registry. That is the whole point of it being a
+# separate service (decision D16).
+vs-infra.workspace = true
+anyhow.workspace = true
+axum.workspace = true
+clap.workspace = true
+metrics.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+# `tests/live.rs` serves the real `vs_api::router` on a real socket, with real signed
+# tokens and real Postgres, so the MCP layer is exercised against the API it claims to
+# speak to rather than against a fake of it. These are the only places the suite's
+# internals are linked, and they are tests.
+vs-api.workspace = true
+vs-core.workspace = true
+vs-vault.workspace = true
+async-trait.workspace = true
+bytes.workspace = true
+chrono.workspace = true
+jsonwebtoken.workspace = true
+metrics-exporter-prometheus.workspace = true
+object_store.workspace = true
+sqlx.workspace = true

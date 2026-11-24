@@ -18,6 +18,7 @@ members = [
     "crates/vs-worker",
     "crates/vs-suite",
     "crates/vs-adapt",
+    "crates/vs-mcp",
 ]
 
 [workspace.package]
@@ -48,6 +49,7 @@ vs-vault = { path = "crates/vs-vault" }
 vs-vectors = { path = "crates/vs-vectors" }
 vs-api = { path = "crates/vs-api" }
 vs-worker = { path = "crates/vs-worker" }
+vs-mcp = { path = "crates/vs-mcp" }
 
 # external
 anyhow = "1"
