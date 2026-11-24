@@ -11,6 +11,10 @@ publish.workspace = true
 name = "vs_mcp"
 path = "src/lib.rs"
 
+[[bin]]
+name = "vs-mcp"
+path = "src/main.rs"
+
 [dependencies]
 # `vs-infra` for telemetry in HTTP mode, and nothing else of the suite's: this service
 # talks to it over HTTP like any other client and links none of its internals — no
