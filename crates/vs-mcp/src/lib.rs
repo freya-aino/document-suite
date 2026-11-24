@@ -12,3 +12,4 @@
 
 pub mod jsonrpc;
 pub mod suite;
+pub mod tools;
