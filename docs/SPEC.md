@@ -82,6 +82,15 @@ produced it, and the exact model and prompt version used.
                   └──────────── RAG service reads ───────────────┘
 ```
 
+**A second service, optional** (decision D16): `vs-mcp` advertises the suite's work as LLM
+tools over the Model Context Protocol. It is a *client* of the API above — it links none of
+the suite's internals and holds no credentials, forwarding the caller's own token — so it
+can be deployed, scaled, restarted or left out without the suite noticing.
+
+```
+LLM client ──MCP (stdio or HTTP)──▶ vs-mcp ──the caller's token──▶ vs-suite's api
+```
+
 **No task bus** (decision D13). There was one — NATS JetStream, one message per page,
 drained by a fleet of `page` workers. The per-page DAG is executed in-process either way,
 so the queue's only unique contribution was spreading a single document's pages across
@@ -156,8 +165,9 @@ DAG list. The five commands and their inputs and outputs are specified once, in
 | `vs-worker` | lib | The three pipeline stages, their leases, and the document-type pass before the fan-out | [SPEC](../crates/vs-worker/SPEC.md) |
 | `vs-suite` | **bin** | **The service**: the API, all three stages, and the sweeps that keep them honest, in one process | [README](../crates/vs-suite/README.md) |
 | `vs-adapt` | bin | Workflow generation, scoring, selection; a generated corpus and the classifier's own score | [SPEC](../crates/vs-adapt/SPEC.md) |
+| `vs-mcp` | **bin** | **The LLM tool service**: the suite's work as Model Context Protocol tools, over its HTTP API | [SPEC](../crates/vs-mcp/SPEC.md) |
 | `deploy/` | ops | Embedding the suite in another deployment: binaries, the configuration surface, what must exist first | [README](../deploy/README.md) |
-| `deploy/docker` | ops | The service image: multi-stage build, pinned pdfium, minimal baked config | [Dockerfile](../deploy/docker/Dockerfile) |
+| `deploy/docker` | ops | The service image: multi-stage build, pinned pdfium, minimal baked config; and a small separate image for `vs-mcp` | [Dockerfile](../deploy/docker/Dockerfile) |
 | `deploy/keycloak` | ops | The development realm `vs-api` verifies against | [README](../deploy/keycloak/README.md) |
 | `deploy/firecracker` | ops | microVM image, the host agent and the autoscaler | [SPEC](../deploy/firecracker/SPEC.md) |
 | `deploy/gpu` | ops | Model serving tier | [SPEC](../deploy/gpu/SPEC.md) |
@@ -166,8 +176,13 @@ DAG list. The five commands and their inputs and outputs are specified once, in
 Dependency direction (no cycles):
 `vs-core` ← `vs-infra`, `vs-dag` ← `vs-router`, `vs-classify`, `vs-ingest`, `vs-models`
 ← `vs-stitch` ← `vs-extract` ← `vs-graph` ← `vs-vectors` ← `vs-vault` ← `vs-worker`,
-`vs-api`, `vs-adapt` ← `vs-suite`, which depends on both `vs-api` and `vs-worker` and is
-the only binary that is a *service* (`vs-adapt` is an offline CLI).
+`vs-api`, `vs-adapt` ← `vs-suite`, which depends on both `vs-api` and `vs-worker`.
+
+`vs-mcp` sits outside that chain: it depends on `vs-infra` for telemetry and on nothing
+else of the suite's — it reaches `vs-suite` over HTTP. The one exception is its
+`dev-dependencies`, where `vs-api` and `vs-vault` appear so that `tests/live.rs` can serve
+the real router against real Postgres. Both `vs-suite` and `vs-mcp` are *services*
+(`vs-adapt` is an offline CLI).
 
 `vs-graph` owns the `DocGraph` both stores are written from, so it sits below every store
 crate and depends on none of them.
@@ -329,6 +344,7 @@ encryption at rest: [`vs-infra`](../crates/vs-infra/SPEC.md).
 | D13 | **No task bus.** The stages are function calls; an accepted upload is processed by the process that accepted it | The per-page DAG always ran in-process, so the queue's only unique contribution was spreading one document's pages across machines — paid for with a service, three deployable roles, redelivery, dead-lettering, lanes and de-duplication ids. Page work is dominated by waiting on the shared model tier, which one process can saturate. The cost, accepted knowingly: a large document is no longer spread over the fleet. Recovery after a crash came back as a **lease and a resume sweep** rather than as a queue (§5.4). Withdraws A6 and G8 |
 | D14 | **Access control lives in `ops`, not in the vault.** Ownership, visibility, grants, job leases, token revocations and the one personal identifier are all mutable rows beside the jobs | The raw vault is insert-only by design (D5) and at the database level (migration 0003 grants the runtime role neither UPDATE nor DELETE), so a share could not be withdrawn there and an erasure request could not be served there. Putting ownership columns on satellites was the obvious reading of "scope the documents" and it is the wrong one: it would make every re-share a new satellite row and every erasure impossible. `ops` is also where the only other personal identifier already was, so there is one surface to erase rather than two. The cost: a read goes to `ops` as well as the vault, which is one indexed lookup on a primary key |
 | D15 | **A replica set reserved for interactive work**, declared per model as `interactive_endpoints` | Reserving page slots inside the service stops a batch from filling a *copy* and does nothing about the batch's requests already queued in a vLLM instance: a thousand batch pages and one interactive page queue together at the GPU, and the page waits behind them. Short of a scheduler inside the server, separate replicas are the only fix. A deployment with one pool declares nothing and is unaffected |
+| D16 | **The MCP server is a separate service that holds no credentials**: `vs-mcp` is its own binary, speaks to `vs-suite` over its public HTTP API, and forwards the caller's own bearer token with no service-account fallback | Two decisions in one, and the second is the load-bearing one. *Separate*, against D12's instinct, because an MCP server's trust surface is prompt-shaped — a document whose text asks the model to share it — and that belongs outside the process holding the database credentials; it also scales, fails and deploys separately, and a deployment wanting no LLM tools runs one fewer binary. *No credentials*, because a service account would make every tool call run as the server, so every model user would read everything the server's identity could reach — D14's per-person access control removed by a configuration default. The consequence is the property that keeps the surface small: this service can do nothing a person with the same token could not do over HTTP, and no tool takes an organization, a subject or an "act as" |
 
 **D14 is worth reading as a correction.** `vs-api`'s own status used to say that scoping
 reads "needs ownership columns in the vault and a migration". That was the obvious design

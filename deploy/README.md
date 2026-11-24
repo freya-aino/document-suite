@@ -10,6 +10,9 @@ devenv shell                      # toolchain, pdfium, sqlx-cli — no services
 cargo build --release -p vs-suite
 docker build -f deploy/docker/Dockerfile -t document-suite:dev .   # or as an image
 devenv --profile stack up -d      # only if you want this repo's services too
+
+cargo build --release -p vs-mcp   # the optional LLM tool service
+docker build -f deploy/docker/Dockerfile.mcp -t document-suite-mcp:dev .
 ```
 
 ## The service
@@ -109,6 +112,41 @@ docker run --rm -p 8080:8080 \
 
 `docker run … document-suite:dev migrate --database-url …` runs the deploy step from the
 same image, as the schema owner.
+
+## The LLM tool service, if you want it
+
+`vs-mcp` serves the same work as **Model Context Protocol tools**, so an agent or an
+assistant can submit documents, follow jobs, read text and manage sharing. It is optional
+and entirely separate: a deployment that wants the API alone runs one fewer binary and
+nothing else changes. Full detail in [`crates/vs-mcp/SPEC.md`](../crates/vs-mcp/SPEC.md).
+
+The one thing worth knowing before deploying it: **it holds no credentials** (decision
+D16). Every tool call carries the token of whoever is calling, and there is no
+service-account fallback — so a model reaches exactly what the person driving it can reach,
+and nothing more. There is no organization or subject argument on any tool.
+
+Two shapes, and the choice is about who starts the process:
+
+```sh
+# A service. Every request carries its own caller's token, from its Authorization header.
+docker run --rm -p 8081:8081 \
+  -e VS_API_URL=https://suite.internal \
+  document-suite-mcp:dev http --allowed-origin https://app.internal
+
+# One process per user, launched by their client. The token is theirs, from their
+# environment — which is why this form is a binary and not a container.
+VS_API_TOKEN_FILE=/run/secrets/vs-token vs-mcp --api https://suite.internal stdio
+```
+
+In HTTP mode the clients are MCP clients, which means **your** authorization layer is what
+issues those tokens: the server verifies nothing itself, the suite does. Bind it where the
+suite's own API is reachable, and treat `--allowed-origin` as required rather than optional
+if anything browser-based will call it — without it, a request carrying an `Origin` header
+is refused, which is what stops a web page from using the server as the user.
+
+What it will not do, by design: erase a person's documents, revoke a token or a session, or
+change DAG-list routing. Those routes exist on the API and are deliberately not tools —
+a model should not be able to erase somebody because a document's text asked it to.
 
 There is **no compose file and no chart** here: how the service is wired to your Postgres,
 your Qdrant and your realm is your deployment's business, and this repo guessing at it would
@@ -327,6 +365,7 @@ The `VS__AUTH__*` pair is not optional: without it the process stops with
 | | |
 |---|---|
 | [`docker/`](docker/Dockerfile) | the service image: multi-stage build, pinned pdfium, minimal baked config |
+| [`docker/Dockerfile.mcp`](docker/Dockerfile.mcp) | the LLM tool service image: no pdfium, no config file, no credentials |
 | [`keycloak/`](keycloak/README.md) | the development realm, imported by the `stack` profile |
 | [`firecracker/`](firecracker/SPEC.md) | microVM image, the host agent (`fleet.sh`) and the autoscaler; a guest runs a copy of the service behind the host's load balancer |
 | [`gpu/`](gpu/SPEC.md) | the model serving tier: vLLM per pool, compose and k8s manifests |

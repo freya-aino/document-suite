@@ -9,6 +9,10 @@ stages of the document pipeline in one process. Postgres, an S3-compatible store
 Keycloak and the model endpoints belong to the environment around it;
 [`deploy/README.md`](deploy/README.md) is what another deployment needs to know.
 
+A second, optional service — `vs-mcp` — advertises the same work as **LLM tools** over the
+Model Context Protocol. It is a client of the API above: it holds no credentials, forwards
+the caller's own token, and can be left out entirely (decision D16).
+
 **Start with [`docs/SPEC.md`](docs/SPEC.md).**
 
 Every component documents itself next to its code. A component whose design is fully
@@ -39,6 +43,7 @@ crates/
   vs-worker/        the three pipeline stages and their leases              SPEC
   vs-suite/   [bin] the service: the API, the stages and the sweeps          README
   vs-adapt/   [bin] workflow generation, scoring, selection, corpora        SPEC
+  vs-mcp/     [bin] the LLM tool service: MCP tools over the HTTP API       SPEC
 deploy/             embedding the suite in another deployment               README
   docker/           the service image (multi-stage, pinned pdfium)
   keycloak/         the development realm the suite verifies against         README
@@ -50,11 +55,12 @@ config/             example models, worker, DAG list, search space, LiteLLM
 
 ## Status
 
-All 18 crates compile together and the workspace is green: **404 tests pass with nothing
-running**, and **456 with the stack up** — the 52 extra touch a live Postgres, Qdrant,
+All 19 crates compile together and the workspace is green: **448 tests pass with nothing
+running**, and **504 with the stack up** — the 56 extra touch a live Postgres, Qdrant,
 Garage or Keycloak, one of them takes a document through the whole pipeline into both
-stores, one asks the development realm for a token and verifies it, and two take a
-generated corpus through the entire adaptation chain. `cargo clippy --workspace
+stores, one asks the development realm for a token and verifies it, two take a generated
+corpus through the entire adaptation chain, and four drive the MCP tools against the real
+API router. `cargo clippy --workspace
 --all-targets -- -D warnings` is clean. No `todo!()` or `unimplemented!()` anywhere in the
 tree.
 
@@ -86,6 +92,15 @@ repository:
   accepts. `vs-adapt classify-score` scores the page classifier itself — which found, on
   its first run, that a rules-only page was claiming 0.85 confidence in a document type
   nothing had determined.
+- **The LLM tool service.** `vs-mcp` serves twelve tools over the Model Context Protocol,
+  on stdio and over stateless HTTP, with protocol-version negotiation and the
+  specification's own distinction between a protocol error and a tool failure the model can
+  act on. It holds no credentials: the caller's token is forwarded and there is no
+  service-account fallback, so a model can reach exactly what the person driving it can
+  (D16). Nothing irreversible is advertised — no erasure, no token revocation, no routing
+  administration — and a test keeps those names absent. Its live tests drive the real
+  `vs_api::router` with real signed tokens, two people in one organization, and prove the
+  refusal, the grant and the revocation through the tools.
 - **Deployment.** One service image; a Firecracker host agent with per-VM egress
   allow-lists, snapshots and an autoscaler; a GPU tier with a replica set reserved for
   interactive uploads, because reserving slots inside the service never addressed the
@@ -224,14 +239,18 @@ isolation with. What each request is verified against is in
 
 ### Tests
 
-`cargo test --workspace` runs the 404 tests that need nothing (PDF tests need
-`PDFIUM_DYNAMIC_LIB_PATH`, set by devenv). The other 52 touch a real service, or render a
+`cargo test --workspace` runs the 448 tests that need nothing (PDF tests need
+`PDFIUM_DYNAMIC_LIB_PATH`, set by devenv). The other 56 touch a real service, or render a
 corpus, and are `#[ignore]`d; with the stack profile running:
 
 ```sh
 devenv --profile stack up -d
 cargo test --workspace -- --include-ignored
 ```
+
+`vs-mcp`'s live tests sign tokens with the same fixtures and serve the whole realm —
+discovery document and JWKS — on a socket, so `Auth::discover` runs the way a deployment
+runs it rather than being bypassed.
 
 The authentication tests sign their own tokens with the keypairs in
 `crates/vs-api/fixtures/`. Those two private keys are committed deliberately — they are
@@ -265,7 +284,12 @@ timestamp, so a redelivered task versioned the satellite again; and `sat_image_t
 insert aliased its key column in a way `latest_differs` could not see. They are the
 argument for running this set in CI. Running them again after the access and lease work
 found two more — a test that rebuilt a Unix-socket connection as TCP, and one asserting on
-a binary name that has not existed since the suite became one service.
+a binary name that has not existed since the suite became one service. Running the MCP
+server's set for the first time found two more facts about the API itself, both of which a
+fake would have hidden: a `source_uri` upload returns no document hash key unless
+`skip_if_processed` makes the API read the object first, and a document's access row is
+written by **ingest** rather than by accepting the job, so there is nothing to share until
+a run exists.
 
 ### Measuring instead of guessing
 
