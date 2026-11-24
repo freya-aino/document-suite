@@ -11,3 +11,4 @@
 //! against a hand-rolled imitation of this crate's insides.
 
 pub mod jsonrpc;
+pub mod suite;
