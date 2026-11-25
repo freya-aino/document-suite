@@ -8,7 +8,6 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-ds-core.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 bytes.workspace = true

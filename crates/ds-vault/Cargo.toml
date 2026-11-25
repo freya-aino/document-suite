@@ -25,8 +25,4 @@ thiserror.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
-ds-core.workspace = true
-ds-extract.workspace = true
-ds-router.workspace = true
-ds-stitch.workspace = true
 tokio.workspace = true
