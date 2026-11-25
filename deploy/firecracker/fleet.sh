@@ -155,15 +155,21 @@ apply_egress() {
     run iptables -A "$chain" -j DROP
     # Everything the guest sends, except to the host itself — the host is its gateway and
     # its load balancer, and the API port has to stay reachable in both directions.
-    run iptables -C FORWARD -s "$ip" -j "$chain" 2>/dev/null \
-        || run iptables -I FORWARD 1 -s "$ip" -j "$chain"
+    #
+    # Matched on the interface *and* the address. On the address alone a guest could send
+    # with a neighbour's source address and be judged by the neighbour's chain, which for
+    # a rule whose whole purpose is to keep the guests apart is the wrong way round. A
+    # guest cannot forge the device it is attached to.
+    run iptables -C FORWARD -i "$tap" -s "$ip" -j "$chain" 2>/dev/null \
+        || run iptables -I FORWARD 1 -i "$tap" -s "$ip" -j "$chain"
     log "vm $id: egress restricted to ${ALLOW[*]}"
 }
 
 clear_egress() {
-    local id=$1 chain=DS_EGRESS_$1 ip
+    local id=$1 chain=DS_EGRESS_$1 tap=tap-ds-$1 ip
     ip=$(guest_ip "$id")
-    run iptables -D FORWARD -s "$ip" -j "$chain" 2>/dev/null || true
+    # The same match as `apply_egress` installs, or the rule is not the one deleted.
+    run iptables -D FORWARD -i "$tap" -s "$ip" -j "$chain" 2>/dev/null || true
     run iptables -F "$chain" 2>/dev/null || true
     run iptables -X "$chain" 2>/dev/null || true
 }

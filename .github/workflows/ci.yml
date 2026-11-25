@@ -1,6 +1,6 @@
 # The gate the checklists in SPEC.md and the READMEs assume exists.
 #
-# Three jobs, because they fail for three different reasons:
+# Five jobs, because they fail for five different reasons:
 #
 # - `check` is the fast one, and the one that earns its keep: clippy with `-D warnings`
 #   over everything, then the tests that need no service.
@@ -12,12 +12,22 @@
 # - `integration` runs the tests marked `#[ignore]`. They are not optional extras: the
 #   first time they were ever executed they found three real defects, two of them months
 #   old. Nothing but this job makes them run.
+# - `lint` checks the things that are not Rust and were therefore checked by nothing. An
+#   audit found four defects in `deploy/`, three of which this job would have caught:
+#   shellcheck reads a variable that is never assigned under `set -u`, `cargo machete`
+#   finds a dependency nobody uses, and a migration whose bytes change breaks every
+#   database that already ran it (see the script for why that one is not recoverable).
+# - `image` builds the deliverable. Nothing built it before, which is how the image came
+#   to point `PDFIUM_DYNAMIC_LIB_PATH` at a directory it does not create — every PDF in
+#   that image would have failed at the first page. On merges and on request only: it
+#   compiles the workspace in release and there is no reason to pay that per push.
 name: ci
 
 on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -114,3 +124,61 @@ jobs:
       - name: Service logs
         if: failure()
         run: for c in ds-ci-qdrant ds-ci-garage ds-ci-keycloak; do echo "== $c"; docker logs "$c" 2>&1 | tail -40; done
+
+  lint:
+    name: shell, dependencies and migrations
+    runs-on: ubuntu-latest
+    steps:
+      # Full history: the migration check compares this branch against where it left the
+      # base, and a shallow clone has no base to compare with.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      # Preinstalled on the runner. `init.sh` is POSIX sh for busybox and declares so in
+      # its shebang, which is what shellcheck reads to pick a dialect.
+      - name: shellcheck
+        run: git ls-files -z '*.sh' | xargs -0 shellcheck
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-machete
+      # An unused dependency is not only noise: `ds-api` declared the model registry and
+      # the step registry it does not use, and linked the Qdrant gRPC client, the PDF
+      # renderer and the image codecs into the HTTP API through them.
+      - name: unused dependencies
+        run: cargo machete
+      - name: migrations are append-only
+        run: |
+          base=${{ github.event_name == 'pull_request'
+                   && format('origin/{0}', github.base_ref)
+                   || 'HEAD~1' }}
+          .github/scripts/migrations-are-append-only.sh "$base"
+
+  image:
+    name: the service image builds and can load pdfium
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/docker/Dockerfile
+          load: true
+          tags: document-suite:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      # The check the image needed and did not have. pdfium is loaded by `dlopen` at the
+      # first page rather than at startup, so a wrong path is a runtime failure in the
+      # ingest stage and nothing earlier notices — `PDFIUM_DYNAMIC_LIB_PATH` is read as a
+      # directory (see crates/ds-ingest/src/pdf.rs).
+      - name: pdfium is where the service will look for it
+        run: |
+          docker run --rm --entrypoint sh document-suite:ci -c '
+            set -e
+            test -f "$PDFIUM_DYNAMIC_LIB_PATH/libpdfium.so"
+            test -f "$DS_CONFIG"
+            echo "pdfium: $PDFIUM_DYNAMIC_LIB_PATH/libpdfium.so, config: $DS_CONFIG"'
+      - name: The binary runs
+        run: docker run --rm --entrypoint /usr/local/bin/ds-suite document-suite:ci --help

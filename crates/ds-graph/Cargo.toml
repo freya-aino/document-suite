@@ -11,10 +11,8 @@ publish.workspace = true
 ds-core.workspace = true
 ds-stitch.workspace = true
 ds-extract.workspace = true
-async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-thiserror.workspace = true
 
 [dev-dependencies]
 chrono.workspace = true

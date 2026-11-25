@@ -105,6 +105,10 @@ if [ -n "$TOKEN" ]; then
     ENV_FILE=/run/ds-env
     if wget -q -O "$ENV_FILE" --header "X-metadata-token: $TOKEN" "$MMDS/ds/env" 2>/dev/null; then
         while IFS= read -r line || [ -n "$line" ]; do
+            # `export "$line"` exports `NAME=value` as one word, which is what the
+            # line already is — and the pattern it has to match first is what makes that
+            # safe. shellcheck reads it as exporting a variable named `line`.
+            # shellcheck disable=SC2163
             case "$line" in
                 DS__[A-Z0-9_]*=*) export "$line" ;;
                 "") ;;
