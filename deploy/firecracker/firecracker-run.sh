@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Starts one worker microVM from vm-config.example.json with a TAP device.
 #
-#   firecracker-run.sh [--role page] [--id 1] [--kernel vmlinux] [--rootfs rootfs.ext4]
+#   firecracker-run.sh [--id 1] [--kernel vmlinux] [--rootfs rootfs.ext4]
 #                      [--scratch scratch.ext4] [--vcpus 1] [--mem 1024]
 #                      [--mmds-env secrets.env] [--config vm-config.example.json]
 #
@@ -11,7 +11,6 @@
 # For production the host agent owns networking and egress filtering (SPEC.md).
 set -euo pipefail
 
-ROLE=page
 ID=1
 KERNEL=vmlinux
 ROOTFS=rootfs.ext4
@@ -24,7 +23,6 @@ CONFIG=$HERE/vm-config.example.json
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        --role) ROLE=$2; shift 2 ;;
         --id) ID=$2; shift 2 ;;
         --kernel) KERNEL=$2; shift 2 ;;
         --rootfs) ROOTFS=$2; shift 2 ;;
@@ -69,7 +67,7 @@ if ! ip link show "$TAP" >/dev/null 2>&1; then
 fi
 
 # ── VM config from the example ────────────────────────────────────────────────
-# The boot args carry the role and the guest address for init.sh; the drives, TAP and
+# The boot args carry the guest address for init.sh; the drives, TAP and
 # sizes are substituted into a copy of the example config.
 BOOT_ARGS="console=ttyS0 reboot=k panic=1 pci=off ro ds.ip=$GUEST_IP/30 ds.gw=$HOST_IP ds.dns=$HOST_IP"
 VM_JSON=$RUN_DIR/vm-config.json
@@ -113,5 +111,5 @@ if [ -n "$MMDS_ENV" ]; then
         | curl -sS --unix-socket "$API_SOCK" -X PUT -H 'Content-Type: application/json' --data-binary @- http://localhost/mmds
 fi
 
-echo "microVM $ID ($ROLE) started: tap=$TAP guest=$GUEST_IP api=$API_SOCK" >&2
+echo "microVM $ID started: tap=$TAP guest=$GUEST_IP api=$API_SOCK" >&2
 wait "$FC_PID"

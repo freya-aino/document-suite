@@ -1,4 +1,4 @@
-# deploy/firecracker — build and boot a ds-worker microVM
+# deploy/firecracker — build and boot a ds-suite microVM
 
 One microVM runs one copy of the **service**, and a load balancer on the host hands it
 uploads — the suite is one HTTP service (D12), and a guest is reachable across its own TAP
@@ -25,14 +25,15 @@ curl -fLo vmlinux \
 
 # the root filesystem
 deploy/firecracker/build-rootfs.sh \
-  --worker target/x86_64-unknown-linux-gnu/release/ds-worker \
+  --service target/x86_64-unknown-linux-gnu/release/ds-suite \
   --pdfium "$PDFIUM_DIR/libpdfium.so" \
   --ca-bundle /etc/ssl/certs/ca-certificates.crt \
   --config config/worker.toml \
   --models config/models.toml \
   --size 512M --out rootfs.ext4
 
-# a scratch disk for the ingest role (max_upload_bytes plus headroom; see SPEC.md)
+# a scratch disk for the originals the ingest stage spools (max_upload_bytes plus
+# headroom; see SPEC.md)
 truncate -s 4G scratch-1.ext4 && mkfs.ext4 -q -F scratch-1.ext4
 ```
 
@@ -49,11 +50,11 @@ along with the slot's own `DS_HOLDER_ID` and `DS_API_ADDR`.
 ## 2. Boot one VM locally
 
 ```sh
-sudo deploy/firecracker/firecracker-run.sh --role page --id 1 \
+sudo deploy/firecracker/firecracker-run.sh --id 1 \
   --kernel vmlinux --rootfs rootfs.ext4 --mmds-env secrets.env
 
-# ingest role with its scratch disk
-sudo deploy/firecracker/firecracker-run.sh --role ingest --id 2 --vcpus 2 --mem 2048 \
+# with a scratch disk, which every copy wants: each one ingests
+sudo deploy/firecracker/firecracker-run.sh --id 2 --vcpus 2 --mem 2048 \
   --kernel vmlinux --rootfs rootfs.ext4 --scratch scratch-1.ext4 --mmds-env secrets.env
 ```
 

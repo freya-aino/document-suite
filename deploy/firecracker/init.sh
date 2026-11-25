@@ -5,17 +5,17 @@
 #   1. mounts /proc, /sys, /dev (devtmpfs), /dev/pts, /tmp and /run;
 #   2. mounts the scratch disk (second virtio block device, /dev/vdb) at /scratch;
 #   3. configures eth0 from the kernel command line (`ip=` or `ds.ip=`/`ds.gw=`);
-#   4. (there is nothing to select any more: the service has no roles);
+#   4. (there is nothing to select: the service has no roles);
 #   5. fetches secrets from MMDS (169.254.169.254, V2 session token) and exports every
 #      `DS__SECTION__KEY=value` line of /ds/env as an environment variable;
 #   6. starts `ds-suite` as a child, forwards SIGTERM, reaps zombies
 #      (orphaned render children are re-parented to PID 1), and powers the VM off when
 #      it exits (the host sees the Firecracker process end).
 #
-# SUPERSEDED. This init ran a queue consumer, and decision D13 removed the queue: a
-# microVM takes no inbound connections, so nothing can hand it a document any more. The
-# script is kept because `build-rootfs.sh` is still the worked example of packaging the
-# binary, and a VM booted from that image will start the service and then sit idle.
+# The guest serves the API like any other copy: its address is reachable from the host
+# across its own TAP device, and `fleet.sh endpoints` is what the host's load balancer is
+# configured from. See SPEC.md, which records why this tier was marked superseded and is
+# not any more.
 #
 # Everything it needs beyond secrets comes from /etc/ds/worker.toml and
 # /etc/ds/models.toml baked into the image; DS__… variables override individual keys.
@@ -54,8 +54,9 @@ if [ -b "$SCRATCH_DEV" ]; then
         mkfs.ext4 -q -F "$SCRATCH_DEV" && mount -t ext4 -o noatime,nodev,nosuid "$SCRATCH_DEV" /scratch
     fi
     chmod 1777 /scratch
-elif [ "$ROLE" = ingest ]; then
-    log "warning: ingest role without a scratch disk ($SCRATCH_DEV); originals spool to /tmp"
+else
+    # No roles to check any more (D12): every copy ingests, so every copy wants the disk.
+    log "warning: no scratch disk at $SCRATCH_DEV; originals spool to /tmp"
 fi
 
 # ── Network ─────────────────────────────────────────────────────────────────

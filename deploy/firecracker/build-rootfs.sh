@@ -12,8 +12,8 @@
 # The image holds: /sbin/init (deploy/firecracker/init.sh), busybox and the applets init
 # uses, /usr/bin/ds-suite with its shared-library closure (glibc build; a static musl
 # binary cannot dlopen libpdfium.so), libpdfium.so, the CA bundle and the baked config.
-# The suite is one binary, and in this image it is started with a subset of roles: a
-# microVM takes no inbound connections, so it runs queue consumers and never the API.
+# The suite is one binary with no roles: the guest runs every stage and serves the API,
+# which the host reaches across the guest's TAP device (SPEC.md).
 # The library closure comes from `ldd` by default, or from the Nix store
 # (`nix path-info -r`) with --nix-closure when the binary is a Nix build.
 #
