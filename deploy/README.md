@@ -7,24 +7,24 @@ configuration — and the local stack is a profile you can ignore:
 
 ```sh
 devenv shell                      # toolchain, pdfium, sqlx-cli — no services
-cargo build --release -p vs-suite
+cargo build --release -p ds-suite
 docker build -f deploy/docker/Dockerfile -t document-suite:dev .   # or as an image
 devenv --profile stack up -d      # only if you want this repo's services too
 
-cargo build --release -p vs-mcp   # the optional LLM tool service
+cargo build --release -p ds-mcp   # the optional LLM tool service
 docker build -f deploy/docker/Dockerfile.mcp -t document-suite-mcp:dev .
 ```
 
 ## The service
 
-**One binary, one process, one service.** `vs-suite` serves the HTTP API and processes the
+**One binary, one process, one service.** `ds-suite` serves the HTTP API and processes the
 documents it accepts: ingest, then the pages concurrently, then Stage 2, in the same
 process. A deployment adds one unit and scales it by running more copies, each taking
 whole documents.
 
 | | |
 |---|---|
-| Listens | `VS_API_ADDR`, default `0.0.0.0:8080` |
+| Listens | `DS_API_ADDR`, default `0.0.0.0:8080` |
 | Needs | Postgres, S3, Qdrant, Keycloak and model endpoints — all of them, in every copy |
 | Stop | SIGTERM: stops accepting requests, then gives in-flight documents `--shutdown-grace` (60 s) |
 
@@ -41,8 +41,8 @@ repeats — rendered pages are skipped and vault writes are idempotent — and
 `worker.max_resumes` stops a document that kills the process reading it from taking down
 the fleet one copy at a time.
 
-Two other invocations of the same binary are not services: `vs-suite migrate` is a deploy
-step (schema **owner** credentials, not the runtime role's), and `vs-suite render-child` is
+Two other invocations of the same binary are not services: `ds-suite migrate` is a deploy
+step (schema **owner** credentials, not the runtime role's), and `ds-suite render-child` is
 what the ingest stage re-executes per render — you never run it yourself.
 
 ### Scaling it
@@ -60,7 +60,7 @@ long this copy's claim on a document is good for without a renewal, and
 `worker.resume_interval_s` is how often it looks for documents another copy abandoned. Set
 the interval to 0 and nothing recovers them, which is what happened before leases existed.
 
-`vs-adapt` is the other binary and is never deployed: an offline tool for scoring
+`ds-adapt` is the other binary and is never deployed: an offline tool for scoring
 candidate workflows in dev and stage.
 
 ### The image
@@ -75,7 +75,7 @@ docker build -f deploy/docker/Dockerfile -t document-suite:dev .
 | Stage | What it does |
 |---|---|
 | `pdfium` | fetches the prebuilt `libpdfium.so`, pinned by release **and** SHA-256 |
-| `build` | `cargo build --release --locked -p vs-suite` on `rust:1.100-bookworm` |
+| `build` | `cargo build --release --locked -p ds-suite` on `rust:1.100-bookworm` |
 | `runtime` | `debian:bookworm-slim`, the binary, the library, `ca-certificates`, and a minimal config |
 
 Three things about it worth knowing before you change them:
@@ -89,23 +89,23 @@ Three things about it worth knowing before you change them:
   what keeps a given image reproducible. It may sit ahead of `rust-version`, which is
   capped by what the dev shell provides.
 - **The `HEALTHCHECK` probes `/healthz`** unconditionally, because every copy serves the
-  API. It used to branch on `VS_ROLES` for copies that only drained the queue.
+  API. It used to branch on `DS_ROLES` for copies that only drained the queue.
 
-It runs as uid 10001, writes to `/scratch`, and ships `/etc/vs/worker.toml` as the
-smallest valid config: `[models]` pointing at `/etc/vs/models.toml`, and JSON logs.
+It runs as uid 10001, writes to `/scratch`, and ships `/etc/ds/worker.toml` as the
+smallest valid config: `[models]` pointing at `/etc/ds/models.toml`, and JSON logs.
 `[bus]`, `[blob]`, `[postgres]` and `[qdrant]` are deliberately absent — there is no
 sensible default for someone else's infrastructure, so the container stops with
 `missing field <section>` until they are set, which is better than coming up pointed at
-nothing. Mount your own file over `/etc/vs/worker.toml`, or set everything from the
+nothing. Mount your own file over `/etc/ds/worker.toml`, or set everything from the
 environment; both work.
 
 ```sh
 docker run --rm -p 8080:8080 \
-  -v /path/to/models.toml:/etc/vs/models.toml:ro \
-  -e VS__BLOB__BUCKET=visual-suite -e VS__BLOB__ENDPOINT=https://s3.internal \
-  -e VS__POSTGRES__URL=postgres://vs_app@pg:5432/visual_suite -e VS__POSTGRES__PASSWORD=… \
-  -e VS__QDRANT__URL=http://qdrant:6334 \
-  -e VS__AUTH__ISSUER=https://sso.example.org/realms/koki -e VS__AUTH__AUDIENCE=vs-api \
+  -v /path/to/models.toml:/etc/ds/models.toml:ro \
+  -e DS__BLOB__BUCKET=document-suite -e DS__BLOB__ENDPOINT=https://s3.internal \
+  -e DS__POSTGRES__URL=postgres://ds_app@pg:5432/document_suite -e DS__POSTGRES__PASSWORD=… \
+  -e DS__QDRANT__URL=http://qdrant:6334 \
+  -e DS__AUTH__ISSUER=https://sso.example.org/realms/koki -e DS__AUTH__AUDIENCE=ds-api \
   -e AWS_ACCESS_KEY_ID=… -e AWS_SECRET_ACCESS_KEY=… -e AWS_REGION=… \
   document-suite:dev
 ```
@@ -115,10 +115,10 @@ same image, as the schema owner.
 
 ## The LLM tool service, if you want it
 
-`vs-mcp` serves the same work as **Model Context Protocol tools**, so an agent or an
+`ds-mcp` serves the same work as **Model Context Protocol tools**, so an agent or an
 assistant can submit documents, follow jobs, read text and manage sharing. It is optional
 and entirely separate: a deployment that wants the API alone runs one fewer binary and
-nothing else changes. Full detail in [`crates/vs-mcp/SPEC.md`](../crates/vs-mcp/SPEC.md).
+nothing else changes. Full detail in [`crates/ds-mcp/SPEC.md`](../crates/ds-mcp/SPEC.md).
 
 The one thing worth knowing before deploying it: **it holds no credentials** (decision
 D16). Every tool call carries the token of whoever is calling, and there is no
@@ -130,12 +130,12 @@ Two shapes, and the choice is about who starts the process:
 ```sh
 # A service. Every request carries its own caller's token, from its Authorization header.
 docker run --rm -p 8081:8081 \
-  -e VS_API_URL=https://suite.internal \
+  -e DS_API_URL=https://suite.internal \
   document-suite-mcp:dev http --allowed-origin https://app.internal
 
 # One process per user, launched by their client. The token is theirs, from their
 # environment — which is why this form is a binary and not a container.
-VS_API_TOKEN_FILE=/run/secrets/vs-token vs-mcp --api https://suite.internal stdio
+DS_API_TOKEN_FILE=/run/secrets/ds-token ds-mcp --api https://suite.internal stdio
 ```
 
 In HTTP mode the clients are MCP clients, which means **your** authorization layer is what
@@ -164,9 +164,9 @@ annotated file to copy; below is the complete list, with every default.
 
 | Flag | Environment | Default |
 |---|---|---|
-| `--config` | `VS_CONFIG` | `/etc/vs/worker.toml`; the file must exist, even if empty |
-| `--addr` | `VS_API_ADDR` | `0.0.0.0:8080` |
-| `--shutdown-grace` | `VS_SHUTDOWN_GRACE` | `60` seconds to drain on SIGTERM |
+| `--config` | `DS_CONFIG` | `/etc/ds/worker.toml`; the file must exist, even if empty |
+| `--addr` | `DS_API_ADDR` | `0.0.0.0:8080` |
+| `--shutdown-grace` | `DS_SHUTDOWN_GRACE` | `60` seconds to drain on SIGTERM |
 | `migrate --database-url` | `DATABASE_URL` | —; the deploy step, as the schema **owner** |
 
 Ports: `8080` inbound, plus `telemetry.metrics_addr` if set.
@@ -201,7 +201,7 @@ startup, not at the first document that gets that far.
 | `postgres.max_connections` | `16` | per **process**, shared by the API and every stage in it |
 | `qdrant.url` | `http://127.0.0.1:6334` | the **gRPC** port; 6333 is REST and will not work |
 | `qdrant.api_key_env` | none | the *name* of the variable holding the key |
-| `qdrant.collection_prefix` | `vs` | lets one Qdrant host several deployments |
+| `qdrant.collection_prefix` | `ds` | lets one Qdrant host several deployments. Changing it does not move data: the suite creates the new collections empty and the old ones keep the documents, which reads as though everything vanished. The same is true of `blob.bucket`. Both defaults changed with the suite's rename, so an environment populated under the old names must either keep the old values or be re-ingested |
 | `qdrant.batch_size` | `256` | points per upsert |
 | `qdrant.idf` | `true` | whether Qdrant applies IDF to the lexical half. The statistics are the collection's, so they span organizations — set false for a deployment that will not have one organization's ranking depend on another's corpus |
 | `models.registry` | **required** | path to the model-registry TOML |
@@ -211,7 +211,7 @@ startup, not at the first document that gets that far.
 | `auth.org_claim` | `organization` | **becomes the tenant**; a dotted path reads a nested claim |
 | `auth.department_claim` | `department` | recorded on the job, and what `visibility = department` is evaluated against |
 | `auth.workspaces_claim` | `workspaces` | recorded on the job, and what `visibility = workspace` is evaluated against |
-| `auth.admin_role` | `vs-admin` | the DAG-list routes and `/metrics` |
+| `auth.admin_role` | `ds-admin` | the DAG-list routes and `/metrics` |
 | `auth.jwks_refresh_s` | `300` | how long a fetched JWKS is reused |
 | `auth.leeway_s` | `30` | clock skew allowed on `exp` and `nbf` |
 | `api.max_upload_bytes` | `2147483648` | 413 above it |
@@ -259,14 +259,14 @@ startup, not at the first document that gets that far.
 
 ### Overriding from the environment
 
-`VS__<SECTION>__<KEY>`, upper case, `__` between levels — which is how secrets stay out of
+`DS__<SECTION>__<KEY>`, upper case, `__` between levels — which is how secrets stay out of
 the file. Three things to know:
 
 - **Scalars only.** An override parses to an integer, float, bool or string and never to
   an array, so `auth.audience` accepts a comma-separated string for exactly this reason,
   and `stage2.judge_band` cannot be set this way at all.
 - **A required section needs at least one key from somewhere.** An override creates its
-  parent table, so `VS__QDRANT__URL=…` satisfies `[qdrant]` on its own; set nothing for a
+  parent table, so `DS__QDRANT__URL=…` satisfies `[qdrant]` on its own; set nothing for a
   required section and the process stops with `missing field`.
 - **An almost-empty file works.** A zero-byte TOML plus the variables below is a complete
   configuration — useful when the whole deployment is environment-driven.
@@ -277,30 +277,30 @@ Read outside that scheme:
 |---|---|
 | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`, `AWS_ENDPOINT`, `AWS_ALLOW_HTTP` | S3 credentials and endpoint, through `AmazonS3Builder::from_env()`. `blob.endpoint` and `blob.region` are applied afterwards, so they win |
 | `PDFIUM_DYNAMIC_LIB_PATH` | the directory holding `libpdfium.so`; nothing renders without it |
-| `VS_HOLDER_ID` | overrides this process's lease holder id. For a restored Firecracker snapshot, where a *random* id would be a copy of the snapshotted process's — see `firecracker/SPEC.md` |
+| `DS_HOLDER_ID` | overrides this process's lease holder id. For a restored Firecracker snapshot, where a *random* id would be a copy of the snapshotted process's — see `firecracker/SPEC.md` |
 | whatever `qdrant.api_key_env` and each model's `api_key_env` name | the keys themselves |
-| `RUST_LOG` | tracing filter, e.g. `info,vs_=debug` |
+| `RUST_LOG` | tracing filter, e.g. `info,ds_=debug` |
 | `SSL_CERT_FILE`, `TMPDIR` | CA bundle, scratch location |
 | `DATABASE_URL` | the `migrate` subcommand only |
 
 ### The minimum for the whole service
 
 ```sh
-VS_CONFIG=/etc/vs/worker.toml            # may be empty
-VS__BLOB__BUCKET=visual-suite
-VS__BLOB__ENDPOINT=https://s3.internal
-VS__POSTGRES__URL=postgres://vs_app@pg:5432/visual_suite
-VS__POSTGRES__PASSWORD=…
-VS__QDRANT__URL=http://qdrant:6334
-VS__MODELS__REGISTRY=/etc/vs/models.toml
-VS__AUTH__ISSUER=https://sso.example.org/realms/koki
-VS__AUTH__AUDIENCE=vs-api
+DS_CONFIG=/etc/ds/worker.toml            # may be empty
+DS__BLOB__BUCKET=document-suite
+DS__BLOB__ENDPOINT=https://s3.internal
+DS__POSTGRES__URL=postgres://ds_app@pg:5432/document_suite
+DS__POSTGRES__PASSWORD=…
+DS__QDRANT__URL=http://qdrant:6334
+DS__MODELS__REGISTRY=/etc/ds/models.toml
+DS__AUTH__ISSUER=https://sso.example.org/realms/koki
+DS__AUTH__AUDIENCE=ds-api
 AWS_ACCESS_KEY_ID=…  AWS_SECRET_ACCESS_KEY=…  AWS_REGION=…
 PDFIUM_DYNAMIC_LIB_PATH=/usr/lib
 ```
 
-The `VS__AUTH__*` pair is not optional: without it the process stops with
-`vs-suite needs an [auth] section in …`. There is no unauthenticated mode.
+The `DS__AUTH__*` pair is not optional: without it the process stops with
+`ds-suite needs an [auth] section in …`. There is no unauthenticated mode.
 
 ### What must exist before it starts
 
@@ -311,14 +311,18 @@ The `VS__AUTH__*` pair is not optional: without it the process stops with
    driven by the realm rather than by hand, point Keycloak's **back-channel logout URL**
    at `POST /v1/auth/backchannel-logout`; it carries a signed logout token and needs no
    credentials of its own.
-2. **Migrations applied, and the `vs_app` role existing.** `vs-suite migrate` runs as the
-   schema owner; the service connects as the runtime role `vs_app` (insert-only on the
+2. **Migrations applied, and the `ds_app` role existing.** `ds-suite migrate` runs as the
+   schema owner; the service connects as the runtime role `ds_app` (insert-only on the
    vault, granted by migration 0003), which the migrations expect to exist already. The
    service *checks* the schema version at startup and refuses an unmigrated database.
+   A database that was migrated under the suite's former name needs its migration
+   checksums re-stamped once before either will proceed, and its roles renamed
+   (`vs`/`vs_app` → `ds`/`ds_app`); both steps are in
+   [`crates/ds-vault/SPEC.md`](../crates/ds-vault/SPEC.md) under "Roles and migrations".
 3. **A bucket that exists**, with credentials that can read and write it. Nothing here
    creates it. Qdrant collections, by contrast, are created on first use — behind an alias
    named for the embedder's dimension, so a later dimension change is
-   `vs-suite vectors migrate` rather than a manual rebuild.
+   `ds-suite vectors migrate` rather than a manual rebuild.
 4. **A decision about `api.default_visibility`.** It defaults to `private`: a new upload
    is readable by its uploader and by an administrator, and nobody else until it is
    shared. If your callers expect what the API did before — every member of an
@@ -341,7 +345,7 @@ The `VS__AUTH__*` pair is not optional: without it the process stops with
   collections, so **changing what the claim contains re-keys the data** — pick it once.
 - **Access inside an organization**: a document is private to its uploader by default and
   shared per document (`PUT /v1/documents/{hk}/access`, `POST …/grants`). The rule is one
-  function, the routes are in [`vs-api`](../crates/vs-api/SPEC.md), and the rows are in
+  function, the routes are in [`ds-api`](../crates/ds-api/SPEC.md), and the rows are in
   `ops` rather than the vault because a share has to be withdrawable (decision D14).
 - **Personal data**: telemetry has none — no span field, log line or metric label
   identifies a person, which is asserted by a test rather than a convention
