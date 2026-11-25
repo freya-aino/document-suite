@@ -13,10 +13,10 @@
 
 {
   imports = [
-    ./crates/vs-vault/devenv-stack.nix    # Postgres: ops, registry and vault schemas
-    ./crates/vs-infra/devenv-stack.nix    # Garage (S3)
-    ./crates/vs-vectors/devenv-stack.nix  # Qdrant
-    ./crates/vs-models/devenv-stack.nix   # the LiteLLM model-tier harness
-    ./deploy/keycloak/devenv.nix          # the realm vs-api verifies against
+    ./crates/ds-vault/devenv-stack.nix    # Postgres: ops, registry and vault schemas
+    ./crates/ds-infra/devenv-stack.nix    # Garage (S3)
+    ./crates/ds-vectors/devenv-stack.nix  # Qdrant
+    ./crates/ds-models/devenv-stack.nix   # the LiteLLM model-tier harness
+    ./deploy/keycloak/devenv.nix          # the realm ds-api verifies against
   ];
 }

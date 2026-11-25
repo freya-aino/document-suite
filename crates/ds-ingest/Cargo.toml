@@ -1,0 +1,24 @@
+[package]
+name = "ds-ingest"
+description = "Format detection, rasterization, native text layer, CPU steps"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+ds-core.workspace = true
+ds-dag.workspace = true
+ds-classify.workspace = true
+async-trait.workspace = true
+image.workspace = true
+libc.workspace = true
+pdfium-render.workspace = true
+tiff.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+imageproc.workspace = true

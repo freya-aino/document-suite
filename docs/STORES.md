@@ -28,13 +28,13 @@ caller's responsibility**, and all three are easy to forget:
 4. **Check who may read what, if you are answering a person.** The vault says which
    *organization* a document belongs to and nothing about which of its members may see it:
    that is `ops.document_access` and `ops.document_grants` (decision D14), and
-   `vs_vault::access::Reader::may_read` is the rule. A reader that joins the vault alone
+   `ds_vault::access::Reader::may_read` is the rule. A reader that joins the vault alone
    will happily return a colleague's private document.
 
 ## Keys
 
 Every key is the lowercase hex SHA-256 of its parts, trimmed and joined with `|` (empty
-parts are encoded, not skipped). `vs_core::HashKey` is the reference implementation, and
+parts are encoded, not skipped). `ds_core::HashKey` is the reference implementation, and
 the formulas are normative — a reader that computes a key differently will not find the
 row.
 
@@ -79,7 +79,7 @@ FROM vault.sat_run WHERE run_hk = $1 ORDER BY run_hk, load_dts DESC;
 
 ```sql
 -- Body blocks of a run, in document reading order (the constant is
--- `vs_vault::READING_ORDER_QUERY`).
+-- `ds_vault::READING_ORDER_QUERY`).
 SELECT p.block_hk
 FROM (SELECT DISTINCT ON (block_hk) block_hk, global_order, furniture
       FROM vault.sat_block_placement ORDER BY block_hk, load_dts DESC) p
@@ -252,8 +252,8 @@ crop can also be recomputed rather than fetched.
 
 ## Qdrant
 
-Three collections, named from the configured prefix (`VS__QDRANT__COLLECTION_PREFIX`,
-default `vs`):
+Three collections, named from the configured prefix (`DS__QDRANT__COLLECTION_PREFIX`,
+default `ds`):
 
 | Collection | Points | Payload |
 |------------|--------|---------|
@@ -273,8 +273,8 @@ Each point carries two named vectors:
 Point ids are UUIDs derived from the node key, so writing the same run twice is an upsert
 of the same points.
 
-**Collection names are aliases.** The configured name (`vs_blocks`) points at a collection
-carrying its vector dimension (`vs_blocks__d1024`), so a change of embedding model is an
+**Collection names are aliases.** The configured name (`ds_blocks`) points at a collection
+carrying its vector dimension (`ds_blocks__d1024`), so a change of embedding model is an
 alias move rather than a rebuild under the reader's feet — a reader always uses the
 configured name. A deployment that predates the alias has a real collection under that
 name instead, which works identically.

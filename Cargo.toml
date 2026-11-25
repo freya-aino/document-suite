@@ -1,24 +1,24 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/vs-core",
-    "crates/vs-infra",
-    "crates/vs-api",
-    "crates/vs-ingest",
-    "crates/vs-classify",
-    "crates/vs-dag",
-    "crates/vs-router",
-    "crates/vs-models",
-    "crates/vs-steps",
-    "crates/vs-stitch",
-    "crates/vs-extract",
-    "crates/vs-graph",
-    "crates/vs-vault",
-    "crates/vs-vectors",
-    "crates/vs-worker",
-    "crates/vs-suite",
-    "crates/vs-adapt",
-    "crates/vs-mcp",
+    "crates/ds-core",
+    "crates/ds-infra",
+    "crates/ds-api",
+    "crates/ds-ingest",
+    "crates/ds-classify",
+    "crates/ds-dag",
+    "crates/ds-router",
+    "crates/ds-models",
+    "crates/ds-steps",
+    "crates/ds-stitch",
+    "crates/ds-extract",
+    "crates/ds-graph",
+    "crates/ds-vault",
+    "crates/ds-vectors",
+    "crates/ds-worker",
+    "crates/ds-suite",
+    "crates/ds-adapt",
+    "crates/ds-mcp",
 ]
 
 [workspace.package]
@@ -34,22 +34,22 @@ publish = false
 
 [workspace.dependencies]
 # internal
-vs-core = { path = "crates/vs-core" }
-vs-infra = { path = "crates/vs-infra" }
-vs-ingest = { path = "crates/vs-ingest" }
-vs-classify = { path = "crates/vs-classify" }
-vs-dag = { path = "crates/vs-dag" }
-vs-router = { path = "crates/vs-router" }
-vs-models = { path = "crates/vs-models" }
-vs-steps = { path = "crates/vs-steps" }
-vs-stitch = { path = "crates/vs-stitch" }
-vs-extract = { path = "crates/vs-extract" }
-vs-graph = { path = "crates/vs-graph" }
-vs-vault = { path = "crates/vs-vault" }
-vs-vectors = { path = "crates/vs-vectors" }
-vs-api = { path = "crates/vs-api" }
-vs-worker = { path = "crates/vs-worker" }
-vs-mcp = { path = "crates/vs-mcp" }
+ds-core = { path = "crates/ds-core" }
+ds-infra = { path = "crates/ds-infra" }
+ds-ingest = { path = "crates/ds-ingest" }
+ds-classify = { path = "crates/ds-classify" }
+ds-dag = { path = "crates/ds-dag" }
+ds-router = { path = "crates/ds-router" }
+ds-models = { path = "crates/ds-models" }
+ds-steps = { path = "crates/ds-steps" }
+ds-stitch = { path = "crates/ds-stitch" }
+ds-extract = { path = "crates/ds-extract" }
+ds-graph = { path = "crates/ds-graph" }
+ds-vault = { path = "crates/ds-vault" }
+ds-vectors = { path = "crates/ds-vectors" }
+ds-api = { path = "crates/ds-api" }
+ds-worker = { path = "crates/ds-worker" }
+ds-mcp = { path = "crates/ds-mcp" }
 
 # external
 anyhow = "1"

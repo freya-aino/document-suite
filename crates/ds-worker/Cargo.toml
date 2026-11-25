@@ -1,0 +1,48 @@
+[package]
+name = "ds-worker"
+description = "Worker roles ingest | page | doc, run by ds-suite"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+ds-core.workspace = true
+ds-infra.workspace = true
+ds-ingest.workspace = true
+ds-classify.workspace = true
+ds-dag.workspace = true
+ds-router.workspace = true
+ds-models.workspace = true
+ds-steps.workspace = true
+ds-stitch.workspace = true
+ds-extract.workspace = true
+ds-graph.workspace = true
+ds-vault.workspace = true
+ds-vectors.workspace = true
+anyhow.workspace = true
+async-trait.workspace = true
+bytes.workspace = true
+futures.workspace = true
+hex.workspace = true
+image.workspace = true
+metrics.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+sqlx.workspace = true
+tokio.workspace = true
+toml.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+# The unit tests in `src/`: a fixed timestamp, and an in-memory blob store. The
+# end-to-end pipeline test moved to `ds-suite`, which is where the binary it
+# re-executes for rendering now lives.
+chrono.workspace = true
+object_store.workspace = true
+# `test-util` for paused time: the retry tests assert the number of attempts, and would
+# otherwise sit through the real backoff.
+tokio = { workspace = true, features = ["test-util"] }

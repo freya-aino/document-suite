@@ -1,11 +1,11 @@
-# vs-suite configuration. Secrets come from the environment (VS__SECTION__KEY) or MMDS,
+# ds-suite configuration. Secrets come from the environment (DS__SECTION__KEY) or MMDS,
 # never from this file.
 #
 # Every key with its default, which sections are required, and what an environment
 # override can and cannot carry: deploy/README.md § Configuration.
 
 [blob]
-bucket = "visual-suite"
+bucket = "document-suite"
 endpoint = "https://s3.internal"
 region = "eu-west-1"
 # Server-side encryption for everything written here: none | aes256 | aws:kms |
@@ -14,7 +14,7 @@ region = "eu-west-1"
 # or where the store is Garage or MinIO encrypting at the volume.
 sse = "none"
 # sse_kms_key_id = "arn:aws:kms:eu-west-1:…:key/…"   # aws:kms and aws:kms:dsse
-# sse_customer_key_env = "VS_SSE_C_KEY"              # sse-c: the variable's *name*
+# sse_customer_key_env = "DS_SSE_C_KEY"              # sse-c: the variable's *name*
 
 [blob.retention]
 # Days to keep each class of object; 0 = forever. Derived objects can be rebuilt by
@@ -29,14 +29,14 @@ originals_days = 0
 sweep_interval_h = 6              # 0 disables the sweep entirely
 
 [postgres]
-url = "postgres://vs_app@pgbouncer.internal:6432/visual_suite"   # password: VS__POSTGRES__PASSWORD
+url = "postgres://ds_app@pgbouncer.internal:6432/document_suite"   # password: DS__POSTGRES__PASSWORD
 max_connections = 4
 
 [qdrant]
 # Qdrant gRPC port (6334), not the REST port (6333).
 url = "http://qdrant.internal:6334"
 # api_key_env = "QDRANT_API_KEY"
-collection_prefix = "vs"
+collection_prefix = "ds"
 batch_size = 256
 # Whether Qdrant applies IDF to the lexical half of a hybrid search. True is the better
 # ranking; the statistics are the collection's, so they span organizations. Set false for
@@ -45,7 +45,7 @@ batch_size = 256
 idf = true
 
 [models]
-registry = "/etc/vs/models.toml"
+registry = "/etc/ds/models.toml"
 
 [worker]
 max_in_flight = 32
@@ -84,16 +84,16 @@ job_retention_days = 90            # then the caller's subject is scrubbed from 
 revocation_refresh_s = 30          # also the window in which a revoked token still works here
 
 [auth]
-# Required by vs-api: it refuses to start without this section. Keycloak realm issuer,
+# Required by ds-api: it refuses to start without this section. Keycloak realm issuer,
 # matched against the token's `iss` exactly and used for OIDC discovery.
 issuer = "https://sso.example.org/realms/koki"
-# Accepted `aud` values. Needs an audience mapper on the vs-api client in Keycloak —
+# Accepted `aud` values. Needs an audience mapper on the ds-api client in Keycloak —
 # without one, Keycloak mints `aud: account` and every request is refused. A plain string
 # works too, comma-separated, so a deployment configured only through the environment can
-# use VS__AUTH__AUDIENCE (overrides carry scalars, never arrays).
-audience = ["vs-api"]
+# use DS__AUTH__AUDIENCE (overrides carry scalars, never arrays).
+audience = ["ds-api"]
 # Client whose `resource_access.<client_id>.roles` are read as well as the realm roles.
-client_id = "vs-api"
+client_id = "ds-api"
 # Claim holding the organization, which becomes the tenant: the isolation boundary.
 # A dotted path reads a nested claim (`koki.org`).
 org_claim = "organization"
@@ -102,7 +102,7 @@ org_claim = "organization"
 department_claim = "department"
 workspaces_claim = "workspaces"
 # Realm or client role required by /v1/dag-lists and /metrics.
-admin_role = "vs-admin"
+admin_role = "ds-admin"
 jwks_refresh_s = 300                 # how long a fetched JWKS is reused
 leeway_s = 30                        # clock-skew allowance on exp and nbf
 

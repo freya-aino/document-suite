@@ -1,4 +1,4 @@
-# Model registry (vs-models). Endpoints are OpenAI-compatible base URLs (vLLM).
+# Model registry (ds-models). Endpoints are OpenAI-compatible base URLs (vLLM).
 # `id@revision` is recorded in provenance; bump `revision` whenever served weights change.
 
 [[model]]

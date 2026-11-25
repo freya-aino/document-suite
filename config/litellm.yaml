@@ -1,4 +1,4 @@
-# LiteLLM proxy for local development. Start with `vs-litellm-up` (devenv).
+# LiteLLM proxy for local development. Start with `ds-litellm-up` (devenv).
 #
 # The suite talks plain OpenAI to :4000 and never knows what is behind it, so this file is
 # the only thing you edit when you swap which model is serving. The aliases in

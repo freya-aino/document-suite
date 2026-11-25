@@ -71,9 +71,9 @@ jobs:
       postgres:
         image: postgres:17-alpine
         env:
-          POSTGRES_USER: vs
-          POSTGRES_PASSWORD: vs
-          POSTGRES_DB: visual_suite
+          POSTGRES_USER: ds
+          POSTGRES_PASSWORD: ds
+          POSTGRES_DB: document_suite
         ports:
           - 5432:5432
         options: >-
@@ -84,19 +84,19 @@ jobs:
     env:
       # `sqlx::test` creates a database per test, so this role needs CREATEDB — the
       # Postgres superuser has it.
-      DATABASE_URL: postgres://vs:vs@127.0.0.1:5432/visual_suite
-      VS__POSTGRES__PASSWORD: vs_app
-      VS__QDRANT__URL: http://127.0.0.1:6334 # gRPC, not the 6333 REST port
+      DATABASE_URL: postgres://ds:ds@127.0.0.1:5432/document_suite
+      DS__POSTGRES__PASSWORD: ds_app
+      DS__QDRANT__URL: http://127.0.0.1:6334 # gRPC, not the 6333 REST port
       AWS_ENDPOINT: http://127.0.0.1:3900
       AWS_REGION: garage
       AWS_ALLOW_HTTP: "true"
-      # The fixed dev credentials from crates/vs-infra/devenv.nix, so a local `devenv up`
+      # The fixed dev credentials from crates/ds-infra/devenv.nix, so a local `devenv up`
       # and this job read the same values. Not secrets: this Garage lasts one job.
       AWS_ACCESS_KEY_ID: GK0123456789abcdef01234567
       AWS_SECRET_ACCESS_KEY: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
       # The realm `deploy/keycloak/realm-dev.json` describes, imported by the script
-      # below. `vs-api` cannot start without one, and the auth test asks it for a token.
-      VS_KEYCLOAK_ISSUER: http://127.0.0.1:8081/realms/koki
+      # below. `ds-api` cannot start without one, and the auth test asks it for a token.
+      DS_KEYCLOAK_ISSUER: http://127.0.0.1:8081/realms/koki
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -107,10 +107,10 @@ jobs:
         # Migration 0003 refuses to run without it, by design: the grants it makes are
         # the difference between the worker being able to write and being able to delete.
         run: |
-          PGPASSWORD=vs psql -h 127.0.0.1 -U vs -d visual_suite \
-            -c "DO \$\$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'vs_app')
-                THEN CREATE ROLE vs_app LOGIN PASSWORD 'vs_app'; END IF; END \$\$;"
+          PGPASSWORD=ds psql -h 127.0.0.1 -U ds -d document_suite \
+            -c "DO \$\$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ds_app')
+                THEN CREATE ROLE ds_app LOGIN PASSWORD 'ds_app'; END IF; END \$\$;"
       - run: cargo test --workspace -- --include-ignored
       - name: Service logs
         if: failure()
-        run: for c in vs-ci-qdrant vs-ci-garage vs-ci-keycloak; do echo "== $c"; docker logs "$c" 2>&1 | tail -40; done
+        run: for c in ds-ci-qdrant ds-ci-garage ds-ci-keycloak; do echo "== $c"; docker logs "$c" 2>&1 | tail -40; done

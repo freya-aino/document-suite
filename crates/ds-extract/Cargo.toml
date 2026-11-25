@@ -1,0 +1,23 @@
+[package]
+name = "ds-extract"
+description = "Stage 2: mentions, assertions, entity resolution, type normalisation"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+ds-core.workspace = true
+ds-stitch.workspace = true
+ds-models.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true

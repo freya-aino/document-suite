@@ -9,10 +9,10 @@
 # Ports and the container name prefix come from the environment so this can be run on a
 # developer machine that already has something on 6334 or 3900:
 #
-#   PREFIX=vs-ci QDRANT_GRPC=56334 S3_PORT=53900 KEYCLOAK_PORT=58081 \
+#   PREFIX=ds-ci QDRANT_GRPC=56334 S3_PORT=53900 KEYCLOAK_PORT=58081 \
 #     .github/scripts/services.sh
 #
-# With a non-default KEYCLOAK_PORT, also export VS_KEYCLOAK_ISSUER: the test that asks the
+# With a non-default KEYCLOAK_PORT, also export DS_KEYCLOAK_ISSUER: the test that asks the
 # realm for a token defaults to :8081.
 #
 # It is idempotent: an existing container of the same name is replaced, and Garage's state
@@ -20,21 +20,21 @@
 # directory must outlive this script, because the Garage container mounts it.
 set -euo pipefail
 
-PREFIX="${PREFIX:-vs-ci}"
+PREFIX="${PREFIX:-ds-ci}"
 QDRANT_REST="${QDRANT_REST:-6333}"
 QDRANT_GRPC="${QDRANT_GRPC:-6334}"
 S3_PORT="${S3_PORT:-3900}"
-KEYCLOAK_PORT="${KEYCLOAK_PORT:-8081}" # 8080 is vs-api's own default
+KEYCLOAK_PORT="${KEYCLOAK_PORT:-8081}" # 8080 is ds-api's own default
 
 # Resolved from this script rather than the working directory: the realm file is mounted
 # into the container, so a relative path would depend on where this was run from.
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
-# The same fixed dev credentials `crates/vs-infra/devenv.nix` imports into Garage, so a
+# The same fixed dev credentials `crates/ds-infra/devenv.nix` imports into Garage, so a
 # local run and CI read the same AWS_* values. Garage's format is GK + 24 hex, 64 hex.
 S3_REGION="${AWS_REGION:-garage}"
-S3_BUCKET="${S3_BUCKET:-visual-suite}"
-S3_KEY_NAME="vs-dev"
+S3_BUCKET="${S3_BUCKET:-document-suite}"
+S3_KEY_NAME="ds-dev"
 S3_ACCESS_KEY="${AWS_ACCESS_KEY_ID:-GK0123456789abcdef01234567}"
 S3_SECRET_KEY="${AWS_SECRET_ACCESS_KEY:-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef}"
 
@@ -146,10 +146,10 @@ garage bucket allow --read --write --owner "$S3_BUCKET" --key "$S3_KEY_NAME"
 echo "::endgroup::"
 
 echo "::group::Keycloak"
-# `vs-api` verifies every request against a realm and refuses to start without one, so
+# `ds-api` verifies every request against a realm and refuses to start without one, so
 # this is not optional for the integration tests. The realm is the development one in
 # deploy/keycloak (a client with an audience mapper, the organization claim and the
-# vs-admin role); `start-dev` keeps it in memory, which is all a one-job realm needs.
+# ds-admin role); `start-dev` keeps it in memory, which is all a one-job realm needs.
 run "$PREFIX-keycloak" \
   -p "127.0.0.1:$KEYCLOAK_PORT:8080" \
   -e KC_BOOTSTRAP_ADMIN_USERNAME=admin \

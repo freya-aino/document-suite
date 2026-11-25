@@ -1,15 +1,15 @@
-# visual-suite
+# Document Suite
 
 Rust workspace for high-throughput visual document processing: per-page, content-aware
 VLM workflows (Stage 1), document-level entity/relation graph extraction (Stage 2), and
 traceable storage in a Postgres Data Vault 2.0 warehouse with vectors in Qdrant.
 
-It deploys as **one service** — `vs-suite`, which serves the HTTP API and runs all three
+It deploys as **one service** — `ds-suite`, which serves the HTTP API and runs all three
 stages of the document pipeline in one process. Postgres, an S3-compatible store, Qdrant,
 Keycloak and the model endpoints belong to the environment around it;
 [`deploy/README.md`](deploy/README.md) is what another deployment needs to know.
 
-A second, optional service — `vs-mcp` — advertises the same work as **LLM tools** over the
+A second, optional service — `ds-mcp` — advertises the same work as **LLM tools** over the
 Model Context Protocol. It is a client of the API above: it holds no credentials, forwards
 the caller's own token, and can be left out entirely (decision D16).
 
@@ -26,24 +26,24 @@ built carries a `README.md` describing what exists; one with work outstanding ca
 docs/SPEC.md        system spec: architecture, decisions, assumptions
 docs/STORES.md      what a reader needs to query the two stores            contract
 crates/
-  vs-core/          shared types (ids, blocks, page profile, provenance)    README
-  vs-dag/           DAG model, step trait, page source, executor            README
-  vs-router/        routing table + DAG selection                           README
-  vs-steps/         the production step catalogue                           README
-  vs-graph/         document graph model + builder                          README
-  vs-infra/         blob store (S3, encrypted, swept), config, telemetry    SPEC
-  vs-api/           public HTTP API: uploads, status, access, admin         SPEC
-  vs-ingest/        format detection, rasterization, pre-processing         SPEC
-  vs-classify/      page and document classification                        SPEC
-  vs-models/        model registry, OpenAI client, model steps, parsers     SPEC
-  vs-stitch/        page results -> document; intra-page layout             SPEC
-  vs-extract/       mentions, assertions, entity resolution                 SPEC
-  vs-vault/         Data Vault writer + migrations; the mutable ops tables  SPEC
-  vs-vectors/       vector store trait + Qdrant (dense, sparse, fused)      SPEC
-  vs-worker/        the three pipeline stages and their leases              SPEC
-  vs-suite/   [bin] the service: the API, the stages and the sweeps          README
-  vs-adapt/   [bin] workflow generation, scoring, selection, corpora        SPEC
-  vs-mcp/     [bin] the LLM tool service: MCP tools over the HTTP API       SPEC
+  ds-core/          shared types (ids, blocks, page profile, provenance)    README
+  ds-dag/           DAG model, step trait, page source, executor            README
+  ds-router/        routing table + DAG selection                           README
+  ds-steps/         the production step catalogue                           README
+  ds-graph/         document graph model + builder                          README
+  ds-infra/         blob store (S3, encrypted, swept), config, telemetry    SPEC
+  ds-api/           public HTTP API: uploads, status, access, admin         SPEC
+  ds-ingest/        format detection, rasterization, pre-processing         SPEC
+  ds-classify/      page and document classification                        SPEC
+  ds-models/        model registry, OpenAI client, model steps, parsers     SPEC
+  ds-stitch/        page results -> document; intra-page layout             SPEC
+  ds-extract/       mentions, assertions, entity resolution                 SPEC
+  ds-vault/         Data Vault writer + migrations; the mutable ops tables  SPEC
+  ds-vectors/       vector store trait + Qdrant (dense, sparse, fused)      SPEC
+  ds-worker/        the three pipeline stages and their leases              SPEC
+  ds-suite/   [bin] the service: the API, the stages and the sweeps          README
+  ds-adapt/   [bin] workflow generation, scoring, selection, corpora        SPEC
+  ds-mcp/     [bin] the LLM tool service: MCP tools over the HTTP API       SPEC
 deploy/             embedding the suite in another deployment               README
   docker/           the service image (multi-stage, pinned pdfium)
   keycloak/         the development realm the suite verifies against         README
@@ -55,7 +55,7 @@ config/             example models, worker, DAG list, search space, LiteLLM
 
 ## Status
 
-All 19 crates compile together and the workspace is green: **448 tests pass with nothing
+All 18 crates compile together and the workspace is green: **448 tests pass with nothing
 running**, and **504 with the stack up** — the 56 extra touch a live Postgres, Qdrant,
 Garage or Keycloak, one of them takes a document through the whole pipeline into both
 stores, one asks the development realm for a token and verifies it, two take a generated
@@ -87,19 +87,19 @@ repository:
 - **Retrieval, both halves.** Dense and sparse vectors are written *and* queried, fused
   inside Qdrant with reciprocal rank fusion, with a dimension guard and an aliased
   collection so a change of embedder is a migration rather than a rebuild.
-- **The adaptation chain.** `vs-adapt dataset` writes a ground-truthed corpus and the five
+- **The adaptation chain.** `ds-adapt dataset` writes a ground-truthed corpus and the five
   commands run as a chain over it, in a test, producing a DAG list the production router
-  accepts. `vs-adapt classify-score` scores the page classifier itself — which found, on
+  accepts. `ds-adapt classify-score` scores the page classifier itself — which found, on
   its first run, that a rules-only page was claiming 0.85 confidence in a document type
   nothing had determined.
-- **The LLM tool service.** `vs-mcp` serves twelve tools over the Model Context Protocol,
+- **The LLM tool service.** `ds-mcp` serves twelve tools over the Model Context Protocol,
   on stdio and over stateless HTTP, with protocol-version negotiation and the
   specification's own distinction between a protocol error and a tool failure the model can
   act on. It holds no credentials: the caller's token is forwarded and there is no
   service-account fallback, so a model can reach exactly what the person driving it can
   (D16). Nothing irreversible is advertised — no erasure, no token revocation, no routing
   administration — and a test keeps those names absent. Its live tests drive the real
-  `vs_api::router` with real signed tokens, two people in one organization, and prove the
+  `ds_api::router` with real signed tokens, two people in one organization, and prove the
   refusal, the grant and the revocation through the tools.
 - **Deployment.** One service image; a Firecracker host agent with per-VM egress
   allow-lists, snapshots and an autoscaler; a GPU tier with a replica set reserved for
@@ -113,7 +113,7 @@ repository:
   OpenAI-compatible server on a real socket answering adaptively so that grounding and
   verification are exercised rather than skipped. **No VLM has ever parsed a page here**,
   so extraction quality is entirely unmeasured.
-- **The corpus is synthetic.** `vs-adapt dataset` writes clean, born-digital, single-font
+- **The corpus is synthetic.** `ds-adapt dataset` writes clean, born-digital, single-font
   PDFs labelled from the geometry that drew them. That makes the *machinery* provable and
   calibrates nothing: no skew, no scanner noise, no handwriting, no photographs, no
   entities to extract. Content-aware routing (goal G2) is still an untested claim.
@@ -130,10 +130,10 @@ repository:
   component that owns them.
 
 Deliberately not built, each recorded with its reasoning where it belongs: dewarping
-(`vs-ingest` — a page-curl warp needs the page boundary, not ink statistics), Stage 2 in
-the adaptation search (`vs-extract` — it needs a second objective, not a second search
+(`ds-ingest` — a page-curl warp needs the page boundary, not ink statistics), Stage 2 in
+the adaptation search (`ds-extract` — it needs a second objective, not a second search
 space), a sparse-embedding GPU pool (`deploy/gpu` — the lexical half is computed in
-process and needs none), and per-tenant IDF statistics (`vs-vectors` — per-tenant
+process and needs none), and per-tenant IDF statistics (`ds-vectors` — per-tenant
 collections contradict the payload-partitioned layout, so the trade is offered as
 `[qdrant].idf` instead).
 
@@ -152,7 +152,7 @@ cannot (Garage needs provisioning, Keycloak needs a realm imported). It takes po
 environment, so the same script brings them up locally:
 
 ```sh
-PREFIX=vs-ci QDRANT_GRPC=56334 S3_PORT=53900 KEYCLOAK_PORT=58081 .github/scripts/services.sh
+PREFIX=ds-ci QDRANT_GRPC=56334 S3_PORT=53900 KEYCLOAK_PORT=58081 .github/scripts/services.sh
 ```
 
 ## Development environment
@@ -168,21 +168,21 @@ the client side need, `devenv-stack.nix` for the service itself.
 
 | Default shell | Provides |
 |---|---|
-| `devenv.nix` | Rust stable toolchain (newest; `rust-version` follows it), cargo-nextest, `VS_CONFIG=config/worker.dev.toml` |
-| `crates/vs-ingest/devenv.nix` | pdfium (`PDFIUM_DYNAMIC_LIB_PATH`) |
-| `crates/vs-vault/devenv.nix` | sqlx-cli, `DATABASE_URL`, `vs-migrate` |
-| `crates/vs-infra/devenv.nix` | the `AWS_*` values the blob store reads |
-| `crates/vs-vectors/devenv.nix` | `VS__QDRANT__URL` |
-| `crates/vs-worker/devenv.nix` | `vs-worker-release` |
+| `devenv.nix` | Rust stable toolchain (newest; `rust-version` follows it), cargo-nextest, `DS_CONFIG=config/worker.dev.toml` |
+| `crates/ds-ingest/devenv.nix` | pdfium (`PDFIUM_DYNAMIC_LIB_PATH`) |
+| `crates/ds-vault/devenv.nix` | sqlx-cli, `DATABASE_URL`, `ds-migrate` |
+| `crates/ds-infra/devenv.nix` | the `AWS_*` values the blob store reads |
+| `crates/ds-vectors/devenv.nix` | `DS__QDRANT__URL` |
+| `crates/ds-worker/devenv.nix` | `ds-worker-release` |
 
 | `stack` profile | Service |
 |---|---|
 | `devenv-stack.nix` | collects the five below; nothing else is in the profile |
-| `crates/vs-vault/devenv-stack.nix` | PostgreSQL 17 (:5432, db/user/pass `visual_suite`/`vs`/`vs`), and the `vs`/`vs_app` roles |
-| `crates/vs-infra/devenv-stack.nix` | Garage S3 (:3900, bucket `visual-suite`, fixed dev key) |
-| `crates/vs-vectors/devenv-stack.nix` | Qdrant (gRPC :6334, REST :6333) |
-| `crates/vs-models/devenv-stack.nix` | LiteLLM; `vs-litellm-up` / `vs-litellm-check` (scripts, not processes) |
-| `deploy/keycloak/devenv.nix` | Keycloak (:8081) with the `koki` realm imported, and `vs-token` |
+| `crates/ds-vault/devenv-stack.nix` | PostgreSQL 17 (:5432, db/user/pass `document_suite`/`ds`/`ds`), and the `ds`/`ds_app` roles |
+| `crates/ds-infra/devenv-stack.nix` | Garage S3 (:3900, bucket `document-suite`, fixed dev key) |
+| `crates/ds-vectors/devenv-stack.nix` | Qdrant (gRPC :6334, REST :6333) |
+| `crates/ds-models/devenv-stack.nix` | LiteLLM; `ds-litellm-up` / `ds-litellm-check` (scripts, not processes) |
+| `deploy/keycloak/devenv.nix` | Keycloak (:8081) with the `koki` realm imported, and `ds-token` |
 
 `deploy/firecracker/devenv.nix` is its own profile (firecracker, e2fsprogs; needs
 `/dev/kvm`): `devenv --profile firecracker shell`.
@@ -190,8 +190,8 @@ the client side need, `devenv-stack.nix` for the service itself.
 ```sh
 devenv shell                     # build and unit-test the workspace; starts nothing
 devenv --profile stack up -d     # postgres, garage, qdrant, keycloak
-devenv --profile stack shell     # the same, plus vs-token and the model-tier scripts
-vs-migrate                       # apply vs-vault migrations as the schema owner
+devenv --profile stack shell     # the same, plus ds-token and the model-tier scripts
+ds-migrate                       # apply ds-vault migrations as the schema owner
 devenv --profile stack down
 ```
 
@@ -199,43 +199,43 @@ devenv --profile stack down
 
 The whole pipeline runs: upload → ingest (render, text layer, signals) → Stage 1 per page
 (classify, route, execute the DAG) → Stage 2 per document (stitch, extract, graph, store).
-Stage 1 and Stage 2 call models, so they need reachable endpoints. `vs-litellm-up` with
+Stage 1 and Stage 2 call models, so they need reachable endpoints. `ds-litellm-up` with
 `config/models.litellm.toml` is the easiest way to get them on one machine.
 
 ```sh
 devenv --profile stack up -d && devenv --profile stack shell
-cargo build -p vs-suite
-cargo run -p vs-ingest --example sample_pdf -- sample.pdf
+cargo build -p ds-suite
+cargo run -p ds-ingest --example sample_pdf -- sample.pdf
 # One service: the API and the pipeline in one process. It needs model endpoints from
 # config/models.*.toml at startup — every copy runs every stage — so bring up the model
-# tier first (vs-litellm-up) or point [models] at one that exists.
-VS_API_ADDR=127.0.0.1:8080 ./target/debug/vs-suite &
+# tier first (ds-litellm-up) or point [models] at one that exists.
+DS_API_ADDR=127.0.0.1:8080 ./target/debug/ds-suite &
 curl -X PUT --upload-file sample.pdf --aws-sigv4 "aws:amz:$AWS_REGION:s3" \
-  --user "$AWS_ACCESS_KEY_ID:$AWS_SECRET_ACCESS_KEY" "$AWS_ENDPOINT/visual-suite/inbox/t1/sample.pdf"
+  --user "$AWS_ACCESS_KEY_ID:$AWS_SECRET_ACCESS_KEY" "$AWS_ENDPOINT/document-suite/inbox/t1/sample.pdf"
 # Every request carries a Keycloak access token; the tenant is its organization claim.
-# `vs-token` asks the dev realm for one (organization t1, holding the admin role).
-TOKEN=$(vs-token)
+# `ds-token` asks the dev realm for one (organization t1, holding the admin role).
+TOKEN=$(ds-token)
 curl -X POST 127.0.0.1:8080/v1/documents -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' \
   -d '{"language":"en","source_uri":"inbox/t1/sample.pdf"}'
 # `doc_type` is optional and trusted over anything inferred:
 #   -d '{"language":"en","source_uri":"...","doc_type":"invoice"}'
 curl 127.0.0.1:8080/v1/jobs/<job_id> -H "authorization: Bearer $TOKEN"
 
-# A document is private to whoever uploaded it. `vs-token t1 other-person` is a second
+# A document is private to whoever uploaded it. `ds-token t1 other-person` is a second
 # member of the same organization, who cannot read it until it is shared:
-curl 127.0.0.1:8080/v1/documents/<document_hk> -H "authorization: Bearer $(vs-token)"          # 404 or the summary
+curl 127.0.0.1:8080/v1/documents/<document_hk> -H "authorization: Bearer $(ds-token)"          # 404 or the summary
 curl -X PUT 127.0.0.1:8080/v1/documents/<document_hk>/access -H "authorization: Bearer $TOKEN" \
   -H 'content-type: application/json' -d '{"visibility":"organization"}'
 # And what this caller can read at all:
 curl 127.0.0.1:8080/v1/documents -H "authorization: Bearer $TOKEN"
 ```
 
-`vs-suite` refuses to start without a reachable realm, which is why Keycloak is part of
+`ds-suite` refuses to start without a reachable realm, which is why Keycloak is part of
 the `stack` profile rather than an extra: the profile imports
 [`deploy/keycloak/realm-dev.json`](deploy/keycloak/README.md) on every start, so
-`vs-token` works immediately and `vs-token t2` gives a second organization to check
+`ds-token` works immediately and `ds-token t2` gives a second organization to check
 isolation with. What each request is verified against is in
-[`crates/vs-api/SPEC.md`](crates/vs-api/SPEC.md).
+[`crates/ds-api/SPEC.md`](crates/ds-api/SPEC.md).
 
 ### Tests
 
@@ -248,16 +248,16 @@ devenv --profile stack up -d
 cargo test --workspace -- --include-ignored
 ```
 
-`vs-mcp`'s live tests sign tokens with the same fixtures and serve the whole realm —
+`ds-mcp`'s live tests sign tokens with the same fixtures and serve the whole realm —
 discovery document and JWKS — on a socket, so `Auth::discover` runs the way a deployment
 runs it rather than being bypassed.
 
 The authentication tests sign their own tokens with the keypairs in
-`crates/vs-api/fixtures/`. Those two private keys are committed deliberately — they are
+`crates/ds-api/fixtures/`. Those two private keys are committed deliberately — they are
 throwaway test material, trusted by nothing and read by nothing outside the test module,
 and committing them is what lets the tests verify real signatures instead of mocking the
 verifier out. A secret scanner may still flag them (GitHub push protection among them);
-`crates/vs-api/fixtures/README.md` says what they are and how to regenerate them.
+`crates/ds-api/fixtures/README.md` says what they are and how to regenerate them.
 
 **If devenv's ports are taken**, every service is also addressable by environment
 variable, so the suite can be pointed at containers of your own on any ports. This is
@@ -265,15 +265,15 @@ worth knowing on a machine running more than one project — devenv wants 5432, 
 6333, and moves or fails if something else holds them:
 
 ```sh
-export DATABASE_URL=postgres://vs:vs@127.0.0.1:55432/visual_suite
-export VS__POSTGRES__PASSWORD=vs_app          # the vs_app role must exist (see devenv.nix)
-export VS__QDRANT__URL=http://127.0.0.1:56334 # gRPC, not the 6333 REST port
+export DATABASE_URL=postgres://ds:ds@127.0.0.1:55432/document_suite
+export DS__POSTGRES__PASSWORD=ds_app          # the ds_app role must exist (see devenv.nix)
+export DS__QDRANT__URL=http://127.0.0.1:56334 # gRPC, not the 6333 REST port
 export AWS_ENDPOINT=http://127.0.0.1:53900 AWS_REGION=garage AWS_ALLOW_HTTP=true
 export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=...
 cargo test --workspace -- --include-ignored
 ```
 
-A Unix-socket `DATABASE_URL` works too (`postgres:///visual_suite?host=/run/user/1000/…`),
+A Unix-socket `DATABASE_URL` works too (`postgres:///document_suite?host=/run/user/1000/…`),
 which is what devenv falls back to when 5432 is taken.
 
 Running these for the first time found three defects that no unit test could have caught,
@@ -296,13 +296,13 @@ a run exists.
 The adaptation chain needs documents and labels, and generates both when you have none:
 
 ```sh
-vs-adapt dataset --out corpus/                    # four page shapes, labelled exactly
-vs-adapt generate --search-space config/search-space.example.json --out candidates.json
-vs-adapt run   --manifest corpus/manifest.jsonl --candidates candidates.json --out runs/ --models models.toml
-vs-adapt score --runs runs/runs.jsonl --out evals.jsonl
-vs-adapt select --evals evals.jsonl --candidates candidates.json --version $(date +%F) \
+ds-adapt dataset --out corpus/                    # four page shapes, labelled exactly
+ds-adapt generate --search-space config/search-space.example.json --out candidates.json
+ds-adapt run   --manifest corpus/manifest.jsonl --candidates candidates.json --out runs/ --models models.toml
+ds-adapt score --runs runs/runs.jsonl --out evals.jsonl
+ds-adapt select --evals evals.jsonl --candidates candidates.json --version $(date +%F) \
                 --out dag-list.json --report report.md
-vs-adapt classify-score --manifest corpus/manifest.jsonl --out classify/ --report classifier.md
+ds-adapt classify-score --manifest corpus/manifest.jsonl --out classify/ --report classifier.md
 ```
 
 That corpus is synthetic and says so everywhere it appears: it proves the chain runs and
@@ -320,5 +320,5 @@ The Firecracker guest ships a normal glibc build with its shared libraries (pdfi
 be loaded from a static musl binary):
 
 ```sh
-cargo build --release -p vs-suite
+cargo build --release -p ds-suite
 ```

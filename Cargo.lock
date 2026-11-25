@@ -733,6 +733,385 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1aaf95b3e5c8f23aa320147307562d361db0ae0d51242340f558153b4eb2439b"
 
 [[package]]
+name = "ds-adapt"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "clap",
+ "ds-classify",
+ "ds-core",
+ "ds-dag",
+ "ds-infra",
+ "ds-ingest",
+ "ds-models",
+ "ds-router",
+ "ds-steps",
+ "futures",
+ "hex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "ds-api"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "base64 0.23.1",
+ "bytes",
+ "chrono",
+ "ds-core",
+ "ds-dag",
+ "ds-infra",
+ "ds-models",
+ "ds-router",
+ "ds-steps",
+ "ds-vault",
+ "futures",
+ "hex",
+ "jsonwebtoken",
+ "metrics",
+ "metrics-exporter-prometheus",
+ "object_store",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sqlx",
+ "tokio",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "ds-classify"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "ds-core",
+ "ds-dag",
+ "serde",
+ "thiserror",
+]
+
+[[package]]
+name = "ds-core"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+ "uuid",
+]
+
+[[package]]
+name = "ds-dag"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "ds-core",
+ "futures",
+ "hex",
+ "metrics",
+ "metrics-exporter-prometheus",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "ds-extract"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "ds-core",
+ "ds-models",
+ "ds-stitch",
+ "futures",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "ds-graph"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "ds-core",
+ "ds-extract",
+ "ds-stitch",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "uuid",
+]
+
+[[package]]
+name = "ds-infra"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bytes",
+ "chrono",
+ "ds-core",
+ "futures",
+ "metrics",
+ "metrics-exporter-prometheus",
+ "object_store",
+ "opentelemetry",
+ "opentelemetry-otlp",
+ "opentelemetry_sdk",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-opentelemetry",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "ds-ingest"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "ds-classify",
+ "ds-core",
+ "ds-dag",
+ "image",
+ "imageproc",
+ "libc",
+ "pdfium-render",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tiff",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "ds-mcp"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "bytes",
+ "chrono",
+ "clap",
+ "ds-api",
+ "ds-core",
+ "ds-infra",
+ "ds-vault",
+ "jsonwebtoken",
+ "metrics",
+ "metrics-exporter-prometheus",
+ "object_store",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "ds-models"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64 0.23.1",
+ "ds-classify",
+ "ds-core",
+ "ds-dag",
+ "futures",
+ "hex",
+ "image",
+ "metrics",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+ "tokio",
+ "toml",
+ "tracing",
+]
+
+[[package]]
+name = "ds-router"
+version = "0.1.0"
+dependencies = [
+ "ds-core",
+ "ds-dag",
+ "metrics",
+ "metrics-exporter-prometheus",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "ds-steps"
+version = "0.1.0"
+dependencies = [
+ "ds-dag",
+ "ds-ingest",
+ "ds-models",
+ "ds-router",
+ "serde_json",
+]
+
+[[package]]
+name = "ds-stitch"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "ds-core",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
+name = "ds-suite"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "chrono",
+ "clap",
+ "ds-api",
+ "ds-core",
+ "ds-infra",
+ "ds-ingest",
+ "ds-models",
+ "ds-steps",
+ "ds-vault",
+ "ds-worker",
+ "futures",
+ "metrics",
+ "metrics-exporter-prometheus",
+ "object_store",
+ "reqwest",
+ "serde_json",
+ "sqlx",
+ "tiff",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "ds-vault"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "ds-core",
+ "ds-extract",
+ "ds-graph",
+ "ds-models",
+ "ds-router",
+ "ds-stitch",
+ "ds-vectors",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "ds-vectors"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "ds-core",
+ "ds-graph",
+ "metrics",
+ "qdrant-client",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "ds-worker"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bytes",
+ "chrono",
+ "ds-classify",
+ "ds-core",
+ "ds-dag",
+ "ds-extract",
+ "ds-graph",
+ "ds-infra",
+ "ds-ingest",
+ "ds-models",
+ "ds-router",
+ "ds-steps",
+ "ds-stitch",
+ "ds-vault",
+ "ds-vectors",
+ "futures",
+ "hex",
+ "image",
+ "metrics",
+ "object_store",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sqlx",
+ "tokio",
+ "toml",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "dunce"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4022,385 +4401,6 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
-
-[[package]]
-name = "vs-adapt"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "clap",
- "futures",
- "hex",
- "reqwest",
- "serde",
- "serde_json",
- "sha2",
- "thiserror",
- "tokio",
- "toml",
- "tracing",
- "tracing-subscriber",
- "vs-classify",
- "vs-core",
- "vs-dag",
- "vs-infra",
- "vs-ingest",
- "vs-models",
- "vs-router",
- "vs-steps",
-]
-
-[[package]]
-name = "vs-api"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "axum",
- "base64 0.23.1",
- "bytes",
- "chrono",
- "futures",
- "hex",
- "jsonwebtoken",
- "metrics",
- "metrics-exporter-prometheus",
- "object_store",
- "reqwest",
- "serde",
- "serde_json",
- "sha2",
- "sqlx",
- "tokio",
- "tower",
- "tracing",
- "tracing-subscriber",
- "uuid",
- "vs-core",
- "vs-dag",
- "vs-infra",
- "vs-models",
- "vs-router",
- "vs-steps",
- "vs-vault",
-]
-
-[[package]]
-name = "vs-classify"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "serde",
- "thiserror",
- "vs-core",
- "vs-dag",
-]
-
-[[package]]
-name = "vs-core"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "hex",
- "serde",
- "serde_json",
- "sha2",
- "thiserror",
- "uuid",
-]
-
-[[package]]
-name = "vs-dag"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "chrono",
- "futures",
- "hex",
- "metrics",
- "metrics-exporter-prometheus",
- "serde",
- "serde_json",
- "sha2",
- "thiserror",
- "tokio",
- "tracing",
- "vs-core",
-]
-
-[[package]]
-name = "vs-extract"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "chrono",
- "futures",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
- "tracing",
- "vs-core",
- "vs-models",
- "vs-stitch",
-]
-
-[[package]]
-name = "vs-graph"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "chrono",
- "serde",
- "serde_json",
- "thiserror",
- "uuid",
- "vs-core",
- "vs-extract",
- "vs-stitch",
-]
-
-[[package]]
-name = "vs-infra"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "bytes",
- "chrono",
- "futures",
- "metrics",
- "metrics-exporter-prometheus",
- "object_store",
- "opentelemetry",
- "opentelemetry-otlp",
- "opentelemetry_sdk",
- "reqwest",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
- "toml",
- "tracing",
- "tracing-opentelemetry",
- "tracing-subscriber",
- "uuid",
- "vs-core",
-]
-
-[[package]]
-name = "vs-ingest"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "image",
- "imageproc",
- "libc",
- "pdfium-render",
- "serde",
- "serde_json",
- "thiserror",
- "tiff",
- "tokio",
- "tracing",
- "vs-classify",
- "vs-core",
- "vs-dag",
-]
-
-[[package]]
-name = "vs-mcp"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "axum",
- "bytes",
- "chrono",
- "clap",
- "jsonwebtoken",
- "metrics",
- "metrics-exporter-prometheus",
- "object_store",
- "reqwest",
- "serde",
- "serde_json",
- "sqlx",
- "thiserror",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "uuid",
- "vs-api",
- "vs-core",
- "vs-infra",
- "vs-vault",
-]
-
-[[package]]
-name = "vs-models"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "base64 0.23.1",
- "futures",
- "hex",
- "image",
- "metrics",
- "reqwest",
- "serde",
- "serde_json",
- "sha2",
- "thiserror",
- "tokio",
- "toml",
- "tracing",
- "vs-classify",
- "vs-core",
- "vs-dag",
-]
-
-[[package]]
-name = "vs-router"
-version = "0.1.0"
-dependencies = [
- "metrics",
- "metrics-exporter-prometheus",
- "serde",
- "serde_json",
- "thiserror",
- "vs-core",
- "vs-dag",
-]
-
-[[package]]
-name = "vs-steps"
-version = "0.1.0"
-dependencies = [
- "serde_json",
- "vs-dag",
- "vs-ingest",
- "vs-models",
- "vs-router",
-]
-
-[[package]]
-name = "vs-stitch"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "serde",
- "serde_json",
- "thiserror",
- "tracing",
- "vs-core",
-]
-
-[[package]]
-name = "vs-suite"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "axum",
- "chrono",
- "clap",
- "futures",
- "metrics",
- "metrics-exporter-prometheus",
- "object_store",
- "reqwest",
- "serde_json",
- "sqlx",
- "tiff",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "uuid",
- "vs-api",
- "vs-core",
- "vs-infra",
- "vs-ingest",
- "vs-models",
- "vs-steps",
- "vs-vault",
- "vs-worker",
-]
-
-[[package]]
-name = "vs-vault"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "chrono",
- "serde",
- "serde_json",
- "sqlx",
- "thiserror",
- "tokio",
- "tracing",
- "uuid",
- "vs-core",
- "vs-extract",
- "vs-graph",
- "vs-models",
- "vs-router",
- "vs-stitch",
- "vs-vectors",
-]
-
-[[package]]
-name = "vs-vectors"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "metrics",
- "qdrant-client",
- "serde_json",
- "thiserror",
- "tokio",
- "tracing",
- "uuid",
- "vs-core",
- "vs-graph",
-]
-
-[[package]]
-name = "vs-worker"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "bytes",
- "chrono",
- "futures",
- "hex",
- "image",
- "metrics",
- "object_store",
- "serde",
- "serde_json",
- "sha2",
- "sqlx",
- "tokio",
- "toml",
- "tracing",
- "uuid",
- "vs-classify",
- "vs-core",
- "vs-dag",
- "vs-extract",
- "vs-graph",
- "vs-infra",
- "vs-ingest",
- "vs-models",
- "vs-router",
- "vs-steps",
- "vs-stitch",
- "vs-vault",
- "vs-vectors",
-]
 
 [[package]]
 name = "walkdir"

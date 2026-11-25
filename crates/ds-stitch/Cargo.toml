@@ -1,0 +1,18 @@
+[package]
+name = "ds-stitch"
+description = "Page results to one coherent document"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+ds-core.workspace = true
+chrono.workspace = true
+serde.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

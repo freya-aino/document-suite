@@ -1,19 +1,19 @@
 # Local development config: points at the devenv services
-# (`devenv --profile stack up`). Secrets (VS__POSTGRES__PASSWORD, AWS_*) come from the
+# (`devenv --profile stack up`). Secrets (DS__POSTGRES__PASSWORD, AWS_*) come from the
 # devenv environment. Every key and its default: deploy/README.md § Configuration.
 
 [blob]
-bucket = "visual-suite"
+bucket = "document-suite"
 endpoint = "http://127.0.0.1:3900"
 region = "garage"
 
 [postgres]
-url = "postgres://vs_app@127.0.0.1:5432/visual_suite"   # password: VS__POSTGRES__PASSWORD
+url = "postgres://ds_app@127.0.0.1:5432/document_suite"   # password: DS__POSTGRES__PASSWORD
 max_connections = 4
 
 [qdrant]
 url = "http://127.0.0.1:6334"
-collection_prefix = "vs_dev"
+collection_prefix = "ds_dev"
 
 [models]
 registry = "config/models.example.toml"
@@ -41,7 +41,7 @@ interactive_max_pending = 1000     # 429 for interactive requests above this man
 # scratch_dir = "/scratch"         # upload spool while hashing; default: system temp dir
 # Local development reads what it uploads from a second token more often than it tests
 # isolation, so this is `organization` here and `private` in the example: a document
-# uploaded by `vs-token` is readable by `vs-token other-person` without sharing it first.
+# uploaded by `ds-token` is readable by `ds-token other-person` without sharing it first.
 # Set it to `private` to exercise the scoping the API ships with.
 default_visibility = "organization"
 # Off locally: a tight loop of curl against one organization is a development habit, not
@@ -49,14 +49,14 @@ default_visibility = "organization"
 tenant_rate_per_s = 0
 
 [auth]
-# vs-api refuses to start without this. `devenv --profile stack up` starts a Keycloak
+# ds-api refuses to start without this. `devenv --profile stack up` starts a Keycloak
 # here and imports the realm these values describe (deploy/keycloak/README.md);
-# `vs-token` fetches a token from it.
+# `ds-token` fetches a token from it.
 issuer = "http://127.0.0.1:8081/realms/koki"
-audience = ["vs-api"]
-client_id = "vs-api"
+audience = ["ds-api"]
+client_id = "ds-api"
 org_claim = "organization"
-admin_role = "vs-admin"
+admin_role = "ds-admin"
 
 [classify]
 born_digital_min_chars = 50
@@ -81,5 +81,5 @@ dag_list_refresh_s = 60                # how long a worker trusts its cached act
 [telemetry]
 # otlp_endpoint: none locally
 # metrics_addr: unset, so nothing binds a port. The recorder is still installed, so
-# `vs-api` serves the same series on its own /metrics.
+# `ds-api` serves the same series on its own /metrics.
 json_logs = false

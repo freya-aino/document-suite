@@ -2,7 +2,7 @@
 # **build and unit-test** itself. No services — `devenv up` here starts nothing.
 #
 # That is the point. Another project embedding this suite wants its binaries, not its
-# Postgres, so the default shell provisions nothing and every endpoint is a `VS__*`
+# Postgres, so the default shell provisions nothing and every endpoint is a `DS__*`
 # override away (`deploy/README.md`). The services are a profile:
 #
 #   devenv --profile stack up          # Postgres, Garage, Qdrant, Keycloak
@@ -24,9 +24,9 @@
   packages = [ pkgs.cargo-nextest ];
 
   env = {
-    # Read by vs-suite (`--config`); its endpoints point at the stack profile.
-    VS_CONFIG = "${config.devenv.root}/config/worker.dev.toml";
-    RUST_LOG = "info,vs_=debug";
+    # Read by ds-suite (`--config`); its endpoints point at the stack profile.
+    DS_CONFIG = "${config.devenv.root}/config/worker.dev.toml";
+    RUST_LOG = "info,ds_=debug";
   };
 
   profiles.stack.module = ./devenv-stack.nix;

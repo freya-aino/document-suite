@@ -1,4 +1,4 @@
-# Model registry for local development through a LiteLLM proxy (`vs-litellm-up`).
+# Model registry for local development through a LiteLLM proxy (`ds-litellm-up`).
 #
 # Point the suite at this with `--models config/models.litellm.toml`. Every entry targets
 # one endpoint — the proxy on :4000 — and the proxy fans out to whatever is actually

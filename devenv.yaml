@@ -16,8 +16,8 @@ inputs:
 # devenv-stack.nix beside the same code and collected by the `stack` profile
 # (`devenv --profile stack up`); see devenv.nix.
 imports:
-  - ./crates/vs-infra
-  - ./crates/vs-vault
-  - ./crates/vs-ingest
-  - ./crates/vs-vectors
-  - ./crates/vs-suite
+  - ./crates/ds-infra
+  - ./crates/ds-vault
+  - ./crates/ds-ingest
+  - ./crates/ds-vectors
+  - ./crates/ds-suite

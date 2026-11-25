@@ -1,0 +1,19 @@
+[package]
+name = "ds-router"
+description = "DAG list bundle and per-page DAG selection"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+ds-core.workspace = true
+ds-dag.workspace = true
+metrics.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+metrics-exporter-prometheus.workspace = true

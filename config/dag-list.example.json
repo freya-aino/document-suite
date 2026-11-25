@@ -1,6 +1,6 @@
 {
   "version": "example-2026-11-06",
-  "created_by": "hand-written example (real lists come from vs-adapt select)",
+  "created_by": "hand-written example (real lists come from ds-adapt select)",
   "dags": [
     {
       "id": "vlm-e2e-robust",

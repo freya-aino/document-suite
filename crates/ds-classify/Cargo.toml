@@ -1,0 +1,15 @@
+[package]
+name = "ds-classify"
+description = "Page classification into PageProfile"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+ds-core.workspace = true
+ds-dag.workspace = true
+async-trait.workspace = true
+serde.workspace = true
+thiserror.workspace = true

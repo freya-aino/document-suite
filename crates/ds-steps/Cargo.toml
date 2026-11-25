@@ -1,0 +1,17 @@
+[package]
+name = "ds-steps"
+description = "The production StepRegistry: every DAG step a worker knows (CPU steps from ds-ingest, model steps from ds-models)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+ds-dag.workspace = true
+ds-ingest.workspace = true
+ds-models.workspace = true
+
+[dev-dependencies]
+ds-router.workspace = true
+serde_json.workspace = true
