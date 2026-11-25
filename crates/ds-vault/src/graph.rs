@@ -481,11 +481,21 @@ pub(crate) async fn write_graph_layer(
 /// which sees one page at a time and therefore writes NULL there — so it ordered every
 /// block by NULL and nothing noticed, because nothing called it. Migration 0011 has the
 /// whole story.
-pub const READING_ORDER_QUERY: &str = "SELECT p.block_hk \
-     FROM (SELECT DISTINCT ON (block_hk) block_hk, global_order, furniture \
-           FROM vault.sat_block_placement ORDER BY block_hk, load_dts DESC) p \
-     JOIN vault.hub_block b ON b.block_hk = p.block_hk \
-     JOIN vault.hub_page g ON g.page_hk = b.page_hk \
+///
+/// The placement is looked up **per block**, through a lateral join, rather than by
+/// ranking the satellite first. Written the obvious way — a `DISTINCT ON (block_hk)`
+/// subquery joined to the blocks — the subquery has no predicate to narrow it, so
+/// Postgres ranked every placement row in the database before the joins reduced it to one
+/// document: on 200k blocks that was a sequential scan and a 19 MB external merge sort
+/// for every document read, and it grew with the corpus rather than with the document.
+/// This form walks the document's own pages and blocks and takes one indexed lookup per
+/// block (migration 0012). Same rows, same order: the latest placement of each block,
+/// body blocks only.
+pub const READING_ORDER_QUERY: &str = "SELECT b.block_hk \
+     FROM vault.hub_page g \
+     JOIN vault.hub_block b ON b.page_hk = g.page_hk \
+     CROSS JOIN LATERAL (SELECT global_order, furniture FROM vault.sat_block_placement s \
+                         WHERE s.block_hk = b.block_hk ORDER BY s.load_dts DESC LIMIT 1) p \
      WHERE g.document_hk = $1 AND b.run_id = $2 AND NOT p.furniture \
      ORDER BY p.global_order";
 

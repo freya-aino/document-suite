@@ -80,14 +80,22 @@ FROM vault.sat_run WHERE run_hk = $1 ORDER BY run_hk, load_dts DESC;
 ```sql
 -- Body blocks of a run, in document reading order (the constant is
 -- `ds_vault::READING_ORDER_QUERY`).
-SELECT p.block_hk
-FROM (SELECT DISTINCT ON (block_hk) block_hk, global_order, furniture
-      FROM vault.sat_block_placement ORDER BY block_hk, load_dts DESC) p
-JOIN vault.hub_block b ON b.block_hk = p.block_hk
-JOIN vault.hub_page g ON g.page_hk = b.page_hk
+SELECT b.block_hk
+FROM vault.hub_page g
+JOIN vault.hub_block b ON b.page_hk = g.page_hk
+CROSS JOIN LATERAL (SELECT global_order, furniture FROM vault.sat_block_placement s
+                    WHERE s.block_hk = b.block_hk ORDER BY s.load_dts DESC LIMIT 1) p
 WHERE g.document_hk = $1 AND b.run_id = $2 AND NOT p.furniture
 ORDER BY p.global_order;
 ```
+
+The lateral join is load-bearing, and the obvious form is a trap: written as a
+`DISTINCT ON (block_hk)` subquery joined to the blocks, the subquery has no predicate to
+narrow it, so Postgres ranks **every placement row in the database** before the joins
+reduce it to one document — a sequential scan and an external merge sort that grow with
+the corpus instead of with the document. Take the latest placement per block, as above.
+Every satellite read in this document has the same hazard; the `DISTINCT ON` form below is
+safe only because `WHERE block_hk = ANY($1)` narrows it first.
 
 `vault.sat_block_placement` is the **document-level** view of a block, written by Stage 2:
 its order after multi-column repair, whether it is furniture (a running header, a footer, a
@@ -115,6 +123,16 @@ ORDER BY block_hk, load_dts DESC;
 `vault.sat_mention` and `vault.sat_evidence` are *multi-active* satellites: several rows
 share a `load_dts` and differ by `sub_seq`, so take the newest `load_dts` and then all of
 its rows.
+
+### Indexes
+
+Migration 0012 indexes what these patterns traverse: both parents of every link table,
+`hub_page (document_hk)`, `hub_block (page_hk)` and `(run_id)`, `hub_assertion (run_id)`,
+and `lnk_run_document (document_hk, load_dts DESC)` for `v_current_run`. A reader that
+adds a pattern of its own should check its plan rather than assume — before 0012 every
+one of the queries here was a sequential scan, and nothing noticed, because a test that
+processes one document cannot see it. `crates/ds-vault/tests/read_path.rs` is what holds
+the indexes and the shape of the query above in place.
 
 ### The retrieval patterns
 

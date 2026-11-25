@@ -81,7 +81,8 @@ Remaining:
 - [ ] Sizing is unmeasured. Row counts per page, index growth and the cost of
       `v_current_run` on a corpus of millions of blocks are all untested, because no
       corpus that size has gone through this. Partitioning `sat_block_content` by
-      `load_dts` is the obvious first move and would be guesswork today.
+      `load_dts` is the obvious first move and would be guesswork today. What *has* been
+      measured is the shape of the documented reads — see "Performance notes".
 - [ ] `ops.jobs` and `ops.job_state_log` grow without bound. The retention sweep scrubs
       the *owner* from old jobs (`api.job_retention_days`) and keeps the rows, because the
       organization's record of what it processed is not the person's to erase — but
@@ -316,6 +317,17 @@ seconds later. Run with `cargo test -p ds-vault -- --ignored`.
 
 ## Performance notes
 
+- **The read path is indexed as of migration 0012, and was not before it.** Every table
+  in 0002 carried an index on its own hash key and on nothing else, so each traversal away
+  from a key — a document's pages, a page's blocks, a block's mentions, an assertion's
+  arguments — was a sequential scan, and `READING_ORDER_QUERY` ranked every placement row
+  in the database before narrowing to one document. On a synthetic 500-document corpus
+  (10k pages, 200k blocks) that query took 163 ms and spilled a 19 MB sort to disk; with
+  the indexes and a lateral lookup per block it takes 6 ms and touches the document's own
+  rows. "Blocks of a page" went from 11.4 ms to 0.06 ms. The point is not the absolute
+  figures, which are a laptop's: it is that three of the four documented reads scaled with
+  the corpus rather than with the document, and a test that processes one document cannot
+  show that. `tests/read_path.rs` reads the plan instead, and is the regression guard.
 - High-volume satellites (`sat_block_content`, `sat_mention`) **should** be partitioned by
   `load_dts` month. This is not implemented — no migration declares a partition — so it is
   a sizing decision still to be made, not a property of the current schema.
