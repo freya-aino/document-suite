@@ -1,9 +1,9 @@
 # Keycloak for development. Part of the `stack` profile only.
 #
-# `vs-api` refuses to start without a reachable realm (`[auth]` in its config), so this is
+# `ds-api` refuses to start without a reachable realm (`[auth]` in its config), so this is
 # not an optional extra of the stack — it is the difference between the API starting and
 # not. The realm in `realm-dev.json` is imported on every start: a client with an audience
-# mapper, the organization claim, the `vs-admin` role, and a second client in another
+# mapper, the organization claim, the `ds-admin` role, and a second client in another
 # organization for checking isolation. See `README.md` next to this file.
 #
 # The official image rather than `pkgs.keycloak`, for the same reason as Qdrant: nixpkgs'
@@ -13,9 +13,9 @@
 { pkgs, config, ... }:
 
 let
-  port = 8081; # 8080 is vs-api's own default
+  port = 8081; # 8080 is ds-api's own default
   image = "quay.io/keycloak/keycloak:26.4";
-  name = "vs-dev-keycloak";
+  name = "ds-dev-keycloak";
   realm = "${config.devenv.root}/deploy/keycloak/realm-dev.json";
   issuer = "http://127.0.0.1:${toString port}/realms/koki";
 in
@@ -53,15 +53,15 @@ in
     failure_threshold = 45;
   };
 
-  env.VS_KEYCLOAK_ISSUER = issuer;
+  env.DS_KEYCLOAK_ISSUER = issuer;
 
-  scripts.vs-token = {
-    description = "Print a dev-realm access token: vs-token [t1|t2]";
+  scripts.ds-token = {
+    description = "Print a dev-realm access token: ds-token [t1|t2]";
     exec = ''
       case "''${1:-t1}" in
-        t1) client=vs-api;    secret=vs-api-dev-secret ;;
-        t2) client=vs-api-t2; secret=vs-api-t2-dev-secret ;;
-        *)  echo "usage: vs-token [t1|t2]   (t1 holds vs-admin, t2 holds no role)" >&2; exit 1 ;;
+        t1) client=ds-api;    secret=ds-api-dev-secret ;;
+        t2) client=ds-api-t2; secret=ds-api-t2-dev-secret ;;
+        *)  echo "usage: ds-token [t1|t2]   (t1 holds ds-admin, t2 holds no role)" >&2; exit 1 ;;
       esac
       ${pkgs.curl}/bin/curl -sS -X POST "${issuer}/protocol/openid-connect/token" \
         -d grant_type=client_credentials -d "client_id=$client" -d "client_secret=$secret" \

@@ -1,38 +1,38 @@
 {
   "realm": "koki",
-  "displayName": "KoKI \u2014 visual-suite development realm",
+  "displayName": "KoKI \u2014 document-suite development realm",
   "enabled": true,
   "sslRequired": "none",
   "accessTokenLifespan": 1800,
   "roles": {
     "realm": [
       {
-        "name": "vs-admin",
-        "description": "DAG-list administration and /metrics in vs-api (auth.admin_role)"
+        "name": "ds-admin",
+        "description": "DAG-list administration and /metrics in ds-api (auth.admin_role)"
       }
     ]
   },
   "clients": [
     {
-      "clientId": "vs-api",
-      "name": "visual-suite API",
+      "clientId": "ds-api",
+      "name": "document-suite API",
       "description": "Development client. The organization is a hardcoded claim, not a user attribute; see deploy/keycloak/README.md.",
       "enabled": true,
       "protocol": "openid-connect",
       "publicClient": false,
-      "secret": "vs-api-dev-secret",
+      "secret": "ds-api-dev-secret",
       "serviceAccountsEnabled": true,
       "standardFlowEnabled": true,
       "directAccessGrantsEnabled": true,
       "fullScopeAllowed": true,
       "protocolMappers": [
         {
-          "name": "audience: vs-api",
+          "name": "audience: ds-api",
           "protocol": "openid-connect",
           "protocolMapper": "oidc-audience-mapper",
           "consentRequired": false,
           "config": {
-            "included.client.audience": "vs-api",
+            "included.client.audience": "ds-api",
             "access.token.claim": "true",
             "id.token.claim": "false",
             "introspection.token.claim": "true"
@@ -84,25 +84,25 @@
       ]
     },
     {
-      "clientId": "vs-api-t2",
-      "name": "visual-suite API \u2014 second organization",
+      "clientId": "ds-api-t2",
+      "name": "document-suite API \u2014 second organization",
       "description": "A token for organization t2 with no admin role, for checking tenant isolation by hand.",
       "enabled": true,
       "protocol": "openid-connect",
       "publicClient": false,
-      "secret": "vs-api-t2-dev-secret",
+      "secret": "ds-api-t2-dev-secret",
       "serviceAccountsEnabled": true,
       "standardFlowEnabled": false,
       "directAccessGrantsEnabled": false,
       "fullScopeAllowed": true,
       "protocolMappers": [
         {
-          "name": "audience: vs-api",
+          "name": "audience: ds-api",
           "protocol": "openid-connect",
           "protocolMapper": "oidc-audience-mapper",
           "consentRequired": false,
           "config": {
-            "included.client.audience": "vs-api",
+            "included.client.audience": "ds-api",
             "access.token.claim": "true",
             "id.token.claim": "false",
             "introspection.token.claim": "true"
@@ -127,11 +127,11 @@
   ],
   "users": [
     {
-      "username": "service-account-vs-api",
+      "username": "service-account-ds-api",
       "enabled": true,
-      "serviceAccountClientId": "vs-api",
+      "serviceAccountClientId": "ds-api",
       "realmRoles": [
-        "vs-admin"
+        "ds-admin"
       ]
     },
     {
@@ -149,7 +149,7 @@
         }
       ],
       "realmRoles": [
-        "vs-admin"
+        "ds-admin"
       ]
     }
   ]

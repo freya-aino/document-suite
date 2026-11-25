@@ -1,7 +1,7 @@
 # The config file baked into the image, as the smallest one that is still valid.
 #
-# Two ways to replace it: mount your own over /etc/vs/worker.toml, or leave this and set
-# the rest from the environment (`VS__SECTION__KEY`). Both work — an almost-empty file
+# Two ways to replace it: mount your own over /etc/ds/worker.toml, or leave this and set
+# the rest from the environment (`DS__SECTION__KEY`). Both work — an almost-empty file
 # plus environment variables is a complete configuration. Every key, its default and the
 # override rules: deploy/README.md § Configuration.
 #
@@ -13,7 +13,7 @@
 [models]
 # Mount the model registry here. The `page` and `doc` roles refuse to start without it;
 # `api` and `ingest` run without ever reading it.
-registry = "/etc/vs/models.toml"
+registry = "/etc/ds/models.toml"
 
 [telemetry]
 # A container's stdout is collected by something, so structure it by default.

@@ -2,7 +2,7 @@
 
 The GPU tier is a set of **vLLM** servers, one per pool, each an OpenAI-compatible
 endpoint. Workers never know about pools: `config/models.toml` lists, per model id, the
-endpoints that serve it, and `vs-models` round-robins over them. Design: [SPEC.md](SPEC.md).
+endpoints that serve it, and `ds-models` round-robins over them. Design: [SPEC.md](SPEC.md).
 
 | Pool (service / Deployment) | `--served-model-name` = registry `id` | Registry `task`s | Weights (starting point) |
 |-----------------------------|----------------------------------------|------------------|--------------------------|
@@ -14,11 +14,11 @@ endpoints that serve it, and `vs-models` round-robins over them. Design: [SPEC.m
 | `embed`       | `embed-text`       | embed (`/v1/embeddings`)               | `Qwen/Qwen3-Embedding-0.6B` |
 | `doc-parse-interactive` | `paddleocr-vl-1.5` (the same id) | the same tasks, reserved for interactive uploads | the same weights as `doc-parse` |
 
-The weights are placeholders for the candidates `vs-adapt` evaluates; swap the Hugging
+The weights are placeholders for the candidates `ds-adapt` evaluates; swap the Hugging
 Face id and pin `--revision` / `MODEL_REVISION`. **The registry's `revision` must match
 what is served** (it is recorded in provenance). Changing the `embed` model changes the
-vector space: `vs-vectors` refuses the new dimension against the live collection and
-`vs-suite vectors migrate` creates the next one behind the same alias — the documents then
+vector space: `ds-vectors` refuses the new dimension against the live collection and
+`ds-suite vectors migrate` creates the next one behind the same alias — the documents then
 have to be re-run, because nothing converts a vector from one embedder's space to
 another's.
 
@@ -30,8 +30,8 @@ the registry sends only interactive uploads to it:
 ```toml
 [[model]]
 id = "paddleocr-vl-1.5"
-endpoints = ["http://doc-parse.vs-gpu.svc:8000/v1"]
-interactive_endpoints = ["http://doc-parse-interactive.vs-gpu.svc:8000/v1"]
+endpoints = ["http://doc-parse.ds-gpu.svc:8000/v1"]
+interactive_endpoints = ["http://doc-parse-interactive.ds-gpu.svc:8000/v1"]
 ```
 
 Why it is a second pool rather than a bigger first one: reserving page slots inside the
@@ -49,11 +49,11 @@ existed.
 
 ## Without this tier at all
 
-For development on one machine, `vs-litellm-up` runs a LiteLLM proxy on `:4000` that
+For development on one machine, `ds-litellm-up` runs a LiteLLM proxy on `:4000` that
 fronts whatever is serving the weights, and `config/models.litellm.toml` points every
 model id at it. The suite talks plain OpenAI to the proxy and never learns what is behind
 it, so none of the pools below have to exist — see
-[`crates/vs-models/SPEC.md`](../../crates/vs-models/SPEC.md) "Local development".
+[`crates/ds-models/SPEC.md`](../../crates/ds-models/SPEC.md) "Local development".
 
 Note that `hosted_vllm/` is LiteLLM's own routing prefix and belongs in its
 `litellm_params.model`, not in the suite's registry: the suite asks the proxy for the
@@ -67,7 +67,7 @@ Each `[[model]]` entry's `endpoints` are the base URLs of the pool that serves t
 |------------|-------------------------------------|
 | docker compose, worker on the same host | `http://localhost:800N/v1` (ports 8001–8006 in service order; ready-made: `models.compose.toml`) |
 | docker compose, worker elsewhere | `http://<gpu-host>:800N/v1`, or put the services behind a reverse proxy per pool |
-| Kubernetes | `http://<pool>.vs-gpu.svc:8000/v1` (the Service name is the pool name) |
+| Kubernetes | `http://<pool>.ds-gpu.svc:8000/v1` (the Service name is the pool name) |
 | `config/models.example.toml` | DNS names `doc-parse-a.gpu.internal` etc.: one A record per replica, or one name per pool in front of a load balancer |
 | one machine, no GPU tier at all | `http://127.0.0.1:4000/v1` for every model, via the LiteLLM harness — see below |
 
@@ -97,8 +97,8 @@ by pool.
 
 ```sh
 kubectl apply -k deploy/gpu/k8s
-kubectl -n vs-gpu create secret generic hf-token --from-literal=HF_TOKEN=hf_... --dry-run=client -o yaml | kubectl apply -f -
-kubectl -n vs-gpu get pods -l app.kubernetes.io/name=vllm
+kubectl -n ds-gpu create secret generic hf-token --from-literal=HF_TOKEN=hf_... --dry-run=client -o yaml | kubectl apply -f -
+kubectl -n ds-gpu get pods -l app.kubernetes.io/name=vllm
 ```
 
 Per pool: a `Deployment` (one container, `nvidia.com/gpu` limit, shared weight-cache

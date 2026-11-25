@@ -18,18 +18,18 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: doc-parse-interactive
-  namespace: vs-gpu
-  labels: { app.kubernetes.io/name: vllm, vs.pool: doc-parse-interactive }
+  namespace: ds-gpu
+  labels: { app.kubernetes.io/name: vllm, ds.pool: doc-parse-interactive }
 spec:
   replicas: 1
   strategy:
     type: RollingUpdate
     rollingUpdate: { maxSurge: 1, maxUnavailable: 0 }   # keep capacity while rolling
   selector:
-    matchLabels: { app.kubernetes.io/name: vllm, vs.pool: doc-parse-interactive }
+    matchLabels: { app.kubernetes.io/name: vllm, ds.pool: doc-parse-interactive }
   template:
     metadata:
-      labels: { app.kubernetes.io/name: vllm, vs.pool: doc-parse-interactive }
+      labels: { app.kubernetes.io/name: vllm, ds.pool: doc-parse-interactive }
       annotations:
         prometheus.io/scrape: "true"
         prometheus.io/port: "8000"
@@ -93,10 +93,10 @@ apiVersion: v1
 kind: Service
 metadata:
   name: doc-parse-interactive
-  namespace: vs-gpu
-  labels: { app.kubernetes.io/name: vllm, vs.pool: doc-parse-interactive }
+  namespace: ds-gpu
+  labels: { app.kubernetes.io/name: vllm, ds.pool: doc-parse-interactive }
 spec:
-  selector: { app.kubernetes.io/name: vllm, vs.pool: doc-parse-interactive }
+  selector: { app.kubernetes.io/name: vllm, ds.pool: doc-parse-interactive }
   ports:
     - { name: http, port: 8000, targetPort: http }
 ---
@@ -107,10 +107,10 @@ apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
   name: doc-parse-interactive
-  namespace: vs-gpu
+  namespace: ds-gpu
   annotations:
     metric-config.pods.vllm-num-requests-waiting.prometheus/query: |
-      sum(vllm:num_requests_waiting{namespace="vs-gpu", pod="{{.Pod}}"})
+      sum(vllm:num_requests_waiting{namespace="ds-gpu", pod="{{.Pod}}"})
 spec:
   scaleTargetRef: { apiVersion: apps/v1, kind: Deployment, name: doc-parse-interactive }
   minReplicas: 1

@@ -117,7 +117,7 @@ services:
               device_ids: ["1"]
               capabilities: [gpu]
 
-  # ── vlm-general: figure.describe, chart.to_table, vs-adapt judge ──
+  # ── vlm-general: figure.describe, chart.to_table, ds-adapt judge ──
   vlm-general:
     <<: *vllm
     command:
@@ -185,7 +185,7 @@ services:
               capabilities: [gpu]
 
   # ── embed: text embeddings (/v1/embeddings) for Stage 2, type normalisation, entity
-  #    resolution. Changing the model means a new Helix vector index (vs-helix/SPEC.md). ──
+  #    resolution. Changing the model means a new Helix vector index (ds-helix/SPEC.md). ──
   embed:
     <<: *vllm
     command:

@@ -1,15 +1,15 @@
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: vs-gpu
+  name: ds-gpu
 ---
-# Gated weights: `kubectl -n vs-gpu create secret generic hf-token --from-literal=HF_TOKEN=hf_...`
+# Gated weights: `kubectl -n ds-gpu create secret generic hf-token --from-literal=HF_TOKEN=hf_...`
 # (declared here as a reference only; do not commit a real token).
 apiVersion: v1
 kind: Secret
 metadata:
   name: hf-token
-  namespace: vs-gpu
+  namespace: ds-gpu
 type: Opaque
 stringData:
   HF_TOKEN: "replace-me"
@@ -19,7 +19,7 @@ apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: hf-cache
-  namespace: vs-gpu
+  namespace: ds-gpu
 spec:
   accessModes: ["ReadWriteMany"]
   resources:

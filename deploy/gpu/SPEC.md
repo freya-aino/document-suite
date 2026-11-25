@@ -24,7 +24,7 @@ cold, and a queue-depth target a third of the shared pool's. A deployment with o
 declares nothing and is unaffected.
 
 **A local path exists too**: `config/models.litellm.toml` plus `config/litellm.yaml` run
-the whole model tier behind one LiteLLM proxy on `:4000` (`vs-litellm-up`), so Stage 1 can
+the whole model tier behind one LiteLLM proxy on `:4000` (`ds-litellm-up`), so Stage 1 can
 be exercised without a GPU at all.
 
 **None of it has been run against real GPUs.** The vLLM flags, memory fractions and HPA
@@ -35,7 +35,7 @@ Remaining:
       below from measurements rather than estimates. This is the whole of what is left
       here, and no amount of code closes it.
 - [ ] Decide GPU hardware and the expected pages/day range — the open question that blocks
-      pool sizing, tensor-parallel degrees and the batch-vs-interactive split. The
+      pool sizing, tensor-parallel degrees and the batch-ds-interactive split. The
       interactive lane is *implemented*; how many replicas it deserves is a measurement.
 - [ ] The HPA keys on the Pods metric `vllm-num-requests-waiting` through a
       `kube-metrics-adapter` annotation; it needs porting to whichever adapter the target
@@ -47,10 +47,10 @@ Lexical search is Qdrant sparse vectors computed **in process**, in Rust: tokeni
 term frequencies, let the collection's `modifier: idf` supply the rest of BM25 server-side.
 That needs no pool here and no Python in a Rust pipeline (goal G9), and both halves are
 now queried and fused inside Qdrant — see
-[`vs-vectors`](../../crates/vs-vectors/SPEC.md).
+[`ds-vectors`](../../crates/ds-vectors/SPEC.md).
 
 If BM42-quality sparse embeddings are wanted later, the upgrade is a pool here serving a
-sparse encoder and a `vs-models` embedder in front of it; the `VectorStore` interface does
+sparse encoder and a `ds-models` embedder in front of it; the `VectorStore` interface does
 not change, only where the sparse vector comes from. Nothing about the current design
 forecloses it, which is why there is no placeholder pool for it.
 
@@ -71,13 +71,13 @@ One pool per model (a pool = N replicas behind the endpoints listed in
 |------|-------------|---------------|
 | `doc-parse` | compact document VLMs (e.g. PaddleOCR-VL-1.5, MinerU2.5, dots.ocr) | `page.parse_e2e`, `region.ocr`, `table.recognize`, `formula.recognize` |
 | `layout` | layout detector exposed via the same API, or a doc VLM in layout mode | `layout.detect` |
-| `vlm-general` | general VLM (e.g. Qwen3-VL family) | `figure.describe`, `chart.to_table`, judge in vs-adapt |
+| `vlm-general` | general VLM (e.g. Qwen3-VL family) | `figure.describe`, `chart.to_table`, judge in ds-adapt |
 | `classifier` | small VLM | tier 1 page classification |
 | `llm-extract` | text LLM with strong structured output | Stage 2 extraction and verification |
 | `embed` | text embedding model (`/v1/embeddings`) | Stage 2 embeddings, type normalisation, entity resolution |
 | `doc-parse-interactive` | the same weights as `doc-parse`, reserved | every Stage 1 step, for interactive uploads only |
 
-Which document VLMs end up in production is decided by `vs-adapt` scores, not here.
+Which document VLMs end up in production is decided by `ds-adapt` scores, not here.
 Keep 2–3 candidates per role served in stage.
 
 The reserved pool is the only one whose *existence* is a policy decision rather than a
@@ -130,7 +130,7 @@ vllm serve <model> \
 
 ## Throughput levers (in order of impact)
 
-1. Routing that skips GPU work on born-digital pages (vs-router / vs-adapt).
+1. Routing that skips GPU work on born-digital pages (ds-router / ds-adapt).
 2. Compact document VLMs (≈1B parameters) for Stage 1 instead of large general VLMs.
 3. High in-flight concurrency + continuous batching.
 4. Render DPI no higher than the model's native input size needs.

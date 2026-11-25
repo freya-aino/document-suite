@@ -1,13 +1,13 @@
 # Keycloak — the development realm
 
-`vs-api` verifies every request against a Keycloak realm and **refuses to start without
+`ds-api` verifies every request against a Keycloak realm and **refuses to start without
 one** (`[auth]` in its config). This directory is the realm that makes the local stack
 runnable; `devenv --profile stack up` imports it on every start.
 
 ```sh
 devenv --profile stack up -d        # Keycloak on :8081, realm `koki`
-vs-token                            # an access token for organization t1, with vs-admin
-vs-token t2                         # organization t2, no admin role
+ds-token                            # an access token for organization t1, with ds-admin
+ds-token t2                         # organization t2, no admin role
 ```
 
 Admin console: <http://127.0.0.1:8081> (`admin` / `admin`). Issuer:
@@ -18,12 +18,12 @@ Admin console: <http://127.0.0.1:8081> (`admin` / `admin`). Issuer:
 | | |
 |---|---|
 | Realm | `koki`, `sslRequired: none` (http on loopback), 30-minute access tokens |
-| Realm role | `vs-admin` — `auth.admin_role`: the DAG-list routes and `/metrics` |
-| Client `vs-api` | confidential, secret `vs-api-dev-secret`; service account **and** password grant; service account and the `dev` user both hold `vs-admin` |
-| Client `vs-api-t2` | confidential, secret `vs-api-t2-dev-secret`; service account only, organization `t2`, **no** role |
-| User `dev` | password `dev`, holds `vs-admin` |
+| Realm role | `ds-admin` — `auth.admin_role`: the DAG-list routes and `/metrics` |
+| Client `ds-api` | confidential, secret `ds-api-dev-secret`; service account **and** password grant; service account and the `dev` user both hold `ds-admin` |
+| Client `ds-api-t2` | confidential, secret `ds-api-t2-dev-secret`; service account only, organization `t2`, **no** role |
+| User `dev` | password `dev`, holds `ds-admin` |
 
-Each client carries an **audience mapper** adding `vs-api` to `aud`. Without one Keycloak
+Each client carries an **audience mapper** adding `ds-api` to `aud`. Without one Keycloak
 mints `aud: account` and every request is refused — it is the single most common way a
 working realm still fails against this API.
 
@@ -38,8 +38,8 @@ the claim out, which looks exactly like a bug in the API. Hardcoding it on the c
 keeps this file independent of that setting, and it is why there are two clients rather
 than two users: the client is what decides the organization here.
 
-So: `vs-api` ⇒ organization `t1`, department `dept-a`, workspaces `[ws-red, ws-blue]`;
-`vs-api-t2` ⇒ organization `t2`. Tenant isolation can be checked by hand by uploading with
+So: `ds-api` ⇒ organization `t1`, department `dept-a`, workspaces `[ws-red, ws-blue]`;
+`ds-api-t2` ⇒ organization `t2`. Tenant isolation can be checked by hand by uploading with
 one token and reading with the other — the second must answer `404`, and the admin routes
 `403`.
 
@@ -56,6 +56,6 @@ one token and reading with the other — the second must answer `404`, and the a
 4. Department and workspace mappers if you want them recorded on jobs
    (`JobSpec::owner`); they are optional and nothing enforces them yet.
 
-`crates/vs-api/src/auth_tests.rs` has a test (`#[ignore]`d, needs this realm running)
+`crates/ds-api/src/auth_tests.rs` has a test (`#[ignore]`d, needs this realm running)
 that asks for a token here and asserts the claims arrive as the verifier expects. It is
 what notices if this file and the verifier drift apart.

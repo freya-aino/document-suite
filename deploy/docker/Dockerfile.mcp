@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
 #
-# The LLM tool service as its own image: `vs-mcp`, which serves the suite's work as Model
-# Context Protocol tools over the suite's HTTP API. See crates/vs-mcp/SPEC.md.
+# The LLM tool service as its own image: `ds-mcp`, which serves the suite's work as Model
+# Context Protocol tools over the suite's HTTP API. See crates/ds-mcp/SPEC.md.
 #
 #   docker build -f deploy/docker/Dockerfile.mcp -t document-suite-mcp:dev .
 #
@@ -25,8 +25,8 @@ COPY crates ./crates
 # is a cache mount, so the binary has to be copied out inside the same step.
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/src/target,sharing=locked \
-    cargo build --release --locked -p vs-mcp \
- && cp target/release/vs-mcp /usr/local/bin/vs-mcp
+    cargo build --release --locked -p ds-mcp \
+ && cp target/release/ds-mcp /usr/local/bin/ds-mcp
 
 # ───────────────────────────── runtime ─────────────────────────────
 FROM debian:bookworm-slim
@@ -35,24 +35,24 @@ FROM debian:bookworm-slim
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates curl \
  && rm -rf /var/lib/apt/lists/* \
- && useradd --system --uid 10001 --shell /usr/sbin/nologin --home-dir /nonexistent vs
+ && useradd --system --uid 10001 --shell /usr/sbin/nologin --home-dir /nonexistent ds
 
-COPY --from=build /usr/local/bin/vs-mcp /usr/local/bin/vs-mcp
+COPY --from=build /usr/local/bin/ds-mcp /usr/local/bin/ds-mcp
 
-# No VS_API_TOKEN, and none is accepted here: in HTTP mode the token is the caller's, taken
+# No DS_API_TOKEN, and none is accepted here: in HTTP mode the token is the caller's, taken
 # from each request's Authorization header (D16). An image that baked one would be an image
 # that acts as somebody.
-ENV VS_API_URL=http://vs-suite:8080 \
-    VS_MCP_ADDR=0.0.0.0:8081 \
+ENV DS_API_URL=http://ds-suite:8080 \
+    DS_MCP_ADDR=0.0.0.0:8081 \
     RUST_LOG=info
 
 EXPOSE 8081
-USER vs
+USER ds
 
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-  CMD ["/bin/sh", "-c", "curl -fsS \"http://127.0.0.1:${VS_MCP_ADDR##*:}/healthz\" >/dev/null || exit 1"]
+  CMD ["/bin/sh", "-c", "curl -fsS \"http://127.0.0.1:${DS_MCP_ADDR##*:}/healthz\" >/dev/null || exit 1"]
 
-ENTRYPOINT ["/usr/local/bin/vs-mcp"]
+ENTRYPOINT ["/usr/local/bin/ds-mcp"]
 # `http` rather than `stdio`: a container is a service, and the stdio transport is for a
 # client that launches one process per user. Add --allowed-origin for a browser-based
 # client; without one, a request carrying an Origin header is refused, which is what stops

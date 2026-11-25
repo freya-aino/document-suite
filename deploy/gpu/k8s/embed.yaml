@@ -1,21 +1,21 @@
 # Pool "embed": vLLM serving Qwen/Qwen3-Embedding-0.6B as "embed-text" (registry id in config/models.toml).
-# Workers reach it at http://embed.vs-gpu.svc:8000/v1.
+# Workers reach it at http://embed.ds-gpu.svc:8000/v1.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: embed
-  namespace: vs-gpu
-  labels: { app.kubernetes.io/name: vllm, vs.pool: embed }
+  namespace: ds-gpu
+  labels: { app.kubernetes.io/name: vllm, ds.pool: embed }
 spec:
   replicas: 1
   strategy:
     type: RollingUpdate
     rollingUpdate: { maxSurge: 1, maxUnavailable: 0 }   # keep capacity while rolling
   selector:
-    matchLabels: { app.kubernetes.io/name: vllm, vs.pool: embed }
+    matchLabels: { app.kubernetes.io/name: vllm, ds.pool: embed }
   template:
     metadata:
-      labels: { app.kubernetes.io/name: vllm, vs.pool: embed }
+      labels: { app.kubernetes.io/name: vllm, ds.pool: embed }
       annotations:
         prometheus.io/scrape: "true"
         prometheus.io/port: "8000"
@@ -77,10 +77,10 @@ apiVersion: v1
 kind: Service
 metadata:
   name: embed
-  namespace: vs-gpu
-  labels: { app.kubernetes.io/name: vllm, vs.pool: embed }
+  namespace: ds-gpu
+  labels: { app.kubernetes.io/name: vllm, ds.pool: embed }
 spec:
-  selector: { app.kubernetes.io/name: vllm, vs.pool: embed }
+  selector: { app.kubernetes.io/name: vllm, ds.pool: embed }
   ports:
     - { name: http, port: 8000, targetPort: http }
 ---
@@ -91,10 +91,10 @@ apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
   name: embed
-  namespace: vs-gpu
+  namespace: ds-gpu
   annotations:
     metric-config.pods.vllm-num-requests-waiting.prometheus/query: |
-      sum(vllm:num_requests_waiting{namespace="vs-gpu", pod="{{.Pod}}"})
+      sum(vllm:num_requests_waiting{namespace="ds-gpu", pod="{{.Pod}}"})
 spec:
   scaleTargetRef: { apiVersion: apps/v1, kind: Deployment, name: embed }
   minReplicas: 1
