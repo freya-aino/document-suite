@@ -4,11 +4,11 @@
 #
 #   1. mounts /proc, /sys, /dev (devtmpfs), /dev/pts, /tmp and /run;
 #   2. mounts the scratch disk (second virtio block device, /dev/vdb) at /scratch;
-#   3. configures eth0 from the kernel command line (`ip=` or `vs.ip=`/`vs.gw=`);
+#   3. configures eth0 from the kernel command line (`ip=` or `ds.ip=`/`ds.gw=`);
 #   4. (there is nothing to select any more: the service has no roles);
 #   5. fetches secrets from MMDS (169.254.169.254, V2 session token) and exports every
-#      `VS__SECTION__KEY=value` line of /vs/env as an environment variable;
-#   6. starts `vs-suite` as a child, forwards SIGTERM, reaps zombies
+#      `DS__SECTION__KEY=value` line of /ds/env as an environment variable;
+#   6. starts `ds-suite` as a child, forwards SIGTERM, reaps zombies
 #      (orphaned render children are re-parented to PID 1), and powers the VM off when
 #      it exits (the host sees the Firecracker process end).
 #
@@ -17,8 +17,8 @@
 # script is kept because `build-rootfs.sh` is still the worked example of packaging the
 # binary, and a VM booted from that image will start the service and then sit idle.
 #
-# Everything it needs beyond secrets comes from /etc/vs/worker.toml and
-# /etc/vs/models.toml baked into the image; VS__… variables override individual keys.
+# Everything it needs beyond secrets comes from /etc/ds/worker.toml and
+# /etc/ds/models.toml baked into the image; DS__… variables override individual keys.
 
 set -u
 
@@ -46,7 +46,7 @@ cmdline_value() {
 }
 
 # ── Scratch disk (required for the ingest role, harmless otherwise) ─────────
-SCRATCH_DEV=$(cmdline_value vs.scratch)
+SCRATCH_DEV=$(cmdline_value ds.scratch)
 [ -n "$SCRATCH_DEV" ] || SCRATCH_DEV=/dev/vdb
 if [ -b "$SCRATCH_DEV" ]; then
     if ! mount -t ext4 -o noatime,nodev,nosuid "$SCRATCH_DEV" /scratch 2>/dev/null; then
@@ -60,10 +60,10 @@ fi
 
 # ── Network ─────────────────────────────────────────────────────────────────
 # Either the kernel's `ip=client:server:gw:netmask:hostname:iface:off` (also handled by
-# the kernel itself when built with CONFIG_IP_PNP) or our own `vs.ip=CIDR vs.gw=ADDR`.
-IP_CIDR=$(cmdline_value vs.ip)
-GW=$(cmdline_value vs.gw)
-DNS=$(cmdline_value vs.dns)
+# the kernel itself when built with CONFIG_IP_PNP) or our own `ds.ip=CIDR ds.gw=ADDR`.
+IP_CIDR=$(cmdline_value ds.ip)
+GW=$(cmdline_value ds.gw)
+DNS=$(cmdline_value ds.dns)
 KIP=$(cmdline_value ip)
 if [ -z "$IP_CIDR" ] && [ -n "$KIP" ]; then
     IP_CIDR=$(printf '%s' "$KIP" | cut -d: -f1)
@@ -95,35 +95,35 @@ fi
 ip route add 169.254.169.254/32 dev eth0 2>/dev/null || true
 
 # ── Secrets from MMDS ───────────────────────────────────────────────────────
-# Host side (Firecracker API):  PUT /mmds  {"vs": {"env": "VS__POSTGRES__PASSWORD=…\nVS__BLOB__ACCESS_KEY=…"}}
-# Guest side (V2): fetch a session token, then GET /vs/env as text. Only well-formed
-# `VS__NAME=value` lines are exported; nothing is sourced as shell.
+# Host side (Firecracker API):  PUT /mmds  {"ds": {"env": "DS__POSTGRES__PASSWORD=…\nDS__BLOB__ACCESS_KEY=…"}}
+# Guest side (V2): fetch a session token, then GET /ds/env as text. Only well-formed
+# `DS__NAME=value` lines are exported; nothing is sourced as shell.
 MMDS=http://169.254.169.254
 TOKEN=$(wget -q -O - --method=PUT --header 'X-metadata-token-ttl-seconds: 60' "$MMDS/latest/api/token" 2>/dev/null || true)
 if [ -n "$TOKEN" ]; then
-    ENV_FILE=/run/vs-env
-    if wget -q -O "$ENV_FILE" --header "X-metadata-token: $TOKEN" "$MMDS/vs/env" 2>/dev/null; then
+    ENV_FILE=/run/ds-env
+    if wget -q -O "$ENV_FILE" --header "X-metadata-token: $TOKEN" "$MMDS/ds/env" 2>/dev/null; then
         while IFS= read -r line || [ -n "$line" ]; do
             case "$line" in
-                VS__[A-Z0-9_]*=*) export "$line" ;;
+                DS__[A-Z0-9_]*=*) export "$line" ;;
                 "") ;;
                 *) log "ignoring malformed MMDS line" ;;
             esac
         done < "$ENV_FILE"
         rm -f "$ENV_FILE"
     else
-        log "MMDS has no /vs/env; running with baked config only"
+        log "MMDS has no /ds/env; running with baked config only"
     fi
 else
     log "MMDS unreachable; running with baked config only"
 fi
 
 # ── Worker ──────────────────────────────────────────────────────────────────
-export VS_CONFIG="${VS_CONFIG:-/etc/vs/worker.toml}"
+export DS_CONFIG="${DS_CONFIG:-/etc/ds/worker.toml}"
 export SSL_CERT_FILE="${SSL_CERT_FILE:-/etc/ssl/certs/ca-certificates.crt}"
 if [ -w /scratch ]; then export TMPDIR=/scratch; else export TMPDIR=/tmp; fi
 export RUST_LOG="${RUST_LOG:-info}"
-hostname "vs-suite" 2>/dev/null || true
+hostname "ds-suite" 2>/dev/null || true
 
 WORKER_PID=
 on_term() {
@@ -132,8 +132,8 @@ on_term() {
 }
 trap on_term TERM INT
 
-log "starting vs-suite"
-/usr/bin/vs-suite &
+log "starting ds-suite"
+/usr/bin/ds-suite &
 WORKER_PID=$!
 
 # `wait` as PID 1 reaps every child, including orphans re-parented to us. It returns
@@ -143,6 +143,6 @@ while kill -0 "$WORKER_PID" 2>/dev/null; do
     wait "$WORKER_PID"
     STATUS=$?
 done
-log "vs-suite exited with status $STATUS; powering off"
+log "ds-suite exited with status $STATUS; powering off"
 sync
 exec poweroff -f

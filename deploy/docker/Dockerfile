@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 #
-# The document-suite service as one image: `vs-suite`, which serves the HTTP API and runs
+# The document-suite service as one image: `ds-suite`, which serves the HTTP API and runs
 # the three worker roles in one process. See deploy/README.md for what the deployment has
 # to provide around it, and § Configuration for every parameter.
 #
@@ -46,14 +46,14 @@ COPY crates ./crates
 # copied out inside the same step.
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/src/target,sharing=locked \
-    cargo build --release --locked -p vs-suite \
- && cp target/release/vs-suite /usr/local/bin/vs-suite
+    cargo build --release --locked -p ds-suite \
+ && cp target/release/ds-suite /usr/local/bin/ds-suite
 
 # ───────────────────────────── runtime ─────────────────────────────
 FROM debian:bookworm-slim AS runtime
 
 LABEL org.opencontainers.image.title="document-suite" \
-      org.opencontainers.image.description="Visual document processing: HTTP API and worker roles in one service" \
+      org.opencontainers.image.description="Document processing: the HTTP API and the document pipeline in one service" \
       org.opencontainers.image.licenses="UNLICENSED"
 
 # ca-certificates: Keycloak, S3 and the model endpoints are all TLS.
@@ -61,28 +61,28 @@ LABEL org.opencontainers.image.title="document-suite" \
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates curl \
  && rm -rf /var/lib/apt/lists/* \
- && useradd --system --uid 10001 --shell /usr/sbin/nologin --home-dir /scratch vs \
- && mkdir -p /scratch /etc/vs \
- && chown vs:vs /scratch
+ && useradd --system --uid 10001 --shell /usr/sbin/nologin --home-dir /scratch ds \
+ && mkdir -p /scratch /etc/ds \
+ && chown ds:ds /scratch
 
-COPY --from=pdfium /opt/pdfium/lib/libpdfium.so /usr/lib/vs/libpdfium.so
-COPY --from=build /usr/local/bin/vs-suite /usr/local/bin/vs-suite
-COPY deploy/docker/worker.toml /etc/vs/worker.toml
+COPY --from=pdfium /opt/pdfium/lib/libpdfium.so /usr/lib/ds/libpdfium.so
+COPY --from=build /usr/local/bin/ds-suite /usr/local/bin/ds-suite
+COPY deploy/docker/worker.toml /etc/ds/worker.toml
 
-ENV VS_CONFIG=/etc/vs/worker.toml \
-    VS_API_ADDR=0.0.0.0:8080 \
-    PDFIUM_DYNAMIC_LIB_PATH=/usr/lib/vs \
-    LD_LIBRARY_PATH=/usr/lib/vs \
+ENV DS_CONFIG=/etc/ds/worker.toml \
+    DS_API_ADDR=0.0.0.0:8080 \
+    PDFIUM_DYNAMIC_LIB_PATH=/usr/lib/ds \
+    LD_LIBRARY_PATH=/usr/lib/ds \
     TMPDIR=/scratch \
     RUST_LOG=info
 
 EXPOSE 8080
-USER vs
+USER ds
 WORKDIR /scratch
 
 # Every copy serves the API, so there is always an endpoint to probe. (This used to branch
-# on `VS_ROLES`, for copies that only consumed the queue; there is no queue and no roles.)
+# on `DS_ROLES`, for copies that only consumed the queue; there is no queue and no roles.)
 HEALTHCHECK --interval=15s --timeout=3s --start-period=20s --retries=3 \
-  CMD ["/bin/sh", "-c", "curl -fsS \"http://127.0.0.1:${VS_API_ADDR##*:}/healthz\" >/dev/null || exit 1"]
+  CMD ["/bin/sh", "-c", "curl -fsS \"http://127.0.0.1:${DS_API_ADDR##*:}/healthz\" >/dev/null || exit 1"]
 
-ENTRYPOINT ["/usr/local/bin/vs-suite"]
+ENTRYPOINT ["/usr/local/bin/ds-suite"]

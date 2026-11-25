@@ -23,7 +23,7 @@
 set -euo pipefail
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-STATE_DIR=${VS_FLEET_STATE:-${XDG_RUNTIME_DIR:-/tmp}/vs-fleet}
+STATE_DIR=${DS_FLEET_STATE:-${XDG_RUNTIME_DIR:-/tmp}/ds-fleet}
 DRY_RUN=0
 
 # Boot options, passed through to firecracker-run.sh.
@@ -131,13 +131,13 @@ alive() {
 # isolation the spec claims and nothing enforced. Resolved to addresses once, here,
 # because a per-guest DNS resolver would be another thing to allow.
 apply_egress() {
-    local id=$1 tap=tap-vs-$1 ip
+    local id=$1 tap=tap-ds-$1 ip
     ip=$(guest_ip "$id")
     if [ ${#ALLOW[@]} -eq 0 ]; then
         log "vm $id: no --allow given, egress is unrestricted (NAT only)"
         return 0
     fi
-    local chain=VS_EGRESS_$id
+    local chain=DS_EGRESS_$id
     run iptables -N "$chain" 2>/dev/null || true
     run iptables -F "$chain"
     local entry host port addrs addr
@@ -161,7 +161,7 @@ apply_egress() {
 }
 
 clear_egress() {
-    local id=$1 chain=VS_EGRESS_$1 ip
+    local id=$1 chain=DS_EGRESS_$1 ip
     ip=$(guest_ip "$id")
     run iptables -D FORWARD -s "$ip" -j "$chain" 2>/dev/null || true
     run iptables -F "$chain" 2>/dev/null || true
@@ -183,8 +183,8 @@ mmds_for() {
     : > "$out"
     [ -n "$MMDS_ENV" ] && cat "$MMDS_ENV" >> "$out"
     {
-        echo "VS_HOLDER_ID=fc-$(hostname -s 2>/dev/null || echo host)-$id"
-        echo "VS_API_ADDR=0.0.0.0:$API_PORT"
+        echo "DS_HOLDER_ID=fc-$(hostname -s 2>/dev/null || echo host)-$id"
+        echo "DS_API_ADDR=0.0.0.0:$API_PORT"
     } >> "$out"
     echo "$out"
 }
@@ -297,7 +297,7 @@ case "$CMD" in
         # whatever the snapshotted process had — which is why that id comes from MMDS per
         # slot (see `mmds_for`) and must be re-PUT before a restored VM resumes.
         [ -n "${ONE_ID:-}" ] || { echo "snapshot needs --id" >&2; exit 2; }
-        sock=${XDG_RUNTIME_DIR:-/tmp}/vs-fc-$ONE_ID/firecracker.sock
+        sock=${XDG_RUNTIME_DIR:-/tmp}/ds-fc-$ONE_ID/firecracker.sock
         out=$STATE_DIR/snapshot-$ONE_ID
         run curl -sS --unix-socket "$sock" -X PATCH -H 'Content-Type: application/json' \
             -d '{"state":"Paused"}' http://localhost/vm

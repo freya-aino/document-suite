@@ -1,7 +1,7 @@
 # deploy/firecracker — Specification
 
 CPU tier: copies of the **service** in Firecracker microVMs, behind a load balancer on the
-host. One microVM = one `vs-suite` process. System spec:
+host. One microVM = one `ds-suite` process. System spec:
 [`docs/SPEC.md`](../../docs/SPEC.md) — decision D1 (models are a separate GPU tier,
 because Firecracker has no GPU passthrough).
 
@@ -46,7 +46,7 @@ A lease holder id is random per process, which is right for a container and wron
 restored snapshot — a snapshot *is* a copy of a process that already had one, so two
 restores of the same snapshot would each believe they held the other's lease on a document.
 The id therefore belongs to the slot rather than to the process image: `fleet.sh` passes
-`VS_HOLDER_ID` through MMDS and the service prefers it over a generated one. A restored
+`DS_HOLDER_ID` through MMDS and the service prefers it over a generated one. A restored
 snapshot must have its MMDS re-PUT before it resumes, for the same reason.
 
 Remaining:
@@ -60,7 +60,7 @@ Remaining:
       reconnects on its own — believable, untested, and the sub-second boot the design
       claims has never been measured.
 - [ ] Sizing figures below are initial guesses pending a load test (see
-      [`vs-worker`](../../crates/vs-worker/SPEC.md)): a microVM's vCPU and memory per
+      [`ds-worker`](../../crates/ds-worker/SPEC.md)): a microVM's vCPU and memory per
       concurrent document, and how many copies a host can hold before the render children
       contend.
 - [ ] The guest's own kernel is Firecracker's CI kernel in every instruction here. A
@@ -85,9 +85,9 @@ Workers only need network, a root disk and CPU.
 - Rootfs: read-only ext4, built from scratch (no distro package manager in the image):
   ```
   /sbin/init            init.sh: mounts, network, MMDS, starts the service and reaps
-  /usr/bin/vs-suite     glibc build (x86_64-unknown-linux-gnu)
+  /usr/bin/ds-suite     glibc build (x86_64-unknown-linux-gnu)
   /usr/lib/...          the binary's runtime closure: glibc, libgcc_s, libpdfium.so
-  /etc/vs/worker.toml   baked defaults; per-VM values via MMDS / env
+  /etc/ds/worker.toml   baked defaults; per-VM values via MMDS / env
   /etc/ssl/certs        CA bundle
   ```
 - Scratch: second block device (ext4) mounted at `/scratch`, one per VM (`fleet.sh`
@@ -110,10 +110,10 @@ by default the libraries `ldd` resolves (plus the loader), or with `--nix-closur
 
 `init.sh` (PID 1, busybox sh): mounts `/proc`, `/sys`, `/dev`, `/run`, `/tmp`; mounts
 (formatting on first use) `/dev/vdb` at `/scratch`; configures `eth0` from
-`vs.ip=`/`vs.gw=`/`vs.dns=` or the kernel's `ip=`; fetches `/vs/env` from MMDS (V2 session
-token) and exports each well-formed `VS__SECTION__KEY=value` line, plus `VS_HOLDER_ID` and
-`VS_API_ADDR`, which `fleet.sh` writes per slot; starts `vs-suite` as a child with
-`VS_CONFIG=/etc/vs/worker.toml` and `TMPDIR=/scratch`, forwards SIGTERM, reaps orphans
+`ds.ip=`/`ds.gw=`/`ds.dns=` or the kernel's `ip=`; fetches `/ds/env` from MMDS (V2 session
+token) and exports each well-formed `DS__SECTION__KEY=value` line, plus `DS_HOLDER_ID` and
+`DS_API_ADDR`, which `fleet.sh` writes per slot; starts `ds-suite` as a child with
+`DS_CONFIG=/etc/ds/worker.toml` and `TMPDIR=/scratch`, forwards SIGTERM, reaps orphans
 (the render children) and powers off when the service exits, which ends the Firecracker
 process on the host.
 
@@ -122,12 +122,12 @@ process on the host.
 `vm-config.example.json` (Firecracker API config): vCPU, memory, kernel args with the
 guest address, read-only rootfs drive, writable scratch drive, TAP network interface with
 rate limiters, MMDS V2 on `eth0`. Secrets (Postgres password, bucket credentials) are PUT
-to MMDS as `{"vs": {"env": "VS__…=…\n…"}}` and exported by init before the service starts;
+to MMDS as `{"ds": {"env": "DS__…=…\n…"}}` and exported by init before the service starts;
 the baked `worker.toml` holds everything else.
 
-`firecracker-run.sh` boots one VM: creates `tap-vs-<id>` with NAT egress, substitutes
+`firecracker-run.sh` boots one VM: creates `tap-ds-<id>` with NAT egress, substitutes
 kernel, rootfs, scratch disk, TAP, MAC and sizes into a copy of the example config, starts
-Firecracker with it and loads a `VS__…` env file into MMDS. `fleet.sh` runs several of them
+Firecracker with it and loads a `DS__…` env file into MMDS. `fleet.sh` runs several of them
 and is what a host runs.
 
 ## Fleet management
@@ -179,7 +179,7 @@ configuration.
 
 ## Sizing (initial)
 
-See `crates/vs-worker/SPEC.md` "Sizing guidance". A microVM now runs every stage rather
+See `crates/ds-worker/SPEC.md` "Sizing guidance". A microVM now runs every stage rather
 than one role, so the three figures collapse into one: start with **2 vCPU / 4 GiB** per
 copy with `worker.max_documents = 2`, and adjust from load tests. The render children are
 the memory, the model calls are the wait, and nothing here has been measured.

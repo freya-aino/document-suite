@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Builds the read-only root filesystem of the worker microVM (deploy/firecracker/SPEC.md).
 #
-#   build-rootfs.sh --service target/release/vs-suite \
+#   build-rootfs.sh --service target/release/ds-suite \
 #                   --pdfium /path/to/libpdfium.so \
 #                   --ca-bundle /etc/ssl/certs/ca-certificates.crt \
 #                   --config config/worker.toml \
@@ -10,7 +10,7 @@
 #                   [--nix-closure] [--size 512M] [--out rootfs.ext4]
 #
 # The image holds: /sbin/init (deploy/firecracker/init.sh), busybox and the applets init
-# uses, /usr/bin/vs-suite with its shared-library closure (glibc build; a static musl
+# uses, /usr/bin/ds-suite with its shared-library closure (glibc build; a static musl
 # binary cannot dlopen libpdfium.so), libpdfium.so, the CA bundle and the baked config.
 # The suite is one binary, and in this image it is started with a subset of roles: a
 # microVM takes no inbound connections, so it runs queue consumers and never the API.
@@ -73,15 +73,15 @@ ROOT=$(mktemp -d)
 trap 'rm -rf "$ROOT"' EXIT
 
 # ── Directory skeleton ───────────────────────────────────────────────────────
-mkdir -p "$ROOT"/{bin,sbin,usr/bin,usr/lib,lib,lib64,etc/vs,etc/ssl/certs,proc,sys,dev,run,tmp,scratch,root}
+mkdir -p "$ROOT"/{bin,sbin,usr/bin,usr/lib,lib,lib64,etc/ds,etc/ssl/certs,proc,sys,dev,run,tmp,scratch,root}
 chmod 1777 "$ROOT/tmp"
 
 # ── Worker, pdfium, config, certificates ─────────────────────────────────────
-install -m 0755 "$WORKER" "$ROOT/usr/bin/vs-suite"
+install -m 0755 "$WORKER" "$ROOT/usr/bin/ds-suite"
 install -m 0755 "$PDFIUM" "$ROOT/usr/lib/libpdfium.so"
-install -m 0644 "$CONFIG" "$ROOT/etc/vs/worker.toml"
+install -m 0644 "$CONFIG" "$ROOT/etc/ds/worker.toml"
 if [ -n "$MODELS" ]; then
-    install -m 0644 "$MODELS" "$ROOT/etc/vs/models.toml"
+    install -m 0644 "$MODELS" "$ROOT/etc/ds/models.toml"
 fi
 install -m 0644 "$CA_BUNDLE" "$ROOT/etc/ssl/certs/ca-certificates.crt"
 ln -s ca-certificates.crt "$ROOT/etc/ssl/certs/ca-bundle.crt"
@@ -169,9 +169,9 @@ cat > "$ROOT/etc/group" <<'GROUP'
 root:x:0:
 nogroup:x:65534:
 GROUP
-echo "vs-suite" > "$ROOT/etc/hostname"
+echo "ds-suite" > "$ROOT/etc/hostname"
 printf '127.0.0.1 localhost\n' > "$ROOT/etc/hosts"
-# DNS: replaced by vs.dns= on the kernel command line, if given.
+# DNS: replaced by ds.dns= on the kernel command line, if given.
 printf 'nameserver 10.0.0.1\n' > "$ROOT/etc/resolv.conf"
 cat > "$ROOT/etc/nsswitch.conf" <<'NSS'
 hosts: files dns
@@ -181,5 +181,5 @@ NSS
 rm -f "$OUT"
 # -d populates the filesystem from the directory without mounting (no root needed);
 # -E root_owner makes everything root-owned regardless of who runs the build.
-mkfs.ext4 -q -F -L vs-rootfs -E root_owner=0:0 -d "$ROOT" "$OUT" "$SIZE"
+mkfs.ext4 -q -F -L ds-rootfs -E root_owner=0:0 -d "$ROOT" "$OUT" "$SIZE"
 echo "wrote $OUT ($SIZE) from $(du -sh "$ROOT" | cut -f1) of files"

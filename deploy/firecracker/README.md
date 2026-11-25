@@ -1,4 +1,4 @@
-# deploy/firecracker — build and boot a vs-worker microVM
+# deploy/firecracker — build and boot a ds-worker microVM
 
 One microVM runs one copy of the **service**, and a load balancer on the host hands it
 uploads — the suite is one HTTP service (D12), and a guest is reachable across its own TAP
@@ -17,7 +17,7 @@ device. Design and sizing: [SPEC.md](SPEC.md). Files here:
 
 ```sh
 # glibc build of the service (the rootfs ships its shared-library closure)
-cargo build --release -p vs-suite --target x86_64-unknown-linux-gnu
+cargo build --release -p ds-suite --target x86_64-unknown-linux-gnu
 
 # a guest kernel: Firecracker's CI kernels work out of the box
 curl -fLo vmlinux \
@@ -25,7 +25,7 @@ curl -fLo vmlinux \
 
 # the root filesystem
 deploy/firecracker/build-rootfs.sh \
-  --worker target/x86_64-unknown-linux-gnu/release/vs-worker \
+  --worker target/x86_64-unknown-linux-gnu/release/ds-worker \
   --pdfium "$PDFIUM_DIR/libpdfium.so" \
   --ca-bundle /etc/ssl/certs/ca-certificates.crt \
   --config config/worker.toml \
@@ -44,7 +44,7 @@ image from a directory.
 
 The baked `worker.toml` holds everything that is not secret (object store, Postgres URL
 without password, Qdrant URL, model registry path, `[auth]`). Secrets arrive via MMDS,
-along with the slot's own `VS_HOLDER_ID` and `VS_API_ADDR`.
+along with the slot's own `DS_HOLDER_ID` and `DS_API_ADDR`.
 
 ## 2. Boot one VM locally
 
@@ -57,18 +57,18 @@ sudo deploy/firecracker/firecracker-run.sh --role ingest --id 2 --vcpus 2 --mem 
   --kernel vmlinux --rootfs rootfs.ext4 --scratch scratch-1.ext4 --mmds-env secrets.env
 ```
 
-`secrets.env` is one `VS__SECTION__KEY=value` per line, e.g.
+`secrets.env` is one `DS__SECTION__KEY=value` per line, e.g.
 
 ```
-VS__POSTGRES__PASSWORD=...
-VS__BLOB__ACCESS_KEY_ID=...
-VS__BLOB__SECRET_ACCESS_KEY=...
+DS__POSTGRES__PASSWORD=...
+DS__BLOB__ACCESS_KEY_ID=...
+DS__BLOB__SECRET_ACCESS_KEY=...
 ```
 
-The wrapper creates `tap-vs-<id>` (host `172.16.<id>.1/30`, guest `.2`), NATs egress
+The wrapper creates `tap-ds-<id>` (host `172.16.<id>.1/30`, guest `.2`), NATs egress
 through the default route, substitutes kernel/rootfs/TAP/sizes into a copy of
 `vm-config.example.json`, boots, and PUTs the secrets into MMDS as
-`{"vs": {"env": "<file contents>"}}`. The guest console is the terminal; the VM
+`{"ds": {"env": "<file contents>"}}`. The guest console is the terminal; the VM
 powers off when the worker exits (`reboot=k panic=1` makes Firecracker exit).
 
 ## 3. What the guest does (init.sh)
@@ -76,10 +76,10 @@ powers off when the worker exits (`reboot=k panic=1` makes Firecracker exit).
 1. mounts `/proc`, `/sys`, `/dev`, `/run`, `/tmp`; mounts (or formats and mounts) the
    second block device at `/scratch`;
 2. (there are no roles to select: the service runs every stage);
-3. configures `eth0` from `vs.ip=`/`vs.gw=`/`vs.dns=` or the kernel's `ip=` argument;
-4. fetches a MMDS V2 session token and `GET /vs/env`, exports every well-formed
-   `VS__NAME=value` line (nothing is sourced as shell);
-5. runs `/usr/bin/vs-suite` with `VS_CONFIG=/etc/vs/worker.toml` and `TMPDIR=/scratch`,
+3. configures `eth0` from `ds.ip=`/`ds.gw=`/`ds.dns=` or the kernel's `ip=` argument;
+4. fetches a MMDS V2 session token and `GET /ds/env`, exports every well-formed
+   `DS__NAME=value` line (nothing is sourced as shell);
+5. runs `/usr/bin/ds-suite` with `DS_CONFIG=/etc/ds/worker.toml` and `TMPDIR=/scratch`,
    forwards `SIGTERM`, reaps orphaned children (the render processes), and powers off when
    the service exits.
 
@@ -119,7 +119,7 @@ curl --unix-socket /tmp/fc.sock -X PUT http://localhost/boot-source   -d @<(jq '
 curl --unix-socket /tmp/fc.sock -X PUT http://localhost/drives/rootfs -d @<(jq '.drives[0]' vm-config.json)
 curl --unix-socket /tmp/fc.sock -X PUT http://localhost/network-interfaces/eth0 -d @<(jq '."network-interfaces"[0]' vm-config.json)
 curl --unix-socket /tmp/fc.sock -X PUT http://localhost/mmds/config    -d @<(jq '."mmds-config"' vm-config.json)
-curl --unix-socket /tmp/fc.sock -X PUT http://localhost/mmds           -d '{"vs":{"env":"VS__POSTGRES__PASSWORD=..."}}'
+curl --unix-socket /tmp/fc.sock -X PUT http://localhost/mmds           -d '{"ds":{"env":"DS__POSTGRES__PASSWORD=..."}}'
 curl --unix-socket /tmp/fc.sock -X PUT http://localhost/actions        -d '{"action_type":"InstanceStart"}'
 ```
 

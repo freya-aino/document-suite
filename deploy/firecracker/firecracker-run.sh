@@ -6,7 +6,7 @@
 #                      [--mmds-env secrets.env] [--config vm-config.example.json]
 #
 # Host prerequisites (root or CAP_NET_ADMIN for the TAP setup): firecracker on PATH,
-# /dev/kvm, jq, iproute2. The TAP device tap-vs-<id> gets 172.16.<id>.1/30 on the host
+# /dev/kvm, jq, iproute2. The TAP device tap-ds-<id> gets 172.16.<id>.1/30 on the host
 # and the guest 172.16.<id>.2/30; egress is NATed through the default interface.
 # For production the host agent owns networking and egress filtering (SPEC.md).
 set -euo pipefail
@@ -42,11 +42,11 @@ done
 command -v firecracker >/dev/null || { echo "firecracker not on PATH" >&2; exit 1; }
 command -v jq >/dev/null || { echo "jq not found" >&2; exit 1; }
 
-TAP=tap-vs-$ID
+TAP=tap-ds-$ID
 HOST_IP=172.16.$ID.1
 GUEST_IP=172.16.$ID.2
 MAC=$(printf 'AA:FC:00:00:%02X:%02X' $((ID / 256 % 256)) $((ID % 256)))
-RUN_DIR=${XDG_RUNTIME_DIR:-/tmp}/vs-fc-$ID
+RUN_DIR=${XDG_RUNTIME_DIR:-/tmp}/ds-fc-$ID
 API_SOCK=$RUN_DIR/firecracker.sock
 mkdir -p "$RUN_DIR"
 rm -f "$API_SOCK"
@@ -71,7 +71,7 @@ fi
 # ── VM config from the example ────────────────────────────────────────────────
 # The boot args carry the role and the guest address for init.sh; the drives, TAP and
 # sizes are substituted into a copy of the example config.
-BOOT_ARGS="console=ttyS0 reboot=k panic=1 pci=off ro vs.ip=$GUEST_IP/30 vs.gw=$HOST_IP vs.dns=$HOST_IP"
+BOOT_ARGS="console=ttyS0 reboot=k panic=1 pci=off ro ds.ip=$GUEST_IP/30 ds.gw=$HOST_IP ds.dns=$HOST_IP"
 VM_JSON=$RUN_DIR/vm-config.json
 jq --arg kernel "$(readlink -f "$KERNEL")" \
    --arg rootfs "$(readlink -f "$ROOTFS")" \
@@ -108,8 +108,8 @@ for _ in $(seq 1 50); do
     sleep 0.1
 done
 if [ -n "$MMDS_ENV" ]; then
-    # secrets.env: VS__SECTION__KEY=value per line, exported by init.sh.
-    jq -Rs '{vs: {env: .}}' "$MMDS_ENV" \
+    # secrets.env: DS__SECTION__KEY=value per line, exported by init.sh.
+    jq -Rs '{ds: {env: .}}' "$MMDS_ENV" \
         | curl -sS --unix-socket "$API_SOCK" -X PUT -H 'Content-Type: application/json' --data-binary @- http://localhost/mmds
 fi
 
