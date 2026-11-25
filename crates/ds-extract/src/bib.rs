@@ -405,8 +405,9 @@ pub fn find_citations(text: &str) -> Vec<Citation> {
         } else {
             let trimmed = inner.trim();
             // Narrative form: "Smith et al. (2024)" — the parentheses hold only a year.
-            if trimmed.chars().count() <= 5 && find_year(trimmed).is_some_and(|(_, p)| p == 0) {
-                if let Some((start, key)) = narrative_author(&chars, i, find_year(trimmed).unwrap().0) {
+            let year = find_year(trimmed).filter(|(_, p)| *p == 0);
+            if let (true, Some((year, _))) = (trimmed.chars().count() <= 5, year) {
+                if let Some((start, key)) = narrative_author(&chars, i, year) {
                     out.push(Citation { char_start: start, char_end: j + 1, keys: vec![key] });
                 }
             } else {

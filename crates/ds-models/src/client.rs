@@ -15,6 +15,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::Semaphore;
+use tracing::Instrument;
 
 use crate::registry::{ModelRegistry, ModelSpec};
 
@@ -128,6 +129,31 @@ struct ModelState {
     limit: Arc<Semaphore>,
     rr: AtomicUsize,
     health: Vec<Mutex<EndpointHealth>>,
+}
+
+/// Reports `model_in_flight` while a call holds a permit, and again when it releases it.
+///
+/// The figure is read from the semaphore rather than counted, so it cannot drift — but a
+/// gauge that is only ever `set` on the way in reads the peak of the last burst while the
+/// model sits idle, which is the opposite of what a gauge is for.
+struct InFlight<'a> {
+    model: &'a str,
+    limit: &'a Semaphore,
+    max: usize,
+}
+
+impl InFlight<'_> {
+    fn report(&self) {
+        let in_flight = self.max.saturating_sub(self.limit.available_permits());
+        tracing::trace!(target: "ds_models::metrics", model = %self.model, in_flight, "model_in_flight");
+        metrics::gauge!("model_in_flight", "model" => self.model.to_string()).set(in_flight as f64);
+    }
+}
+
+impl Drop for InFlight<'_> {
+    fn drop(&mut self) {
+        self.report();
+    }
 }
 
 /// OpenAI-compatible client (vLLM, SGLang, hosted APIs).
@@ -288,17 +314,21 @@ impl OpenAiClient {
     /// upload (embeddings, in particular) is batch work by nature.
     async fn post_json_in(&self, spec: &ModelSpec, path: &str, body: &Value, interactive: bool) -> Result<Value, ModelError> {
         let state = self.models.get(&spec.id).ok_or_else(|| ModelError::UnknownModel(spec.id.clone()))?;
+        // Declared before the permit, so it is dropped after it: the figure is derived
+        // from the semaphore, and reading it while this call still holds its permit would
+        // count the call that just finished.
+        let gauge = InFlight { model: &spec.id, limit: &state.limit, max: spec.max_concurrency.max(1) };
         let _permit = state.limit.acquire().await.expect("semaphore never closed");
-        let in_flight = spec.max_concurrency.max(1).saturating_sub(state.limit.available_permits());
-        tracing::trace!(target: "ds_models::metrics", model = %spec.id, in_flight, "model_in_flight");
-        metrics::gauge!("model_in_flight", "model" => spec.id.clone()).set(in_flight as f64);
+        gauge.report();
         let t0 = Instant::now();
         let mut attempt: u32 = 0;
         loop {
             let (idx, endpoint) = self.pick_endpoint(spec, state, interactive);
             let span = tracing::debug_span!("model_call", model = %spec.id, endpoint = %endpoint, path, attempt);
-            let _g = span.enter();
-            let outcome = self.send_once(spec, endpoint, path, body).await;
+            // `.instrument`, not `span.enter()`: a guard held across an await stays
+            // entered on the thread when this future yields, and whatever that thread is
+            // polled with next records inside this request's span.
+            let outcome = self.send_once(spec, endpoint, path, body).instrument(span).await;
             let status_label = match &outcome {
                 Ok(_) => "ok".to_string(),
                 Err(ModelError::Status { status, .. }) => status.to_string(),
@@ -340,7 +370,6 @@ impl OpenAiClient {
                     attempt += 1;
                 }
             }
-            drop(_g);
             tokio::time::sleep(self.backoff(attempt)).await;
         }
     }

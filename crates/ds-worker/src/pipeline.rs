@@ -108,18 +108,40 @@ impl Pipeline {
     ///
     /// On failure the job row is left `failed` with the reason, because nothing else will
     /// pick it up: this process is the only thing that knows about the document.
+    /// Leases a document to this copy before any work starts on it, so that waiting for
+    /// a slot does not look like a crash.
+    ///
+    /// The resume sweep treats a job with no live lease as abandoned, and it is right to:
+    /// a copy that died before it started is exactly that. But a copy that has *accepted*
+    /// a document and is waiting for one of its `worker.max_documents` slots has no lease
+    /// either, and under load that wait outlasts `worker.lease_ttl_s` — so another copy
+    /// claimed the job, `resumes` went up, and after `worker.max_resumes` of that a
+    /// perfectly healthy document was failed with "could not be finished" without anyone
+    /// ever having started it. Holding the lease from the moment the work is accepted is
+    /// what tells the two apart.
+    ///
+    /// `None` means another copy holds it, which is the answer to give back to whatever
+    /// asked: do not work on this document.
+    pub async fn lease(&self, job_id: uuid::Uuid) -> Result<Option<Lease>, TaskError> {
+        if !self.ops.take_lease(job_id, &self.cfg.holder, self.cfg.lease_ttl).await? {
+            tracing::info!(%job_id, "another copy holds this document; leaving it alone");
+            metrics::counter!("worker_lease_contended_total").increment(1);
+            return Ok(None);
+        }
+        Ok(Some(Lease::renewing(self.ops.clone(), job_id, self.cfg.holder.clone(), self.cfg.lease_ttl)))
+    }
+
     pub async fn run(&self, job_id: uuid::Uuid, run_id: RunId, spec: &JobSpec) -> Result<(), TaskError> {
         // Claim the document before any work on it. This is what stops two copies from
         // processing the same document after a resume sweep: the writes are idempotent
         // either way (§5.4), but the model calls are the expensive part and they are not.
-        if !self.ops.take_lease(job_id, &self.cfg.holder, self.cfg.lease_ttl).await? {
-            tracing::info!(%job_id, "another copy holds this document; leaving it alone");
-            metrics::counter!("worker_lease_contended_total").increment(1);
-            return Ok(());
-        }
-        // Renewed for as long as this document is being worked on, so the lease lapses
-        // only when the process stops — which is what a crash looks like from outside.
-        let _lease = Lease::renewing(self.ops.clone(), job_id, self.cfg.holder.clone(), self.cfg.lease_ttl);
+        // The caller may hold the same lease already — `ds-suite` takes it when it accepts
+        // the document, before waiting for a slot — and taking it twice from the same
+        // holder is the same row, so this stays the one place that must not be skipped.
+        let _lease = match self.lease(job_id).await? {
+            Some(lease) => lease,
+            None => return Ok(()),
+        };
         match self.stages(job_id, run_id, spec).await {
             Ok(()) => Ok(()),
             Err(e) => {
@@ -181,9 +203,10 @@ impl Pipeline {
         let task = &task;
         let outcome = retrying(self.cfg.page_attempts, |attempt| async move {
             let started = Instant::now();
-            in_flight(Stage::Page, 1.0);
-            let result = self.page.process(task).await;
-            in_flight(Stage::Page, -1.0);
+            let result = {
+                let _running = Running::stage(Stage::Page);
+                self.page.process(task).await
+            };
             record(Stage::Page, if result.is_ok() { "ok" } else { "error" }, started);
             if let Err(e) = &result {
                 tracing::warn!(%job_id, page_no = page.page_no, attempt, permanent = e.permanent, error = %format!("{:#}", e.error), "page attempt failed");
@@ -206,9 +229,10 @@ impl Pipeline {
     /// Times and counts a stage, under a span carrying the job.
     async fn timed<T>(&self, stage: Stage, work: impl std::future::Future<Output = Result<T, TaskError>>) -> Result<T, TaskError> {
         let started = Instant::now();
-        in_flight(stage, 1.0);
-        let result = work.await;
-        in_flight(stage, -1.0);
+        let result = {
+            let _running = Running::stage(stage);
+            work.await
+        };
         record(stage, if result.is_ok() { "ok" } else { "error" }, started);
         result
     }
@@ -220,7 +244,13 @@ impl Pipeline {
 /// failed, or a panic in a stage — has to release it. Dropping it aborts the renewal and
 /// releases the lease, so the next sweep can pick the document up immediately instead of
 /// waiting out the TTL.
-struct Lease {
+///
+/// Public because a document is leased before it is *started*: the process that accepts
+/// an upload may hold it for a while before a slot is free, and an unleased job is
+/// indistinguishable from an abandoned one (see [`Pipeline::lease`]). Nesting is safe —
+/// taking, renewing and releasing are all scoped to the holder id, so the same process
+/// holding the same lease twice is one row either way.
+pub struct Lease {
     renewer: tokio::task::JoinHandle<()>,
     ops: Arc<Ops>,
     job_id: uuid::Uuid,
@@ -228,7 +258,7 @@ struct Lease {
 }
 
 impl Lease {
-    fn renewing(ops: Arc<Ops>, job_id: uuid::Uuid, holder: String, ttl: Duration) -> Self {
+    pub(crate) fn renewing(ops: Arc<Ops>, job_id: uuid::Uuid, holder: String, ttl: Duration) -> Self {
         // A third of the TTL: two renewals may be lost — a slow query, a paused
         // scheduler — before anything else considers the document abandoned.
         let period = (ttl / 3).max(Duration::from_secs(1));
@@ -338,6 +368,26 @@ fn in_flight(stage: Stage, delta: f64) {
         g.increment(delta);
     } else {
         g.decrement(-delta);
+    }
+}
+
+/// Holds `worker_stage_in_flight` up while a stage runs and puts it down when the stage
+/// ends — including when its future is **dropped** rather than finished, which is what a
+/// step timeout and a cancelled task look like. Incrementing and decrementing around an
+/// `.await` instead leaves the gauge one too high every time that happens, and a gauge
+/// that only drifts upwards eventually reads as a copy that is permanently busy.
+struct Running(Stage);
+
+impl Running {
+    fn stage(stage: Stage) -> Self {
+        in_flight(stage, 1.0);
+        Self(stage)
+    }
+}
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        in_flight(self.0, -1.0);
     }
 }
 

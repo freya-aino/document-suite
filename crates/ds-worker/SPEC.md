@@ -25,9 +25,17 @@ server on a real socket, answering from the prompt it was sent so grounding and
 verification actually run. There is nothing else left to fake between the stages.
 
 **A crashed copy no longer abandons its documents.** Each job is leased by the process
-working on it and renewed while it works (a third of the TTL, so two lost renewals are
+**carrying** it — from the moment the document is accepted, not from when a slot frees up
+— and renewed for as long as it holds it (a third of the TTL, so two lost renewals are
 survivable); a lease that stops being renewed is what a crash looks like from outside, and
 any copy's resume sweep claims it (`FOR UPDATE SKIP LOCKED`) and runs the document again.
+Leasing at acceptance is the difference between "waiting for a slot" and "abandoned",
+which are otherwise the same thing seen from another copy: a wait longer than
+`worker.lease_ttl_s` used to be claimed as a crash, and `worker.max_resumes` of that
+failed a healthy document nobody had started. [`Pipeline::lease`] is that claim, and
+`ds-suite`'s dispatcher takes it before it queues the work.
+
+[`Pipeline::lease`]: src/pipeline.rs
 Re-running resumes rather than repeats: rendered pages are skipped when their signals are
 present and every vault write is idempotent. `worker.max_resumes` bounds it, so a document
 that kills the process reading it cannot take the fleet down one copy at a time — past the

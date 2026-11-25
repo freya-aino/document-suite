@@ -106,9 +106,12 @@ pub async fn sweep_once(ops: &Ops, dispatch: &dyn Dispatch, cfg: &ResumeConfig) 
                 metrics::counter!("suite_jobs_resumed_total").increment(1);
             }
             Err(e) => {
-                // This copy is full. The lease it just took is released so another copy
-                // — or this one, next sweep — can have the job, rather than holding it
-                // for a TTL while nothing works on it.
+                // This copy is not taking the job after all — in practice because another
+                // copy took the lease between the claim above and the dispatch. Release
+                // what this copy holds so the job is available again immediately rather
+                // than after a TTL during which nothing works on it. A release is scoped
+                // to the holder, so if the lease is already someone else's this does
+                // nothing, which is the right outcome too.
                 tracing::warn!(job_id = %job.job_id, error = %e, "could not resume; releasing the lease");
                 if let Err(e) = ops.release_lease(job.job_id, &cfg.holder).await {
                     tracing::warn!(job_id = %job.job_id, error = %e, "could not release the lease of a job this copy declined");

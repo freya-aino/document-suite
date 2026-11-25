@@ -24,7 +24,7 @@ use ds_infra::{Config, ObjectBlobStore};
 
 mod error;
 pub use error::TaskError;
-pub use pipeline::{Pipeline, PipelineConfig, Stage};
+pub use pipeline::{Lease, Pipeline, PipelineConfig, Stage};
 use ds_models::{Embedder, ModelRegistry, OpenAiClient, OpenAiEmbedder};
 use ds_vault::{ops::Ops, PgCorpusResolver, PgOntologyStore, PgVault};
 use ds_vectors::{QdrantConfig, QdrantStore, VectorStore};

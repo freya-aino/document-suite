@@ -193,6 +193,13 @@ fn spawn_blob_retention(cfg: &Config) -> anyhow::Result<()> {
 /// job id — and the work then waits for a slot in the spawned task rather than holding the
 /// request open. What stops that waiting set from growing without limit is the API's own
 /// admission check, which reads [`Documents::in_flight`].
+///
+/// The document is **leased before it is queued**, not when it starts. An unleased job is
+/// what an abandoned one looks like to the resume sweep, and a document waiting for a slot
+/// has no lease unless something takes one: under load that wait outlasts
+/// `worker.lease_ttl_s`, so another copy claimed the job, `resumes` went up, and after
+/// `worker.max_resumes` of that a healthy document was failed without anyone having
+/// started it. See [`ds_worker::Pipeline::lease`].
 struct Documents {
     pipeline: Arc<Pipeline>,
     slots: Arc<Semaphore>,
@@ -205,16 +212,46 @@ impl Documents {
     }
 }
 
+/// Counts a document as in flight for as long as its task lives, however that task ends.
+///
+/// A guard rather than a pair of calls: the counter is what admission control and the
+/// resume sweep both read, and a decrement skipped by an unwinding task would leave a
+/// copy that reads as permanently busy — rejecting interactive uploads and claiming no
+/// abandoned work — until it is restarted.
+struct Counted(Arc<AtomicU64>);
+
+impl Counted {
+    fn one(counter: &Arc<AtomicU64>) -> Self {
+        counter.fetch_add(1, Ordering::Relaxed);
+        Self(counter.clone())
+    }
+}
+
+impl Drop for Counted {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
 #[async_trait::async_trait]
 impl Dispatch for Documents {
     async fn dispatch(&self, job_id: uuid::Uuid, run_id: RunId, spec: JobSpec) -> anyhow::Result<()> {
-        let (pipeline, slots, in_flight) = (self.pipeline.clone(), self.slots.clone(), self.in_flight.clone());
-        in_flight.fetch_add(1, Ordering::Relaxed);
+        // Before the slot, and before this returns: a document nobody has leased is a
+        // document the sweep is entitled to take away, and the caller needs to hear that
+        // this copy is not the one carrying it.
+        let lease = match self.pipeline.lease(job_id).await {
+            Ok(Some(lease)) => lease,
+            Ok(None) => anyhow::bail!("another copy holds the lease on this document"),
+            Err(e) => return Err(e.error),
+        };
+        let counted = Counted::one(&self.in_flight);
+        let (pipeline, slots) = (self.pipeline.clone(), self.slots.clone());
         tokio::spawn(async move {
+            // Held across the wait for a slot and across the work itself, then released.
+            let (_lease, _counted) = (lease, counted);
             let _slot = slots.acquire_owned().await.expect("document semaphore is never closed");
             let span = tracing::info_span!("document", %job_id, tenant = spec.tenant.as_str());
             let result = tracing::Instrument::instrument(pipeline.run(job_id, run_id, &spec), span).await;
-            in_flight.fetch_sub(1, Ordering::Relaxed);
             if let Err(e) = result {
                 // Already recorded on the job row by the pipeline; logged here because
                 // nothing else is watching this task.

@@ -238,10 +238,11 @@ required when delivery was at-least-once, and it is what makes recovery cheap no
 nothing redelivers: a document that is run again resumes rather than repeats (rendered
 pages are skipped when their signals are present, and no vault row is written twice).
 
-**A crashed copy's documents are picked up.** Each job is leased by the process working on
-it and renewed while it works; a lease that stops being renewed is what a crash looks like
-from outside, and every copy sweeps for lapsed leases and claims them with
-`FOR UPDATE SKIP LOCKED`. `worker.max_resumes` bounds how often one document may be picked
+**A crashed copy's documents are picked up.** Each job is leased by the process carrying
+it — taken when the document is accepted, so that waiting for one of the copy's slots is
+not mistaken for a crash — and renewed for as long as that process holds it; a lease that
+stops being renewed is what a crash looks like from outside, and every copy sweeps for
+lapsed leases and claims them with `FOR UPDATE SKIP LOCKED`. `worker.max_resumes` bounds how often one document may be picked
 up, so a document that kills the process reading it cannot take the fleet down one copy at
 a time — past the bound its job is failed with a reason the caller can read. This is what
 replaced redelivery when the bus went (D13), and it is deliberately less than a queue:
