@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::AssertSqlSafe;
 use sqlx::{PgPool, Row};
@@ -75,14 +75,17 @@ pub struct NewJob {
 }
 
 /// When a job entered each state, in order.
-#[derive(Debug, Clone, Serialize)]
+///
+/// `Deserialize` because `ds-api` serves this inside `JobStatus` and a client reads it
+/// back; same for `StateAt`, `PageSummary` and `DocumentSummary` below.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JobTimings {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub states: Vec<StateAt>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StateAt {
     pub state: String,
     pub at: DateTime<Utc>,
@@ -121,7 +124,7 @@ pub struct CurrentRun {
     pub state: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PageSummary {
     pub page_no: i32,
     pub profile: Value,
@@ -129,7 +132,7 @@ pub struct PageSummary {
     pub rule_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DocumentSummary {
     pub document_hk: String,
     pub run_id: Uuid,

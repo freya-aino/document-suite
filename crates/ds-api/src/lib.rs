@@ -91,12 +91,17 @@ struct DocumentQuery {
     skip_if_processed: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-struct Accepted {
-    job_id: uuid::Uuid,
-    document_hk: Option<String>,
-    run_id: uuid::Uuid,
-    status_url: String,
+/// What an upload was accepted as.
+///
+/// This and the job/batch status types below are the published HTTP contract, so they are
+/// `pub` and round-trip: a client — `ds-itest` is one — deserialises the same struct the
+/// handler serialised, instead of keeping a mirror that can drift from it silently.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Accepted {
+    pub job_id: uuid::Uuid,
+    pub document_hk: Option<String>,
+    pub run_id: uuid::Uuid,
+    pub status_url: String,
 }
 
 type ApiError = (StatusCode, String);
@@ -577,19 +582,37 @@ async fn hash_blob(s: &AppState, key: &str) -> Result<String, ApiError> {
 
 // ───────────── jobs ─────────────
 
-#[derive(Serialize)]
-struct JobStatus {
-    job_id: uuid::Uuid,
-    state: String,
-    document_hk: Option<String>,
-    run_id: uuid::Uuid,
-    pages_total: Option<i32>,
-    pages_done: i32,
-    pages_failed: i32,
-    error: Option<String>,
-    created_at: chrono::DateTime<chrono::Utc>,
-    updated_at: chrono::DateTime<chrono::Utc>,
-    timings: Option<ds_vault::ops::JobTimings>,
+/// Where one document's job has got to.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JobStatus {
+    pub job_id: uuid::Uuid,
+    pub state: String,
+    pub document_hk: Option<String>,
+    pub run_id: uuid::Uuid,
+    pub pages_total: Option<i32>,
+    pub pages_done: i32,
+    pub pages_failed: i32,
+    pub error: Option<String>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+    /// The per-document stage ladder. There is no end-to-end latency *metric* — the
+    /// histograms are fleet aggregates — so this is where a per-document breakdown comes
+    /// from.
+    pub timings: Option<ds_vault::ops::JobTimings>,
+}
+
+impl JobStatus {
+    /// Whether the job has reached a state it will not leave.
+    pub fn finished(&self) -> bool {
+        matches!(self.state.as_str(), "done" | "partial" | "failed")
+    }
+
+    /// Milliseconds between two of this job's states, if both were recorded.
+    pub fn between(&self, from: &str, to: &str) -> Option<i64> {
+        let t = self.timings.as_ref()?;
+        let at = |name: &str| t.states.iter().find(|s| s.state == name).map(|s| s.at);
+        Some((at(to)? - at(from)?).num_milliseconds())
+    }
 }
 
 async fn get_job(State(s): State<AppState>, Caller(caller): Caller, Path(job_id): Path<uuid::Uuid>) -> Result<Json<JobStatus>, ApiError> {
@@ -815,29 +838,30 @@ fn default_page_size() -> u32 {
     100
 }
 
-#[derive(Serialize)]
-struct BatchStatus {
-    batch_id: uuid::Uuid,
-    created_at: chrono::DateTime<chrono::Utc>,
-    documents: i32,
-    total_jobs: i64,
-    counts: BTreeMap<String, i64>,
-    page: u32,
-    page_size: u32,
-    jobs: Vec<BatchJob>,
+/// One page of a batch's jobs, with the per-state counts of the whole batch.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchStatus {
+    pub batch_id: uuid::Uuid,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub documents: i32,
+    pub total_jobs: i64,
+    pub counts: BTreeMap<String, i64>,
+    pub page: u32,
+    pub page_size: u32,
+    pub jobs: Vec<BatchJob>,
 }
 
-#[derive(Serialize)]
-struct BatchJob {
-    job_id: uuid::Uuid,
-    state: String,
-    document_hk: Option<String>,
-    run_id: uuid::Uuid,
-    external_ref: Option<String>,
-    pages_total: Option<i32>,
-    pages_done: i32,
-    pages_failed: i32,
-    error: Option<String>,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchJob {
+    pub job_id: uuid::Uuid,
+    pub state: String,
+    pub document_hk: Option<String>,
+    pub run_id: uuid::Uuid,
+    pub external_ref: Option<String>,
+    pub pages_total: Option<i32>,
+    pub pages_done: i32,
+    pub pages_failed: i32,
+    pub error: Option<String>,
 }
 
 async fn get_batch(
