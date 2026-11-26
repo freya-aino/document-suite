@@ -19,6 +19,21 @@ pub struct RunRecord {
     pub latency_ms: f32,
     /// Estimated from model-node wall time (no token accounting in the executor yet).
     pub gpu_seconds: f32,
+    /// Critical path through the DAG, split: milliseconds spent in **our** code and
+    /// milliseconds spent waiting on the model tier.
+    ///
+    /// `host_ms` is the gateable one — it is what a code change moves. `model_ms` is
+    /// reported and comparable only against the same host's model probe, because a
+    /// faster GPU and a shorter prompt look identical in it.
+    ///
+    /// `latency_ms - (host_ms + model_ms)` is the executor's own residual, and it is
+    /// meant to be small; a large one at `--parallel 1` means the measurement is wrong
+    /// rather than the pipeline slow. Zero on a record from before the split existed,
+    /// which is why both are `default`.
+    #[serde(default)]
+    pub host_ms: u64,
+    #[serde(default)]
+    pub model_ms: u64,
     pub tokens: u32,
     pub ok: bool,
     pub error: Option<String>,
@@ -36,24 +51,14 @@ pub struct RunRecord {
     pub blocks: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TraceSummary {
-    pub node_id: String,
-    pub step_kind: String,
-    pub model_ref: Option<String>,
-    pub prompt_ref: Option<String>,
-    pub duration_ms: u64,
-    pub outcome: String,
-    /// What the step reported about how it ran (`StepOutput::metrics`): for a model whose
-    /// family is `auto`, which parse path won — the fact that says whether a newly
-    /// registered model is being read structurally or split as Markdown.
-    ///
-    /// This is why the `Step` trait gained a metadata channel: the parse path was logged
-    /// to a `tracing` target, which an operator could read and the scorer could not, so
-    /// the question `auto` exists to answer was the one thing nothing could score.
-    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
-    pub metrics: ds_dag::Metrics,
-}
+/// One node of the DAG, as it ran.
+///
+/// `ds_core::NodeTrace` rather than a type of its own, which it used to be: the stored
+/// `PageResult` now carries the same traces, so an offline run and a run read back over
+/// the API produce the *same* records and the scorer cannot be given two different
+/// accounts of one page. The outcome strings have to agree for that to hold, which is why
+/// the conversion lives in `ds-dag` and not here.
+pub type TraceSummary = ds_core::NodeTrace;
 
 /// `PageResult`-like output of one DAG on one page (block drafts, no hash keys).
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -8,12 +8,12 @@ use std::time::Instant;
 
 use ds_classify::{combine, tier0, Classifier, ClassifyConfig};
 use ds_core::{content_sha256, DocType, HashKey, LanguageTag, PageProfile, RunId, TenantId};
-use ds_dag::{Artifact, Dag, Executor, NodeOutcome, PageImage, StepContext, StepRegistry, TextLayer};
+use ds_dag::{Artifact, Dag, Executor, PageImage, StepContext, StepRegistry, TextLayer};
 use ds_infra::BlobStore;
 use ds_ingest::{detect_format, Format, PageAssets, RenderPool};
 
 use crate::metrics::EvalBlock;
-use crate::records::{safe_name, AdaptPageResult, RunRecord, TraceSummary};
+use crate::records::{safe_name, AdaptPageResult, RunRecord};
 use crate::score::{gt_blocks, labelled_metrics, load_ground_truth, quality_from_metrics, MetricWeights};
 use crate::select::{class_key, key_string, Objective, Weights};
 
@@ -248,6 +248,8 @@ impl Runner {
     /// Runs one DAG on one page; never fails (errors are recorded).
     pub async fn execute(&self, dag: &Dag, page: &PageCtx) -> RunRecord {
         let mut rec = RunRecord {
+            host_ms: 0,
+            model_ms: 0,
             doc: page.doc.clone(),
             page: page.page_no,
             dag_id: dag.id.clone(),
@@ -300,6 +302,11 @@ impl Runner {
                 // No token accounting reaches the executor; GPU time ≈ wall time of model nodes.
                 rec.gpu_seconds = out.traces.iter().filter(|t| t.provenance.model_ref.is_some()).map(|t| t.provenance.duration_ms as f32 / 1000.0).sum();
                 rec.blocks = out.blocks.len() as u32;
+                // From the executor's own levels, not from a reconstruction of the
+                // topology: nodes of a level ran at the same time, so a level costs its
+                // slowest node and a page's model time is not the sum of its model calls.
+                let (host_ms, model_ms) = ds_core::critical_path_ms(&out.traces.iter().map(Into::into).collect::<Vec<_>>());
+                (rec.host_ms, rec.model_ms) = (host_ms, model_ms);
                 let result = AdaptPageResult {
                     doc: page.doc.clone(),
                     page_no: page.page_no,
@@ -308,22 +315,7 @@ impl Runner {
                     render_width_px: page.width_px,
                     render_height_px: page.height_px,
                     blocks: out.blocks,
-                    traces: out
-                        .traces
-                        .iter()
-                        .map(|t| TraceSummary {
-                            node_id: t.node_id.clone(),
-                            step_kind: t.provenance.step_kind.clone(),
-                            model_ref: t.provenance.model_ref.clone(),
-                            prompt_ref: t.provenance.prompt_ref.clone(),
-                            duration_ms: t.provenance.duration_ms,
-                            outcome: match &t.outcome {
-                                NodeOutcome::Ok => "ok".into(),
-                                NodeOutcome::SkippedAfterError(e) => format!("skipped: {e}"),
-                            },
-                            metrics: t.metrics.clone(),
-                        })
-                        .collect(),
+                    traces: out.traces.iter().map(Into::into).collect(),
                 };
                 let dir = self.cfg.out.join("results").join(&page.doc).join(page.page_no.to_string());
                 let path = dir.join(format!("{}.json", safe_name(&dag.id)));
@@ -521,6 +513,8 @@ mod tests {
     fn proxy_quality_and_utility() {
         let p = page("a", 1, "k");
         let mut r = RunRecord {
+            host_ms: 0,
+            model_ms: 0,
             doc: "a".into(),
             page: 1,
             dag_id: "d".into(),

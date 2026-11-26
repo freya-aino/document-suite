@@ -355,6 +355,9 @@ fn base_eval(rec: &RunRecord, trust: Trust) -> PageEval {
     e.class_key = Some(rec.class_key.clone());
     e.tokens = rec.tokens;
     e.failed = !rec.ok;
+    // Carried through, so a selection can be made on `train` and measured on `holdout`.
+    e.split = rec.split.clone();
+    (e.host_ms, e.model_ms) = (rec.host_ms, rec.model_ms);
     e
 }
 
@@ -536,6 +539,8 @@ mod tests {
 
     fn rec(dag: &str, ok: bool) -> RunRecord {
         RunRecord {
+            host_ms: 0,
+            model_ms: 0,
             doc: "d".into(),
             page: 1,
             dag_id: dag.into(),

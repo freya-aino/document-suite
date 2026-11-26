@@ -63,6 +63,27 @@ pub struct PageEval {
     /// report can answer. It was previously logged and lost.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub parse_paths: Vec<String>,
+    /// Critical path through the DAG, split: milliseconds in **our** code and
+    /// milliseconds waiting on the model tier. Zero when the run predates the split or
+    /// the page's result carries no node traces.
+    ///
+    /// Here and not only in the run record because this is what a report and an
+    /// objective read. `host_ms` is the number a code change moves and the only one worth
+    /// gating; `model_ms` moves when the hardware or the prompt does, and a latency
+    /// regression that is really a slower GPU is the easiest wrong conclusion in the
+    /// suite.
+    #[serde(default)]
+    pub host_ms: u64,
+    #[serde(default)]
+    pub model_ms: u64,
+    /// `train` or `holdout`, from the run record.
+    ///
+    /// Carried so that a selection can be made on one split and *measured* on the other.
+    /// Without it the final round of successive halving sweeps holdout pages into the
+    /// selection records and there is no way to tell them apart afterwards — which makes
+    /// the winner's curse unmeasurable rather than merely large.
+    #[serde(default)]
+    pub split: Option<String>,
 }
 
 impl PageEval {
@@ -84,6 +105,9 @@ impl PageEval {
             tokens: 0,
             failed: false,
             parse_paths: Vec::new(),
+            host_ms: 0,
+            model_ms: 0,
+            split: None,
         }
     }
 }

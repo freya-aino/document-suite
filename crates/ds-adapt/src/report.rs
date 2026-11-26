@@ -292,6 +292,42 @@ pub fn render(list: &DagList, evals: &[PageEval], obj: &Objective, current: Opti
     }
     md.push('\n');
 
+    // Where the time went, which is a different question from how much of it there was.
+    // `host_ms` is ours and gateable; `model_ms` is the tier's and is comparable only
+    // against the same host's model probe. The residual is the executor's own overhead,
+    // and a large one means the measurement is wrong rather than the pipeline slow.
+    if evals.iter().any(|e| e.host_ms > 0 || e.model_ms > 0) {
+        md.push_str("## Latency attribution\n\n");
+        md.push_str(
+            "Critical path per page, from the executor's own levels: a level costs its slowest node, so two model \
+             calls side by side are one call's wait. **`host` is the gateable column** — it is what a code change \
+             moves. `model` moves when the hardware or the prompt does. `residual` is `latency − (host + model)`, \
+             the executor's overhead plus anything outside the DAG; a large one at `--parallel 1` means the \
+             measurement is wrong.\n\n",
+        );
+        md.push_str("| DAG | Pages | host ms | model ms | model share | residual ms |\n|---|---|---|---|---|---|\n");
+        for (dag, es) in &by_dag {
+            let timed: Vec<&&PageEval> = es.iter().filter(|e| e.host_ms > 0 || e.model_ms > 0).collect();
+            if timed.is_empty() {
+                continue;
+            }
+            let n = timed.len() as f32;
+            let host = timed.iter().map(|e| e.host_ms as f32).sum::<f32>() / n;
+            let model = timed.iter().map(|e| e.model_ms as f32).sum::<f32>() / n;
+            let latency = timed.iter().map(|e| e.latency_ms).sum::<f32>() / n;
+            let share = if host + model > 0.0 { model / (host + model) } else { 0.0 };
+            md.push_str(&format!("| `{dag}` | {} | {host:.0} | {model:.0} | {} | {:.0} |\n", timed.len(), f(share), latency - host - model));
+        }
+        md.push('\n');
+        let untimed = evals.iter().filter(|e| e.host_ms == 0 && e.model_ms == 0).count();
+        if untimed > 0 {
+            md.push_str(&format!(
+                "{untimed} eval(s) carry no critical path: a page result written before `PageResult` schema 2 has no \
+                 node traces, and an absent measurement is reported as absent rather than as zero.\n\n"
+            ));
+        }
+    }
+
     // Comparison
     if let Some(cur) = current {
         md.push_str(&format!("## Comparison with current list `{}`\n\n", cur.version));
