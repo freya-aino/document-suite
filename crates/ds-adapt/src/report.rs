@@ -129,8 +129,25 @@ pub fn routed_outcome(list: &DagList, evals: &[PageEval], profile: Profile) -> (
     (agg_of(&hits), ps.len())
 }
 
-/// Renders the Markdown report.
+/// What the report is for, which changes what it is allowed to claim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Audience {
+    /// The pages the selection was made on. Ranking C candidates by mean composite over n
+    /// pages inflates the winner, so the report has to say by how much.
+    Screen,
+    /// Pages the selection was **not** made on — `ds-adapt report --split holdout`.
+    /// Nothing was chosen here, so there is no winner's curse to warn about, and warning
+    /// about one would read as a caveat on numbers that do not need it.
+    Confirmation,
+}
+
+/// Renders the Markdown report for the pages a selection was made on.
 pub fn render(list: &DagList, evals: &[PageEval], obj: &Objective, current: Option<&DagList>) -> String {
+    render_for(Audience::Screen, list, evals, obj, current)
+}
+
+/// Renders the Markdown report, stating plainly which of the two things it is.
+pub fn render_for(audience: Audience, list: &DagList, evals: &[PageEval], obj: &Objective, current: Option<&DagList>) -> String {
     let mut md = String::new();
     let ps = pages(evals);
     let n_pages = ps.len();
@@ -152,9 +169,44 @@ pub fn render(list: &DagList, evals: &[PageEval], obj: &Objective, current: Opti
     md.push_str(&format!("- Candidate DAGs evaluated: {}; DAGs in the list: {}; routing rules: {}\n", dag_ids.len(), list.dags.len(), list.routing.rules.len()));
     md.push_str(&format!("- Default DAG: `{}`; low-confidence DAG: `{}` (confidence < {})\n", list.routing.default_dag, list.routing.low_confidence_dag, list.routing.min_classifier_confidence));
     md.push_str(&format!(
-        "- Objective: quality floor {}, latency ref {} ms, GPU ref {} s, min pages per class {}\n\n",
+        "- Objective: quality floor {}, latency ref {} ms, GPU ref {} s, min pages per class {}\n",
         obj.quality_floor, obj.latency_ref_ms, obj.gpu_ref_seconds, obj.min_pages
     ));
+
+    // The size of the thing these numbers were measured on, beside them rather than in a
+    // caveat further down. A single winner out of C candidates on n pages implies a
+    // discrimination this corpus may not contain, and the arithmetic below says so with
+    // the actual C and n rather than in general terms.
+    let documents: HashSet<&str> = evals.iter().filter_map(|e| e.doc.as_deref()).collect();
+    let mut splits: BTreeMap<&str, usize> = BTreeMap::new();
+    for e in evals {
+        *splits.entry(e.split.as_deref().unwrap_or("unrecorded")).or_default() += 1;
+    }
+    let split_note: Vec<String> = splits.iter().map(|(k, n)| format!("{k} {n}")).collect();
+    md.push_str(&format!("- Documents: {}; evals by split: {}\n", documents.len(), split_note.join(", ")));
+
+    // The winner's curse, with this run's own C and n in it — and only where it applies.
+    // On a confirmation pass nothing was chosen on these pages, so there is no inflation
+    // to correct for and saying otherwise would discredit the one report that is sound.
+    let (c, n) = (dag_ids.len(), n_pages.max(1));
+    if audience == Audience::Confirmation {
+        md.push_str(
+            "- **Confirmation pass.** The list above was selected on other pages and is only *measured* here, so these numbers carry no selection bias. They are the quotable ones.\n",
+        );
+    } else if c > 1 {
+        let inflation = |sigma: f32| sigma / (n as f32).sqrt() * (2.0 * (c as f32).ln()).sqrt();
+        md.push_str(&format!(
+            "- **Selection bias**: ranking C = {c} candidates on n = {n} pages inflates the winner's mean composite by about `(σ/√n)·√(2 ln C)` = {} points at σ = 0.1, {} at σ = 0.2. Compare that with the gap between the top two candidates below before reading the winner as better.\n",
+            f(inflation(0.1)),
+            f(inflation(0.2))
+        ));
+    }
+    if audience == Audience::Screen && splits.len() == 1 && splits.contains_key("unrecorded") {
+        md.push_str(
+            "- No eval records a split, so nothing here is held out: the numbers are a **screen**, not a measurement. `ds-adapt select --split train` and a confirmation run on `holdout` are what make one quotable.\n",
+        );
+    }
+    md.push('\n');
 
     // How each DAG's model output was parsed. The question is `auto`'s: a registry entry
     // is all it takes to add a model, and this is what says whether that model's output
@@ -486,5 +538,24 @@ mod tests {
         assert_eq!(trust_label(&[&l]), "labelled");
         assert_eq!(trust_label(&[&j]), "judge-only");
         assert_eq!(trust_label(&[&l, &j]), "mixed (50% labelled)");
+    }
+
+    #[test]
+    fn a_confirmation_report_does_not_warn_about_a_selection_it_did_not_make() {
+        // The defect this pins: the selection-bias line was printed on every report, so
+        // the *confirmation* pass — the one whose numbers are sound precisely because
+        // nothing was chosen on its pages — carried a warning that applies only to the
+        // screen. A caveat in the wrong place discredits the right number.
+        let obj = Objective { min_pages: 3, ..Default::default() };
+        let evals = evals();
+        let list = select(&evals, vec![], &obj, "t1", None).expect("a list");
+        let screen = render(&list, &evals, &obj, None);
+        assert!(screen.contains("Selection bias"), "the screen must state the inflation: {screen}");
+        assert!(screen.contains("C = 2"), "with its own C: {screen}");
+
+        let confirmation = render_for(Audience::Confirmation, &list, &evals, &obj, None);
+        assert!(!confirmation.contains("Selection bias"), "a confirmation pass has no winner's curse: {confirmation}");
+        assert!(confirmation.contains("Confirmation pass"), "and must say what it is: {confirmation}");
+        assert!(confirmation.contains("quotable"), "{confirmation}");
     }
 }

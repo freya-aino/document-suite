@@ -157,6 +157,41 @@ enum Cmd {
         /// Report path (default: `report.md` next to `--out`).
         #[arg(long)]
         report: Option<PathBuf>,
+        /// Select on this split only (`train` or `holdout`).
+        ///
+        /// The reason to use it: ranking C candidates by mean composite over n pages
+        /// inflates the winner by roughly `(sigma/sqrt n) * sqrt(2 ln C)`, which on a
+        /// corpus this size is larger than any real difference between two sensible
+        /// DAGs. Selecting on `train` and then re-running the winner and the incumbent on
+        /// `holdout` is what makes the second number quotable. `ds-adapt run`'s
+        /// successive halving also gives each candidate a different page set, so the
+        /// halving result is a screen either way.
+        #[arg(long)]
+        split: Option<String>,
+    },
+    /// Render a report for an **existing** DAG list against a set of evals.
+    ///
+    /// This is the confirmation pass. `select` both chooses and reports, which means its
+    /// report is over the pages the choice was made on — and ranking C candidates on n
+    /// pages inflates the winner. So: select on `train`, then run this on `holdout`
+    /// against the list that selection produced. Nothing is chosen here, so the numbers
+    /// are a measurement of a decision already taken, which is what makes them quotable.
+    Report {
+        /// The DAG list to report on, as `select --out` wrote it.
+        #[arg(long)]
+        list: PathBuf,
+        #[arg(long)]
+        evals: PathBuf,
+        #[arg(long)]
+        objective: Option<PathBuf>,
+        #[arg(long)]
+        out: PathBuf,
+        /// Currently active DAG list JSON, for the comparison section.
+        #[arg(long)]
+        current: Option<PathBuf>,
+        /// Report on this split only (`train` or `holdout`).
+        #[arg(long)]
+        split: Option<String>,
     },
     /// Upload a DAG list as candidate to the API.
     Promote {
@@ -197,6 +232,23 @@ struct BlobFile {
     endpoint: Option<String>,
     #[serde(default)]
     region: Option<String>,
+}
+
+/// Keeps only the evals of one split.
+///
+/// Refuses an empty result rather than carrying on, because an `evals.jsonl` written
+/// before the split was recorded carries `None` everywhere — and an empty selection reads
+/// as "no DAG reaches the quality floor", which is a different problem entirely.
+fn filter_split(all: Vec<PageEval>, want: Option<&str>) -> anyhow::Result<Vec<PageEval>> {
+    let Some(want) = want else { return Ok(all) };
+    let n = all.len();
+    let kept: Vec<PageEval> = all.into_iter().filter(|e| e.split.as_deref() == Some(want)).collect();
+    anyhow::ensure!(
+        !kept.is_empty(),
+        "no eval carries split {want:?} ({n} records read); an evals file written before the split existed carries none"
+    );
+    println!("split {want:?}: {} of {n} evals", kept.len());
+    Ok(kept)
 }
 
 #[tokio::main]
@@ -401,8 +453,8 @@ async fn main() -> anyhow::Result<()> {
             println!("wrote {} evals ({} labelled, {} judge) to {}", evals.len(), labelled, evals.len() - labelled, out.display());
             Ok(())
         }
-        Cmd::Select { evals, candidates, version, objective, out, current, report: report_path } => {
-            let evals: Vec<PageEval> = read_jsonl(&evals)?;
+        Cmd::Select { evals, candidates, version, objective, out, current, report: report_path, split } => {
+            let evals = filter_split(read_jsonl(&evals)?, split.as_deref())?;
             let dags: Vec<ds_dag::Dag> = read_json(&candidates)?;
             let obj: Objective = opt_json(objective)?;
             let list = select(&evals, dags, &obj, &version, Some(format!("ds-adapt select {}", evals.len())))
@@ -415,6 +467,25 @@ async fn main() -> anyhow::Result<()> {
             let report_path = report_path.unwrap_or_else(|| out.parent().unwrap_or(Path::new(".")).join("report.md"));
             std::fs::write(&report_path, report::render(&list, &evals, &obj, current.as_ref()))?;
             println!("wrote {} with {} rules and {}", out.display(), list.routing.rules.len(), report_path.display());
+            Ok(())
+        }
+        Cmd::Report { list, evals, objective, out, current, split } => {
+            let list: ds_router::DagList = read_json(&list)?;
+            let all: Vec<PageEval> = read_jsonl(&evals)?;
+            let evals = filter_split(all, split.as_deref())?;
+            let obj: Objective = opt_json(objective)?;
+            let current: Option<ds_router::DagList> = match current {
+                Some(p) => Some(read_json(&p)?),
+                None => None,
+            };
+            // The list's own DAGs are the candidate set here, not the full search: this
+            // reports on what was chosen, and the report's C is therefore the number of
+            // DAGs that reached the list rather than the number screened.
+            // `Confirmation`, which is the whole point of this command: nothing is
+            // chosen here, so the report must not print a selection-bias warning for a
+            // selection that did not happen on these pages.
+            std::fs::write(&out, report::render_for(report::Audience::Confirmation, &list, &evals, &obj, current.as_ref()))?;
+            println!("wrote {} from {} evals", out.display(), evals.len());
             Ok(())
         }
         Cmd::Promote { dag_list, api, token } => {
