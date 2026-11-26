@@ -1,6 +1,6 @@
 # The gate the checklists in SPEC.md and the READMEs assume exists.
 #
-# Five jobs, because they fail for five different reasons:
+# Six jobs, because they fail for six different reasons:
 #
 # - `check` is the fast one, and the one that earns its keep: clippy with `-D warnings`
 #   over everything, then the tests that need no service.
@@ -21,6 +21,13 @@
 #   to point `PDFIUM_DYNAMIC_LIB_PATH` at a directory it does not create — every PDF in
 #   that image would have failed at the first page. On merges and on request only: it
 #   compiles the workspace in release and there is no reason to pay that per push.
+# - `compose` runs the system *inside* that image: the API over HTTP, behind a real
+#   Keycloak realm, with the stack of deploy/compose. Everything above either runs the
+#   pipeline in process (`integration`) or builds the image without running the system in
+#   it (`image`), so until this job nothing had ever exercised the image, the HTTP
+#   surface and a verified token together. It runs the `fake` model tier, so it proves
+#   the suite is **wired** and says nothing about extraction quality — see
+#   deploy/compose/README.md.
 name: ci
 
 on:
@@ -156,7 +163,8 @@ jobs:
   image:
     name: the service image builds and can load pdfium
     runs-on: ubuntu-latest
-    if: github.event_name != 'pull_request'
+    # On pull requests too, now that `compose` runs the system inside this image and
+    # reuses the layer cache this job populates. The release build is paid once.
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
@@ -182,3 +190,74 @@ jobs:
             echo "pdfium: $PDFIUM_DYNAMIC_LIB_PATH/libpdfium.so, config: $DS_CONFIG"'
       - name: The binary runs
         run: docker run --rm --entrypoint /usr/local/bin/ds-suite document-suite:ci --help
+
+  compose:
+    name: compose smoke (fake models — functionality, not fidelity)
+    runs-on: ubuntu-latest
+    # Reuses the layer cache the image job populates, so the release build is compiled
+    # once per commit rather than once per job.
+    needs: image
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      # Built here rather than by `stack.sh --build`, so both images come from the shared
+      # cache. `stack.sh --no-build` then only starts them.
+      - name: The service image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/docker/Dockerfile
+          load: true
+          tags: document-suite:itest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: The fake model tier
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/docker/Dockerfile.fakemodels
+          load: true
+          tags: document-suite-fakemodels:itest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Up
+        run: deploy/compose/stack.sh up --tier fake --no-build
+
+      # The suite itself. This replaced a page of hand-written curl assertions: the Rust
+      # harness checks everything they did and a great deal they could not — that the
+      # issuer the realm stamps is the one the service accepts, that a DAG list uploaded
+      # through the API is accepted by the production registry, that every block is
+      # traceable to the step and model that made it, that both routing paths are taken,
+      # that another organization is refused, and that the scored artifacts are the ones
+      # `ds-adapt select` and `report::render` consume unchanged.
+      #
+      # `--ignored` because a test needing a service carries `#[ignore]` here, and
+      # `stack_or_skip` on top of it means these skip rather than fail without a stack —
+      # so the `--include-ignored` set stays runnable on a machine with no Docker.
+      #
+      # The latency test reports and skips its assertions until this runner shape has a
+      # baseline in deploy/compose/baselines/. Recording one is a deliberate act
+      # (DS_ITEST_WRITE_BASELINE=1), not something a CI run should do for itself.
+      - name: The integration suite
+        run: |
+          eval "$(deploy/compose/stack.sh env)"
+          cargo test -p ds-itest --test smoke --test fidelity -- --ignored --nocapture
+
+      # Separately, and after the others, because the service is configured for one
+      # document at a time: an upload from another test queues behind this one and the
+      # queue time lands in the measurement. Contention has to be outside a latency
+      # number or it is a measurement of the test runner.
+      - name: Latency
+        run: |
+          eval "$(deploy/compose/stack.sh env)"
+          cargo test -p ds-itest --test latency -- --ignored --nocapture
+
+      - name: Logs
+        if: failure()
+        run: deploy/compose/stack.sh logs
+      - name: Down
+        if: always()
+        run: deploy/compose/stack.sh down

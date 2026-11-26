@@ -1,0 +1,173 @@
+# Extraction fidelity, and the DAG search that depends on it.
+#
+# Separate from `ci` for one reason: **nothing here is a gate.** Every number this
+# produces is a measurement of a model tier against a generated corpus, and neither is a
+# ground truth about documents — so a merge must not depend on it. `ci`'s `compose` job
+# runs the same system against the *fake* tier and gates functionality only.
+#
+# What makes this worth running anyway: it is the only thing in the repository that points
+# a real VLM at a page. Until it runs, `docs/SPEC.md`'s goal G2 — that content-aware
+# routing beats a fixed pipeline — is an untested claim, and `crates/ds-adapt/SPEC.md`
+# says as much.
+#
+# Three things it needs that `ci` cannot provide:
+#
+# - a **GPU runner**, for the `gpu` tier. The `cpu` tier is a fallback that proves the
+#   parsers accept real model output; it is too slow for a corpus and its fidelity is
+#   labelled `low-trust`.
+# - a **persistent `hf-cache` volume**, or the first twenty minutes are model downloads.
+#   `deploy/gpu`'s vLLM services carry `start_period: 600s` for exactly that.
+# - an **idle host**. Every latency figure is a ratio to a baseline measured on the same
+#   machine, so a shared runner produces ratios of noise.
+#
+# It is `workflow_dispatch` plus a weekly schedule rather than nightly: a full chain is
+# hours of GPU time and the corpus does not change between runs.
+name: fidelity
+
+on:
+  workflow_dispatch:
+    inputs:
+      tier:
+        description: Model tier (gpu or cpu)
+        type: choice
+        options: [gpu, cpu]
+        default: gpu
+      docs_per_shape:
+        description: Documents per page shape (4 shapes, 2 pages each)
+        type: string
+        default: "8"
+      scan:
+        description: Also push a scanned copy of the corpus through
+        type: boolean
+        default: true
+  schedule:
+    # Sunday 03:00 UTC, when nothing else wants the GPU.
+    - cron: "0 3 * * 0"
+
+concurrency:
+  # Never two of these at once: they would share the GPU and every latency ratio would be
+  # a measurement of the other run.
+  group: fidelity
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  DS_ITEST_TIER: ${{ inputs.tier || 'gpu' }}
+
+jobs:
+  fidelity:
+    name: fidelity and DAG search (real models)
+    runs-on: [self-hosted, gpu]
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # Release, and this is not a preference. `page.denoise`'s median filter over a
+      # 200-dpi A4 page takes 2.1 s released and 36.4 s in a debug build — past the step's
+      # own 60 s timeout once decode and re-encode are added. A debug chain therefore
+      # scores *every* image conditioner as a failure and biases the search against
+      # exactly the templates this workflow exists to compare.
+      - name: Build
+        run: cargo build --release -p ds-adapt -p ds-ingest --bin ds-adapt --bin ds-render-child
+
+      - name: The service image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/docker/Dockerfile
+          load: true
+          tags: document-suite:itest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Up
+        run: deploy/compose/stack.sh up --tier "$DS_ITEST_TIER" --no-build
+
+      # The host probe first, and before anything else loads the machine: every latency
+      # assertion downstream is a ratio to it. A missing baseline makes the latency test
+      # report and skip rather than fail — a new runner must never break the suite — so
+      # the first run on a new machine records nothing and the second one compares.
+      - name: Latency
+        run: |
+          eval "$(deploy/compose/stack.sh env)"
+          cargo test -p ds-itest --test latency -- --ignored --test-threads 1 --nocapture
+
+      - name: Fidelity over the deployed API
+        run: |
+          eval "$(deploy/compose/stack.sh env)"
+          cargo test -p ds-itest --test smoke --test fidelity -- --ignored --nocapture
+
+      # The offline chain: corpus, candidates, runs, scores, a list, and two reports.
+      #
+      # `--scan-dpi` is what makes `region.ocr` versus `blocks.merge_native` a real
+      # contest: on a born-digital page the text layer wins by construction, so without a
+      # scanned corpus half of Stage 1 is never scored against anything.
+      - name: The adaptation chain
+        env:
+          DOCS: ${{ inputs.docs_per_shape || '8' }}
+          SCAN: ${{ inputs.scan == 'false' && '0' || '1' }}
+        run: |
+          set -euo pipefail
+          bin=target/release
+          out=target/fidelity
+          mkdir -p "$out"
+          models="deploy/compose/models/$DS_ITEST_TIER.toml"
+          scan=()
+          if [ "$SCAN" = "1" ]; then scan=(--scan-dpi 200 --render-child "$bin/ds-render-child"); fi
+          "$bin/ds-adapt" dataset --out "$out/corpus" --docs-per-shape "$DOCS" --rotate 0,90 --skew -2,0,2 "${scan[@]}"
+          "$bin/ds-adapt" generate --search-space config/search-space.itest.json --models "$models" --out "$out/candidates.json"
+          # `--parallel 1`: the executor's own semaphore pollutes every per-page latency
+          # otherwise, and the latency columns of this report are the ones a human reads.
+          "$bin/ds-adapt" run --manifest "$out/corpus/manifest.jsonl" --candidates "$out/candidates.json" \
+            --models "$models" --out "$out/runs" --render-child "$bin/ds-render-child" --parallel 1
+          "$bin/ds-adapt" score --runs "$out/runs" --out "$out/evals.jsonl" --models "$models"
+          version="fidelity-$(date -u +%Y%m%dT%H%M%SZ)"
+          # Selection on `train` only. Ranking C candidates by mean composite over n pages
+          # inflates the winner by about (σ/√n)·√(2 ln C) — the report prints the figure
+          # with this run's own C and n in it — so the choice is made here and *measured*
+          # in the next step, on pages it was not chosen on.
+          "$bin/ds-adapt" select --evals "$out/evals.jsonl" --candidates "$out/candidates.json" \
+            --version "$version" --out "$out/dag-list.json" --current config/dag-list.example.json \
+            --report "$out/report-train.md" --split train
+          "$bin/ds-adapt" report --list "$out/dag-list.json" --evals "$out/evals.jsonl" \
+            --current config/dag-list.example.json --out "$out/report-holdout.md" --split holdout
+
+      # The confirmation report, not the screen: the summary a human reads should be the
+      # one measured on held-out pages.
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## Fidelity — tier \`$DS_ITEST_TIER\`"
+            echo
+            echo "**Nothing here gates a merge.** These are measurements of a model tier against a"
+            echo "*generated* corpus: self-generated ground truth measures agreement with our own"
+            echo "generator, not with real documents."
+            echo
+            cat target/fidelity/report-holdout.md 2>/dev/null || echo "_the chain did not get as far as a confirmation report_"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fidelity-${{ github.run_id }}
+          # The evals and runs as well as the reports: a report answers the questions it
+          # was written to answer, and the next question always needs the records.
+          path: |
+            target/fidelity/report-train.md
+            target/fidelity/report-holdout.md
+            target/fidelity/evals.jsonl
+            target/fidelity/runs/runs.jsonl
+            target/fidelity/candidates.json
+            target/fidelity/dag-list.json
+            deploy/compose/baselines/
+          if-no-files-found: warn
+
+      # Always, and before the artifacts would be lost: a GPU runner that keeps a stack up
+      # after a failed run is a runner whose next job measures the leftovers.
+      - name: Down
+        if: always()
+        run: deploy/compose/stack.sh down || true
