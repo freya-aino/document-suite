@@ -212,9 +212,47 @@ pub fn aggregate<'a>(evals: impl Iterator<Item = &'a PageEval>) -> HashMap<Strin
 }
 
 /// Best DAG by utility (ties → lower id for determinism). Requires every DAG to have the same page set.
-pub fn best(aggs: &HashMap<String, Agg>, obj: &Objective, w: Weights) -> Option<(String, f32, usize)> {
+/// How complicated each candidate is: `(model nodes, nodes)` per DAG id.
+///
+/// Model nodes first because that is the cost that matters — a model call is orders of
+/// magnitude dearer than a CPU step, and it is the one a deployment pays for per page.
+pub type Complexity = HashMap<String, (usize, usize)>;
+
+/// Builds the complexity map from the candidates.
+///
+/// A node counts as a model node when its params name a `model`, which is exactly the
+/// `ds-models`/`ds-ingest` split — the same rule `propose`'s budget uses, and for the
+/// same reason: `blocks.merge`, `blocks.verify` and `blocks.merge_native` all output
+/// `Blocks` and all run on the CPU, so counting by output kind charges a DAG for calls it
+/// never makes.
+pub fn complexity(dags: &[Dag]) -> Complexity {
+    dags.iter()
+        .map(|d| {
+            let model_nodes = d.nodes.iter().filter(|n| n.params.get("model").and_then(|v| v.as_str()).is_some()).count();
+            (d.id.clone(), (model_nodes, d.nodes.len()))
+        })
+        .collect()
+}
+
+/// The best DAG by utility, breaking ties on **simplicity**.
+///
+/// The tie-break used to be the lower DAG id, which publishes alphabetical luck as an
+/// engineering recommendation — and ties are not rare here: two candidates differing only
+/// in a parameter that did not matter on this corpus score identically, and on a small
+/// corpus two genuinely different DAGs often do too. Fewest model calls wins, then fewest
+/// nodes, and the id only decides when a pair is indistinguishable on both.
+///
+/// A DAG missing from `cx` is treated as maximally complex rather than as simplest, so an
+/// incomplete map cannot promote a candidate by omission.
+pub fn best(aggs: &HashMap<String, Agg>, obj: &Objective, w: Weights, cx: &Complexity) -> Option<(String, f32, usize)> {
     let mut v: Vec<(&String, f32, usize)> = aggs.iter().filter_map(|(id, a)| obj.utility(w, a).map(|u| (id, u, a.n))).collect();
-    v.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal).then(a.0.cmp(b.0)));
+    let rank = |id: &String| cx.get(id).copied().unwrap_or((usize::MAX, usize::MAX));
+    v.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| rank(a.0).cmp(&rank(b.0)))
+            .then_with(|| a.0.cmp(b.0))
+    });
     v.first().map(|(id, u, n)| ((*id).clone(), *u, *n))
 }
 
@@ -279,10 +317,11 @@ pub fn key_string(m: &Match) -> String {
 /// Builds the DAG list from evaluations (SPEC.md "Objective and selection").
 pub fn select(evals: &[PageEval], dags: Vec<Dag>, obj: &Objective, version: &str, created_by: Option<String>) -> Option<DagList> {
     let balanced = obj.weights(Profile::Balanced);
+    let cx = complexity(&dags);
     let all = aggregate(evals.iter());
-    let (default_dag, _, _) = best(&all, obj, balanced)?;
+    let (default_dag, _, _) = best(&all, obj, balanced, &cx)?;
     let quality_only = Weights { quality: 1.0, latency: 0.0, cost: 0.0 };
-    let low_confidence_dag = best(&all, obj, quality_only).map(|b| b.0).unwrap_or_else(|| default_dag.clone());
+    let low_confidence_dag = best(&all, obj, quality_only, &cx).map(|b| b.0).unwrap_or_else(|| default_dag.clone());
 
     let mut rules: Vec<Rule> = vec![];
     for profile in [Profile::Quality, Profile::Balanced, Profile::Fast] {
@@ -297,7 +336,7 @@ pub fn select(evals: &[PageEval], dags: Vec<Dag>, obj: &Objective, version: &str
             }
             for (k, (m, es)) in groups {
                 let aggs = aggregate(es.into_iter());
-                if let Some((dag, u, n)) = best(&aggs, obj, w) {
+                if let Some((dag, u, n)) = best(&aggs, obj, w, &cx) {
                     if n >= obj.min_pages {
                         choice.insert((level, k), (m, dag, u, n));
                     }
@@ -305,7 +344,7 @@ pub fn select(evals: &[PageEval], dags: Vec<Dag>, obj: &Objective, version: &str
             }
         }
         // emit, pruning rules whose parent picks the same DAG
-        let global_best = best(&all, obj, w).map(|b| b.0);
+        let global_best = best(&all, obj, w, &cx).map(|b| b.0);
         let mut keys: Vec<&(usize, String)> = choice.keys().collect();
         keys.sort();
         for key in keys {
@@ -442,5 +481,90 @@ mod tests {
         // The exact angle is never part of a class: it would split what little rotated
         // data there is three ways.
         assert!((0..LEVELS).all(|l| class_key(&p, l).rotated_deg.is_none()));
+    }
+}
+
+#[cfg(test)]
+mod tiebreak_tests {
+    use super::*;
+
+    fn dag(id: &str, nodes: &[(&str, Option<&str>)]) -> Dag {
+        Dag {
+            id: id.into(),
+            description: None,
+            version: "1".into(),
+            output: nodes.last().expect("a node").0.into(),
+            nodes: nodes
+                .iter()
+                .map(|(nid, model)| ds_dag::Node {
+                    id: (*nid).into(),
+                    step: "page.parse_e2e".into(),
+                    inputs: vec![],
+                    params: match model {
+                        Some(m) => serde_json::json!({ "model": m }),
+                        None => serde_json::json!({}),
+                    },
+                    timeout_ms: None,
+                    optional: false,
+                })
+                .collect(),
+        }
+    }
+
+    fn agg(quality: f32) -> Agg {
+        Agg { n: 10, quality, latency_ms: 100.0, gpu_seconds: 0.1 }
+    }
+
+    #[test]
+    fn a_tie_goes_to_the_simpler_dag_and_not_the_alphabetically_lower() {
+        // The defect this pins: the tie-break was `a.0.cmp(b.0)`, so an identical score
+        // was resolved by the DAG id — publishing alphabetical luck as an engineering
+        // recommendation. `a-expensive` sorts first and calls three models.
+        let dags = vec![
+            dag("a-expensive", &[("p1", Some("m")), ("p2", Some("m")), ("p3", Some("m"))]),
+            dag("z-cheap", &[("p1", Some("m"))]),
+        ];
+        let cx = complexity(&dags);
+        let mut aggs = HashMap::new();
+        aggs.insert("a-expensive".to_string(), agg(0.9));
+        aggs.insert("z-cheap".to_string(), agg(0.9));
+        let obj = Objective { quality_floor: 0.0, ..Objective::default() };
+        let w = Weights { quality: 1.0, latency: 0.0, cost: 0.0 };
+        assert_eq!(best(&aggs, &obj, w, &cx).expect("a winner").0, "z-cheap");
+        // And it is a tie-break, not a preference: a real quality difference still wins.
+        aggs.insert("a-expensive".to_string(), agg(0.95));
+        assert_eq!(best(&aggs, &obj, w, &cx).expect("a winner").0, "a-expensive");
+    }
+
+    #[test]
+    fn model_nodes_outrank_node_count() {
+        // Two model calls and three nodes beats one model call and six, because the model
+        // call is the cost that matters — a CPU step is free next to it.
+        let dags = vec![
+            dag("many-cheap-nodes", &[("a", None), ("b", None), ("c", None), ("d", None), ("e", None), ("p", Some("m"))]),
+            dag("two-model-calls", &[("p1", Some("m")), ("p2", Some("m")), ("merge", None)]),
+        ];
+        let cx = complexity(&dags);
+        assert_eq!(cx["many-cheap-nodes"], (1, 6));
+        assert_eq!(cx["two-model-calls"], (2, 3));
+        let mut aggs = HashMap::new();
+        for id in ["many-cheap-nodes", "two-model-calls"] {
+            aggs.insert(id.to_string(), agg(0.8));
+        }
+        let obj = Objective { quality_floor: 0.0, ..Objective::default() };
+        let w = Weights { quality: 1.0, latency: 0.0, cost: 0.0 };
+        assert_eq!(best(&aggs, &obj, w, &cx).expect("a winner").0, "many-cheap-nodes");
+    }
+
+    #[test]
+    fn a_candidate_missing_from_the_map_is_not_promoted_by_omission() {
+        let dags = vec![dag("known", &[("p1", Some("m")), ("p2", Some("m"))])];
+        let cx = complexity(&dags);
+        let mut aggs = HashMap::new();
+        aggs.insert("known".to_string(), agg(0.8));
+        aggs.insert("unknown".to_string(), agg(0.8));
+        let obj = Objective { quality_floor: 0.0, ..Objective::default() };
+        let w = Weights { quality: 1.0, latency: 0.0, cost: 0.0 };
+        assert_eq!(best(&aggs, &obj, w, &cx).expect("a winner").0, "known", "an unmeasurable DAG must not win a tie");
     }
 }

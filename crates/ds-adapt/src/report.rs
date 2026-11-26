@@ -256,10 +256,13 @@ pub fn render(list: &DagList, evals: &[PageEval], obj: &Objective, current: Opti
         classes.entry(describe(&crate::select::class_key(&e.profile, 0))).or_default().push(e);
     }
     let w = obj.weights(Profile::Balanced);
+    // Same tie-break as the selection, from the same candidates, so the report's "best
+    // DAG" column and the list cannot disagree about a tie.
+    let cx = crate::select::complexity(&list.dags);
     for (name, es) in &classes {
         let n = es.iter().map(|e| e.page_id.as_str()).collect::<HashSet<_>>().len();
         let aggs = aggregate(es.iter().copied());
-        let best = crate::select::best(&aggs, obj, w);
+        let best = crate::select::best(&aggs, obj, w, &cx);
         let routed = target_dag(list, route(list, &es[0].profile, Profile::Balanced));
         md.push_str(&format!(
             "| {name} | {n} | {} | {} | {} | `{routed}` |\n",
