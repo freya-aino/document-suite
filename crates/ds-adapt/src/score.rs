@@ -483,27 +483,49 @@ pub async fn score(runs: Vec<RunRecord>, opts: &ScoreOptions<'_>) -> anyhow::Res
         for l in recs {
             let mut e = base_eval(&l.rec, Trust::Judge);
             if let Some(r) = l.result.as_ref() {
-                e.parse_paths = parse_paths(r);
+                e.parse_paths = parse_paths(&r.traces);
             }
             if let (true, Some(r)) = (l.rec.ok, l.result.as_ref()) {
                 let text = metrics::reading_order_text(&draft_blocks(&r.blocks));
-                let agreement = if reference.is_some() { metrics::text_similarity(&text, ref_text) } else { 0.0 };
-                e.metrics.agreement = Some(agreement);
-                let mut quality = agreement;
-                if let Some(j) = opts.judge {
-                    let img = l.rec.image_path.as_deref().map(|p| resolve(p, opts.base)).and_then(|p| std::fs::read(p).ok());
-                    match img {
-                        Some(bytes) => match j.rate(Arc::from(bytes), &blocks_to_markdown(&r.blocks)).await {
-                            Ok(s) => {
-                                e.metrics.judge = Some(s);
-                                quality = (1.0 - opts.weights.judge) * agreement + opts.weights.judge * s;
-                            }
-                            Err(err) => tracing::warn!(doc = %l.rec.doc, page = l.rec.page, dag = %l.rec.dag_id, %err, "judge failed"),
-                        },
-                        None => tracing::warn!(doc = %l.rec.doc, page = l.rec.page, "no page image for the judge"),
+                // Agreement is recorded as a diagnostic and kept out of `quality`.
+                //
+                // Two reasons. It is a consensus measure, so three DAGs sharing a parse
+                // model agree with each other and disagree with a better one. And the
+                // reference DAG was compared against *its own* text, scoring exactly
+                // 1.0 on every unlabelled page — since `pick_reference` returns the
+                // highest-mean *labelled* DAG, mixing labelled and unlabelled pages in
+                // one run guaranteed the labelled winner also won the unlabelled ones,
+                // whichever was actually more faithful. `None` for the reference says
+                // "not comparable" rather than "perfect".
+                e.metrics.agreement = match reference {
+                    Some(r) if r == l.rec.dag_id.as_str() => None,
+                    Some(_) => Some(metrics::text_similarity(&text, ref_text)),
+                    None => None,
+                };
+                // Quality on an unlabelled page is the judge's, or nothing. Without a
+                // judge there is no quality signal here at all, and saying so is better
+                // than promoting a consensus score into one.
+                match opts.judge {
+                    Some(j) => {
+                        let img = l.rec.image_path.as_deref().map(|p| resolve(p, opts.base)).and_then(|p| std::fs::read(p).ok());
+                        match img {
+                            Some(bytes) => match j.rate(Arc::from(bytes), &blocks_to_markdown(&r.blocks)).await {
+                                Ok(s) => {
+                                    e.metrics.judge = Some(s);
+                                    e.quality = s.clamp(0.0, 1.0);
+                                }
+                                Err(err) => tracing::warn!(doc = %l.rec.doc, page = l.rec.page, dag = %l.rec.dag_id, %err, "judge failed"),
+                            },
+                            None => tracing::warn!(doc = %l.rec.doc, page = l.rec.page, "no page image for the judge"),
+                        }
                     }
+                    None => tracing::warn!(
+                        doc = %l.rec.doc,
+                        page = l.rec.page,
+                        dag = %l.rec.dag_id,
+                        "unlabelled page and no judge model: this page carries no quality signal"
+                    ),
                 }
-                e.quality = quality.clamp(0.0, 1.0);
             }
             evals.push(e);
         }
@@ -531,6 +553,17 @@ mod tests {
             confidence: 0.9,
             tier: ClassifierTier::Rules,
         }
+    }
+
+    /// `agreement` is a diagnostic and the reference DAG has none, because comparing it
+    /// with itself returned 1.0 and handed the labelled winner the unlabelled pages too.
+    #[test]
+    fn the_reference_dag_has_no_agreement_with_itself() {
+        let mut means = HashMap::new();
+        means.insert("b".to_string(), 0.9);
+        means.insert("a".to_string(), 0.1);
+        let texts = [("a", "some page text"), ("b", "some page text")];
+        assert_eq!(pick_reference(&texts, &means), Some("b"), "the highest labelled mean is the reference");
     }
 
     fn draft(kind: BlockKind, b: (f32, f32, f32, f32), order: u32, content: BlockContent, text: &str) -> BlockDraft {
@@ -645,7 +678,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn score_unlabelled_uses_agreement() {
+    async fn unlabelled_pages_record_agreement_but_carry_no_quality_without_a_judge() {
         let dir = std::env::temp_dir().join(format!("ds-adapt-score-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let write = |dag: &str, text: &str| {
@@ -673,11 +706,22 @@ mod tests {
         let evals = score(vec![a, b, c, f], &ScoreOptions { weights: MetricWeights::default(), judge: None, base: None }).await.unwrap();
         assert_eq!(evals.len(), 4);
         assert!(evals.iter().all(|e| e.trust == Trust::Judge));
-        let q = |d: &str| evals.iter().find(|e| e.dag_id == d).unwrap().quality;
-        assert_eq!(q("a"), 1.0);
-        assert_eq!(q("b"), 1.0);
-        assert!(q("c") > 0.8 && q("c") < 1.0);
-        assert_eq!(q("f"), 0.0);
+        let eval = |d: &str| evals.iter().find(|e| e.dag_id == d).unwrap();
+
+        // Agreement is a diagnostic, and the reference DAG has none of it. "a" is the
+        // medoid here, and comparing it with its own text returned 1.0 — which, when
+        // `pick_reference` picks the highest-mean *labelled* DAG instead, handed the
+        // labelled winner every unlabelled page too.
+        assert_eq!(eval("a").metrics.agreement, None, "the reference is not comparable with itself");
+        assert_eq!(eval("b").metrics.agreement, Some(1.0), "identical text agrees completely");
+        let c = eval("c").metrics.agreement.expect("c is not the reference");
+        assert!(c > 0.8 && c < 1.0, "one word different: {c}");
+        assert_eq!(eval("f").metrics.agreement, None, "a failed run produced no text to compare");
+
+        // And no quality, because there is no judge: consensus is not quality, so an
+        // unlabelled page without a judge carries no quality signal at all. Promoting
+        // agreement into `quality` is what made the reference DAG unbeatable.
+        assert!(evals.iter().all(|e| e.quality == 0.0), "no judge model, so no quality on an unlabelled page");
         let _ = std::fs::remove_dir_all(dir);
     }
 }
