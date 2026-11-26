@@ -1,0 +1,20 @@
+# Tier `gpu`: the real model tier from `deploy/gpu/docker-compose.yml`, composed in by
+# `stack.sh --tier gpu`. **This is the only tier that may report extraction fidelity.**
+#
+# It needs HF_TOKEN (the gpu compose file requires it) and an NVIDIA runtime, and the
+# first start downloads weights and compiles graphs — the pools' health checks allow 600 s
+# for it. Keep the `hf-cache` volume between runs or every run pays that again.
+#
+# The pools publish 8001..8006 on the host, and inside the network they are reachable as
+# their service names on port 8000 — which is what `models/gpu.toml` points at, so the
+# service reaches them without leaving the network.
+
+services:
+  ds-suite:
+    depends_on:
+      doc-parse: {condition: service_healthy}
+      layout: {condition: service_healthy}
+      vlm-general: {condition: service_healthy}
+      classifier: {condition: service_healthy}
+      llm-extract: {condition: service_healthy}
+      embed: {condition: service_healthy}

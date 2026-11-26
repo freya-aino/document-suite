@@ -1,0 +1,77 @@
+# Model registry for the `fake` tier: every pool is `ds-fake-models`, one container
+# answering on the six service names the other tiers use.
+#
+# The ids are **identical** to `config/models.example.toml` and
+# `deploy/gpu/models.compose.toml`, and only the endpoints and families differ. That is
+# what lets one search space, one DAG list and one set of `params["model"]` values run on
+# all three tiers unchanged, and `crates/ds-adapt/tests/search_space.rs` asserts it.
+#
+# Families are `generic_json` throughout, because the fake answers the generic JSON
+# schema rather than imitating PaddleOCR's or MinerU's own output format. A tier that
+# claims a family it does not serve would exercise the wrong parser.
+
+[[model]]
+id = "paddleocr-vl-1.5"
+revision = "fake-1"
+family = "generic_json"
+task = ["page_parse", "region_ocr", "table", "formula"]
+endpoints = ["http://doc-parse:8000/v1"]
+max_concurrency = 8
+timeout_ms = 20000
+languages = ["*"]
+
+[[model]]
+id = "mineru-2.5"
+revision = "fake-1"
+family = "generic_json"
+task = ["page_parse", "layout", "table", "formula"]
+endpoints = ["http://layout:8000/v1"]
+max_concurrency = 8
+timeout_ms = 20000
+languages = ["*"]
+
+[[model]]
+id = "qwen3-vl"
+revision = "fake-1"
+family = "generic_json"
+task = ["figure_describe", "chart_to_table", "judge"]
+endpoints = ["http://vlm-general:8000/v1"]
+max_concurrency = 8
+timeout_ms = 20000
+languages = ["*"]
+
+[[model]]
+id = "page-classifier"
+revision = "fake-1"
+family = "generic_json"
+task = ["page_classify"]
+endpoints = ["http://classifier:8000/v1"]
+max_concurrency = 8
+timeout_ms = 20000
+languages = ["*"]
+
+[[model]]
+id = "extract-llm"
+revision = "fake-1"
+family = "generic_json"
+task = ["extract", "verify", "type_normalise", "entity_judge"]
+endpoints = ["http://llm-extract:8000/v1"]
+max_concurrency = 8
+timeout_ms = 20000
+languages = ["*"]
+
+[[model]]
+id = "embed-text"
+revision = "fake-1"
+family = "embedding"
+task = ["embed"]
+endpoints = ["http://embed:8000/v1"]
+max_concurrency = 8
+timeout_ms = 20000
+languages = ["*"]
+# The fake returns 8-dimensional vectors: enough to exercise the dimension guard, the
+# alias layout and reciprocal rank fusion without carrying 1024 floats per block through
+# a test. A real tier's registry says 1024, and `ensure_ready` treats the difference as
+# the migration it is.
+dimensions = 8
+batch_size = 8

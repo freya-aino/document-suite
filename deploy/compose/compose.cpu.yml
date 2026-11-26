@@ -1,0 +1,57 @@
+# Tier `cpu`: one small real VLM on the CPU, serving every pool.
+#
+# Its purpose is narrow and worth stating: it proves a **real** model tier is reachable
+# and that the parsers accept output nobody here wrote — which the `fake` tier cannot, by
+# construction. It is far too small and far too slow to carry a fidelity number, so this
+# tier is reported with a `low-trust` banner and gates nothing.
+#
+# The server and the weights are parameters rather than a pin, because the right small
+# VLM changes faster than this file would be updated, and a pinned model that has since
+# been removed upstream is worse than a documented choice:
+#
+#   DS_CPU_MODEL=<a GGUF repo or path> deploy/compose/stack.sh up --tier cpu
+#
+# llama.cpp's server speaks the OpenAI-compatible API, which is all decision D3 requires.
+# Any other OpenAI-compatible CPU server works the same way: point DS_CPU_IMAGE at it.
+
+services:
+  cpu-models:
+    image: ${DS_CPU_IMAGE:-ghcr.io/ggml-org/llama.cpp:server}
+    command:
+      - --model-url
+      - ${DS_CPU_MODEL:?set DS_CPU_MODEL to a GGUF model URL for the cpu tier}
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --ctx-size
+      - ${DS_CPU_CTX:-8192}
+      # One request at a time: a CPU VLM has no throughput to parallelise, and the
+      # latency pass wants queueing outside the measurement anyway.
+      - --parallel
+      - "1"
+    volumes:
+      - cpu-models-cache:/root/.cache
+    networks:
+      default:
+        aliases:
+          - doc-parse
+          - layout
+          - vlm-general
+          - classifier
+          - llm-extract
+          - embed
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:8000/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      # Generous: the first start downloads the weights.
+      retries: 90
+      start_period: 120s
+
+  ds-suite:
+    depends_on:
+      cpu-models: {condition: service_healthy}
+
+volumes:
+  cpu-models-cache:

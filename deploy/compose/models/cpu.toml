@@ -1,0 +1,81 @@
+# Model registry for the `cpu` tier: one small real VLM (compose.cpu.yml) answering on
+# the six service names the other tiers use.
+#
+# The ids are **identical** to `config/models.example.toml` and
+# `deploy/gpu/models.compose.toml`, and only the endpoints and families differ. That is
+# what lets one search space, one DAG list and one set of `params["model"]` values run on
+# all three tiers unchanged, and `crates/ds-adapt/tests/search_space.rs` asserts it.
+#
+# Families are `auto` throughout, which is the honest declaration here: a small general
+# VLM is not PaddleOCR and will not reliably emit any one house format, so the family
+# detector picks the parser from the shape of what actually came back. A tier that named
+# `paddleocr_vl` would send real output through the wrong parser and read as a model
+# failure.
+#
+# Timeouts are ten times the fake's: a CPU decode of a page image is seconds to minutes,
+# and a timeout here looks exactly like a bad model.
+
+[[model]]
+id = "paddleocr-vl-1.5"
+revision = "cpu-1"
+family = "auto"
+task = ["page_parse", "region_ocr", "table", "formula"]
+endpoints = ["http://cpu-models:8000/v1"]
+max_concurrency = 1
+timeout_ms = 300000
+languages = ["*"]
+
+[[model]]
+id = "mineru-2.5"
+revision = "cpu-1"
+family = "auto"
+task = ["page_parse", "layout", "table", "formula"]
+endpoints = ["http://cpu-models:8000/v1"]
+max_concurrency = 1
+timeout_ms = 300000
+languages = ["*"]
+
+[[model]]
+id = "qwen3-vl"
+revision = "cpu-1"
+family = "auto"
+task = ["figure_describe", "chart_to_table", "judge"]
+endpoints = ["http://cpu-models:8000/v1"]
+max_concurrency = 1
+timeout_ms = 300000
+languages = ["*"]
+
+[[model]]
+id = "page-classifier"
+revision = "cpu-1"
+family = "auto"
+task = ["page_classify"]
+endpoints = ["http://cpu-models:8000/v1"]
+max_concurrency = 1
+timeout_ms = 300000
+languages = ["*"]
+
+[[model]]
+id = "extract-llm"
+revision = "cpu-1"
+family = "auto"
+task = ["extract", "verify", "type_normalise", "entity_judge"]
+endpoints = ["http://cpu-models:8000/v1"]
+max_concurrency = 1
+timeout_ms = 300000
+languages = ["*"]
+
+[[model]]
+id = "embed-text"
+revision = "cpu-1"
+family = "embedding"
+task = ["embed"]
+endpoints = ["http://cpu-models:8000/v1"]
+max_concurrency = 1
+timeout_ms = 300000
+languages = ["*"]
+# Whatever the served model's embedding width is. It must match the server exactly:
+# `ensure_ready` treats a change as the collection migration it is, so a wrong value
+# here fails loudly at startup rather than writing vectors nobody can search.
+dimensions = 768
+batch_size = 4

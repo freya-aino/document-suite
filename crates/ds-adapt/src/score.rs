@@ -182,18 +182,33 @@ pub fn load_ground_truth(uri: &str, page_no: u32) -> anyhow::Result<Option<GtPag
 // ---------------------------------------------------------------------------
 
 pub fn draft_blocks(drafts: &[BlockDraft]) -> Vec<EvalBlock> {
-    drafts
-        .iter()
-        .map(|d| {
-            let (html, latex) = match &d.content {
-                BlockContent::Table { html } => (Some(html.clone()), None),
-                BlockContent::Formula { latex } => (None, Some(latex.clone())),
-                BlockContent::Chart { data_html, .. } => (data_html.clone(), None),
-                _ => (None, None),
-            };
-            EvalBlock { kind: d.kind, bbox: d.bbox, order: d.reading_order, text: d.text.clone(), html, latex }
-        })
-        .collect()
+    drafts.iter().map(|d| eval_block(d.kind, d.bbox, d.reading_order, &d.text, &d.content)).collect()
+}
+
+/// The same mapping, from the blocks a **stored** page result carries.
+///
+/// This is what lets the scorer run on results read back over the API
+/// (`GET /v1/documents/{hk}/pages/{n}` serves `ds_core::PageResult` verbatim) rather than
+/// only on an in-process `AdaptPageResult`. The integration suite builds its `PageEval`s
+/// through here, so black-box scoring and in-process scoring are the same arithmetic on
+/// the same fields — not a second implementation that could drift.
+pub fn result_blocks(blocks: &[ds_core::Block]) -> Vec<EvalBlock> {
+    blocks.iter().map(|b| eval_block(b.kind, b.bbox, b.reading_order, &b.text, &b.content)).collect()
+}
+
+/// One block, as the metrics see it.
+///
+/// Shared by both callers above deliberately: a new `BlockContent` variant that carries
+/// markup must be handled once, and cannot be handled in one path and forgotten in the
+/// other — which is the bug this function exists to make impossible.
+fn eval_block(kind: BlockKind, bbox: BBox, order: u32, text: &str, content: &BlockContent) -> EvalBlock {
+    let (html, latex) = match content {
+        BlockContent::Table { html } => (Some(html.clone()), None),
+        BlockContent::Formula { latex } => (None, Some(latex.clone())),
+        BlockContent::Chart { data_html, .. } => (data_html.clone(), None),
+        _ => (None, None),
+    };
+    EvalBlock { kind, bbox, order, text: text.to_string(), html, latex }
 }
 
 /// Markdown rendering of a page result (judge input).
@@ -368,13 +383,28 @@ fn base_eval(rec: &RunRecord, trust: Trust) -> PageEval {
 
 /// Labelled evaluation of one record (quality from ground truth).
 pub fn score_labelled(rec: &RunRecord, result: Option<&AdaptPageResult>, gt: &[EvalBlock], w: &MetricWeights) -> PageEval {
-    let mut e = base_eval(rec, Trust::Labelled);
-    if let (true, Some(r)) = (rec.ok, result) {
-        e.metrics = labelled_metrics(&draft_blocks(&r.blocks), gt);
-        e.quality = quality_from_metrics(&e.metrics, w);
-    }
+    let pred = result.map(|r| draft_blocks(&r.blocks));
+    let mut e = score_blocks(rec, pred.as_deref(), gt, w);
+    // Parse paths come from the node traces. Since `PageResult` schema version 2 those
+    // are stored too, so a page read back over the API has them as well — the black-box
+    // path fills them itself, from the same function.
     if let Some(r) = result {
-        e.parse_paths = parse_paths(r);
+        e.parse_paths = parse_paths(&r.traces);
+    }
+    e
+}
+
+/// Scores one page from blocks that are already mapped.
+///
+/// The entry point for a **black-box** run: the integration suite reads a stored
+/// `ds_core::PageResult` over the API, maps it with `result_blocks`, and arrives here. One
+/// metric path with two entry points, so a compose run and a `ds-adapt` run cannot
+/// disagree about the same page.
+pub fn score_blocks(rec: &RunRecord, pred: Option<&[EvalBlock]>, gt: &[EvalBlock], w: &MetricWeights) -> PageEval {
+    let mut e = base_eval(rec, Trust::Labelled);
+    if let (true, Some(pred)) = (rec.ok, pred) {
+        e.metrics = labelled_metrics(pred, gt);
+        e.quality = quality_from_metrics(&e.metrics, w);
     }
     e
 }
@@ -383,9 +413,8 @@ pub fn score_labelled(rec: &RunRecord, result: Option<&AdaptPageResult>, gt: &[E
 ///
 /// `auto_path` when the family was `auto` — the parser that actually won — and the family
 /// name otherwise. Nodes that called no model report nothing and are absent.
-pub fn parse_paths(result: &AdaptPageResult) -> Vec<String> {
-    result
-        .traces
+pub fn parse_paths(traces: &[crate::records::TraceSummary]) -> Vec<String> {
+    traces
         .iter()
         .filter(|t| t.model_ref.is_some())
         .filter_map(|t| {
@@ -599,6 +628,65 @@ mod tests {
         assert!(good > bad, "a correct table ({good}) must beat a cell dump ({bad})");
         // And TEDS is what produced that number, rather than the text fallback.
         assert_eq!(metrics::teds(html, html), 1.0);
+    }
+
+    /// The black-box path and the in-process path must score the same page the same way.
+    ///
+    /// The JSON here is the shape `GET /v1/documents/{hk}/pages/{n}` actually serves —
+    /// the stored `ds_core::PageResult`, copied from a live stack — so this also pins the
+    /// wire format the integration suite reads. Note `bbox` arrives as an object and not
+    /// an array; that is what the harness gets, and it deserializes straight into `BBox`.
+    #[test]
+    fn stored_page_json_maps_to_the_same_eval_blocks_as_an_in_process_run() {
+        let stored = r#"{
+          "schema_version": 1,
+          "document_hk": "e0438a4689fba577ec703fc82d78690f98e4858597aacb437a2ceb5914d78416",
+          "page_hk": "aa",
+          "page_no": 1,
+          "run_id": "01a21441-ea72-75f3-a3da-6e9de690358a",
+          "render_width_px": 1653,
+          "render_height_px": 2339,
+          "profile": {"language":"en","doc_type":"report","born_digital":true,"text_layer_coverage":1.0,
+                      "has_handwriting":false,"has_images":false,"has_tables":true,"has_formulas":false,
+                      "has_charts":false,"rotation_deg":0,"confidence":0.85,"tier":"rules"},
+          "dag_ref": "vlm-e2e-robust@1",
+          "blocks": [
+            { "block_hk": "b1", "index": 0, "kind": "title", "bbox": {"x0":0.1,"y0":0.05,"x1":0.9,"y1":0.1},
+              "reading_order": 0, "content": {"type":"text","text":"Section 1: retrieval quality"},
+              "text": "Section 1: retrieval quality", "level": null, "confidence": 0.8,
+              "provenance": { "run_id": "01a21441-ea72-75f3-a3da-6e9de690358a", "dag_ref": "vlm-e2e-robust@1",
+                "node_id": "parse", "step_kind": "page.parse_e2e", "model_ref": "paddleocr-vl-1.5@fake-1",
+                "prompt_ref": null, "params_hash": "abc", "started_at": "2026-11-25T19:49:54Z", "duration_ms": 6 } },
+            { "block_hk": "b2", "index": 1, "kind": "table", "bbox": {"x0":0.1,"y0":0.3,"x1":0.9,"y1":0.45},
+              "reading_order": 1, "content": {"type":"table","html":"<table><tr><td>Method</td></tr></table>"},
+              "text": "Method", "level": null, "confidence": 0.8,
+              "provenance": { "run_id": "01a21441-ea72-75f3-a3da-6e9de690358a", "dag_ref": "vlm-e2e-robust@1",
+                "node_id": "parse", "step_kind": "page.parse_e2e", "model_ref": "paddleocr-vl-1.5@fake-1",
+                "prompt_ref": null, "params_hash": "abc", "started_at": "2026-11-25T19:49:54Z", "duration_ms": 6 } }
+          ]
+        }"#;
+        let page: ds_core::PageResult = serde_json::from_str(stored).expect("the served page result deserializes");
+        let from_stored = result_blocks(&page.blocks);
+
+        // The same two blocks as an in-process run would have produced.
+        let from_drafts = draft_blocks(&[
+            draft(BlockKind::Title, (0.1, 0.05, 0.9, 0.1), 0, BlockContent::Text { text: "Section 1: retrieval quality".into() }, "Section 1: retrieval quality"),
+            draft(BlockKind::Table, (0.1, 0.3, 0.9, 0.45), 1, BlockContent::Table { html: "<table><tr><td>Method</td></tr></table>".into() }, "Method"),
+        ]);
+
+        assert_eq!(from_stored.len(), 2);
+        for (a, b) in from_stored.iter().zip(from_drafts.iter()) {
+            assert_eq!(a.kind, b.kind);
+            assert_eq!(a.order, b.order);
+            assert_eq!(a.text, b.text);
+            assert_eq!(a.html, b.html, "table markup must survive both paths identically");
+            assert_eq!(a.latex, b.latex);
+            assert_eq!((a.bbox.x0, a.bbox.y0, a.bbox.x1, a.bbox.y1), (b.bbox.x0, b.bbox.y0, b.bbox.x1, b.bbox.y1));
+        }
+
+        // And the metrics agree, which is the property the suite actually depends on.
+        let gt = from_drafts.clone();
+        assert_eq!(labelled_metrics(&from_stored, &gt).tables, labelled_metrics(&from_drafts, &gt).tables);
     }
 
     /// `agreement` is a diagnostic and the reference DAG has none, because comparing it

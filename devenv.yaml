@@ -21,3 +21,4 @@ imports:
   - ./crates/ds-ingest
   - ./crates/ds-vectors
   - ./crates/ds-suite
+  - ./crates/ds-itest

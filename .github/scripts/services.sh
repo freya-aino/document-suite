@@ -26,6 +26,14 @@ QDRANT_GRPC="${QDRANT_GRPC:-6334}"
 S3_PORT="${S3_PORT:-3900}"
 KEYCLOAK_PORT="${KEYCLOAK_PORT:-8081}" # 8080 is ds-api's own default
 
+# Optional: a docker network to attach these three to, as well as publishing their ports.
+#
+# `deploy/compose` sets it so the suite's own containers can reach them by service name
+# (`qdrant`, `garage`, `keycloak`) while the host-side test driver keeps using the
+# published localhost ports. Unset, nothing changes and this script behaves exactly as
+# CI has always run it.
+NETWORK="${NETWORK:-}"
+
 # Resolved from this script rather than the working directory: the realm file is mounted
 # into the container, so a relative path would depend on where this was run from.
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -54,8 +62,14 @@ mkdir -p "$work"
 
 run() {
   local name="$1"; shift
+  local net=()
+  # The alias is the name without the prefix, so a container called `ds-ci-qdrant`
+  # answers to `qdrant` inside the network whatever the prefix is.
+  if [ -n "$NETWORK" ]; then
+    net=(--network "$NETWORK" --network-alias "${name#"$PREFIX"-}")
+  fi
   docker rm -f "$name" >/dev/null 2>&1 || true
-  docker run -d --name "$name" "$@" >/dev/null
+  docker run -d --name "$name" "${net[@]+"${net[@]}"}" "$@" >/dev/null
 }
 
 # Waits for a TCP port to accept a connection. Bash's /dev/tcp rather than nc, which is
@@ -150,8 +164,25 @@ echo "::group::Keycloak"
 # this is not optional for the integration tests. The realm is the development one in
 # deploy/keycloak (a client with an audience mapper, the organization claim and the
 # ds-admin role); `start-dev` keeps it in memory, which is all a one-job realm needs.
+# In network mode the issuer has to be pinned, and this is the one subtle thing in this
+# script. Keycloak derives `iss` from the request it answered, so a token fetched by the
+# host over the published port would be stamped `http://127.0.0.1:8081/realms/koki`
+# while a service inside the network is configured for `http://keycloak:8080/realms/koki`
+# — and `ds-api` would reject every token with a wrong-issuer error that looks like a
+# key problem. Pinning the frontend URL makes `iss` the in-network one regardless of how
+# the token was asked for, so the host can mint tokens the containers accept.
+#
+# Only in network mode: with the frontend URL pinned, the discovery document advertises
+# `keycloak:8080`, which a host-side client cannot resolve — and that is exactly what
+# `ds-api`'s own `a_token_from_the_development_realm_verifies` does over the published
+# port in the normal CI path.
+kc_hostname=()
+if [ -n "$NETWORK" ]; then
+  kc_hostname=(-e KC_HOSTNAME=http://keycloak:8080 -e KC_HOSTNAME_STRICT=false)
+fi
 run "$PREFIX-keycloak" \
   -p "127.0.0.1:$KEYCLOAK_PORT:8080" \
+  "${kc_hostname[@]+"${kc_hostname[@]}"}" \
   -e KC_BOOTSTRAP_ADMIN_USERNAME=admin \
   -e KC_BOOTSTRAP_ADMIN_PASSWORD=admin \
   -v "$ROOT/deploy/keycloak/realm-dev.json:/opt/keycloak/data/import/realm-dev.json:ro" \

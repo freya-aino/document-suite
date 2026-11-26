@@ -1,0 +1,925 @@
+{
+  "max_candidates": 600,
+  "templates": [
+    {
+      "id": "e2e",
+      "description": "One end-to-end document VLM call per page.",
+      "slots": {
+        "model": [
+          "paddleocr-vl-1.5",
+          "mineru-2.5"
+        ]
+      },
+      "dag": {
+        "output": "parse",
+        "nodes": [
+          {
+            "id": "parse",
+            "step": "page.parse_e2e",
+            "inputs": [
+              "$page_image"
+            ],
+            "params": {
+              "model": "{model}"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "e2e-cross-checked",
+      "description": "Two end-to-end parsers on the same page; the merged set is re-scored by how far the second reading corroborates it. Doubles the per-page model cost, which is exactly why it is scored rather than assumed.",
+      "slots": {
+        "primary": [
+          "paddleocr-vl-1.5"
+        ],
+        "second": [
+          "mineru-2.5"
+        ],
+        "weight": [
+          0.25,
+          0.5
+        ]
+      },
+      "dag": {
+        "output": "verify",
+        "nodes": [
+          {
+            "id": "primary",
+            "step": "page.parse_e2e",
+            "inputs": [
+              "$page_image"
+            ],
+            "params": {
+              "model": "{primary}"
+            }
+          },
+          {
+            "id": "second",
+            "step": "page.parse_e2e",
+            "inputs": [
+              "$page_image"
+            ],
+            "params": {
+              "model": "{second}"
+            }
+          },
+          {
+            "id": "merge",
+            "step": "blocks.merge",
+            "inputs": [
+              "primary",
+              "second"
+            ]
+          },
+          {
+            "id": "verify",
+            "step": "blocks.verify",
+            "inputs": [
+              "merge",
+              "second"
+            ],
+            "params": {
+              "weight": "{weight}"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "native-layout-tables",
+      "description": "Born-digital pages: native text layer + layout model; tables via a doc VLM, no OCR.",
+      "slots": {
+        "layout_model": [
+          "mineru-2.5"
+        ],
+        "table_model": [
+          "paddleocr-vl-1.5",
+          "mineru-2.5"
+        ]
+      },
+      "dag": {
+        "output": "merge",
+        "nodes": [
+          {
+            "id": "layout",
+            "step": "layout.detect",
+            "inputs": [
+              "$page_image"
+            ],
+            "params": {
+              "model": "{layout_model}"
+            }
+          },
+          {
+            "id": "tables",
+            "step": "table.recognize",
+            "inputs": [
+              "$page_image",
+              "layout"
+            ],
+            "params": {
+              "model": "{table_model}"
+            },
+            "optional": true
+          },
+          {
+            "id": "merge",
+            "step": "blocks.merge_native",
+            "inputs": [
+              "$text_layer",
+              "layout",
+              "tables"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "layout-region-ocr",
+      "description": "Scans: layout model, then per-region OCR.",
+      "slots": {
+        "layout_model": [
+          "mineru-2.5"
+        ],
+        "ocr_model": [
+          "paddleocr-vl-1.5"
+        ]
+      },
+      "dag": {
+        "output": "text",
+        "nodes": [
+          {
+            "id": "layout",
+            "step": "layout.detect",
+            "inputs": [
+              "$page_image"
+            ],
+            "params": {
+              "model": "{layout_model}"
+            }
+          },
+          {
+            "id": "text",
+            "step": "region.ocr",
+            "inputs": [
+              "$page_image",
+              "layout"
+            ],
+            "params": {
+              "model": "{ocr_model}"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "deskew-layout-region-ocr",
+      "description": "Scans, deskewed first: the same pipeline as layout-region-ocr with conditioning in front, so scoring shows whether straightening the page pays for itself.",
+      "slots": {
+        "layout_model": [
+          "mineru-2.5"
+        ],
+        "ocr_model": [
+          "paddleocr-vl-1.5"
+        ],
+        "min_apply_deg": [
+          0.2,
+          1.0
+        ]
+      },
+      "dag": {
+        "output": "text",
+        "nodes": [
+          {
+            "id": "straight",
+            "step": "page.deskew",
+            "inputs": [
+              "$page_image"
+            ],
+            "params": {
+              "max_deg": 5.0,
+              "min_apply_deg": "{min_apply_deg}"
+            }
+          },
+          {
+            "id": "layout",
+            "step": "layout.detect",
+            "inputs": [
+              "straight"
+            ],
+            "params": {
+              "model": "{layout_model}"
+            }
+          },
+          {
+            "id": "text",
+            "step": "region.ocr",
+            "inputs": [
+              "straight",
+              "layout"
+            ],
+            "params": {
+              "model": "{ocr_model}"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "oriented-e2e",
+      "description": "Scans and photographs that may be sideways or upside down: stand the page up, straighten it, then one end-to-end call. page.orient's quarter turn rests on a strong measurement and its 180 flip on a weak one, so min_asymmetry is a slot \u2014 a high value disables the flip, which is how scoring decides whether it earns its place on a given page class.",
+      "slots": {
+        "model": [
+          "paddleocr-vl-1.5",
+          "mineru-2.5"
+        ],
+        "min_asymmetry": [
+          0.02,
+          1.0
+        ]
+      },
+      "dag": {
+        "output": "parse",
+        "nodes": [
+          {
+            "id": "upright",
+            "step": "page.orient",
+            "inputs": [
+              "$page_image"
+            ],
+            "params": {
+              "axis_margin": 1.3,
+              "min_asymmetry": "{min_asymmetry}"
+            }
+          },
+          {
+            "id": "straight",
+            "step": "page.deskew",
+            "inputs": [
+              "upright"
+            ],
+            "params": {
+              "max_deg": 5.0,
+              "min_apply_deg": 0.2
+            }
+          },
+          {
+            "id": "parse",
+            "step": "page.parse_e2e",
+            "inputs": [
+              "straight"
+            ],
+            "params": {
+              "model": "{model}"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "conditioned-e2e",
+      "description": "Photographed or poor-quality scans: normalise contrast, optionally denoise, then one end-to-end call. Binarisation is NOT combined with the figure branch anywhere, because page.binarize outputs greyscale.",
+      "slots": {
+        "model": [
+          "paddleocr-vl-1.5",
+          "mineru-2.5"
+        ],
+        "radius": [
+          1,
+          2
+        ]
+      },
+      "dag": {
+        "output": "parse",
+        "nodes": [
+          {
+            "id": "clean",
+            "step": "page.denoise",
+            "inputs": [
+              "$page_image"
+            ],
+            "params": {
+              "radius": "{radius}"
+            }
+          },
+          {
+            "id": "even",
+            "step": "page.normalize",
+            "inputs": [
+              "clean"
+            ],
+            "params": {}
+          },
+          {
+            "id": "parse",
+            "step": "page.parse_e2e",
+            "inputs": [
+              "even"
+            ],
+            "params": {
+              "model": "{model}"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "binarized-region-ocr",
+      "description": "Faint or bleed-through scans: crop the scanner border, binarise, then per-region OCR. Whether binarisation helps is model-dependent, which is exactly what this template exists to measure. Binarisation is scored both ways: a global threshold is cheaper and an adaptive one (Sauvola) is the only one that survives a page lit from one side, so which wins is a property of the corpus rather than a thing to assume.",
+      "slots": {
+        "layout_model": [
+          "mineru-2.5"
+        ],
+        "ocr_model": [
+          "paddleocr-vl-1.5"
+        ],
+        "binarize_adaptive": [
+          false,
+          true
+        ]
+      },
+      "dag": {
+        "output": "text",
+        "nodes": [
+          {
+            "id": "trimmed",
+            "step": "page.crop_margins",
+            "inputs": [
+              "$page_image"
+            ],
+            "params": {}
+          },
+          {
+            "id": "bw",
+            "step": "page.binarize",
+            "inputs": [
+              "trimmed"
+            ],
+            "params": {
+              "adaptive": "{binarize_adaptive}"
+            }
+          },
+          {
+            "id": "layout",
+            "step": "layout.detect",
+            "inputs": [
+              "bw"
+            ],
+            "params": {
+              "model": "{layout_model}"
+            }
+          },
+          {
+            "id": "text",
+            "step": "region.ocr",
+            "inputs": [
+              "bw",
+              "layout"
+            ],
+            "params": {
+              "model": "{ocr_model}"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "e2e-plus-table-refine",
+      "description": "One end-to-end parse, with the tables read again by a table model over a detected layout. Tests whether a dedicated table head is worth a third model call on a page the parser already read, which is the question `teds` exists to answer.",
+      "slots": {
+        "model": [
+          "paddleocr-vl-1.5",
+          "mineru-2.5"
+        ],
+        "layout_model": [
+          "mineru-2.5"
+        ],
+        "table_model": [
+          "paddleocr-vl-1.5",
+          "mineru-2.5"
+        ]
+      },
+      "dag": {
+        "output": "merge",
+        "nodes": [
+          {
+            "id": "parse",
+            "step": "page.parse_e2e",
+            "inputs": [
+              "$page_image"
+            ],
+            "params": {
+              "model": "{model}"
+            }
+          },
+          {
+            "id": "layout",
+            "step": "layout.detect",
+            "inputs": [
+              "$page_image"
+            ],
+            "params": {
+              "model": "{layout_model}"
+            }
+          },
+          {
+            "id": "tables",
+            "step": "table.recognize",
+            "inputs": [
+              "$page_image",
+              "layout"
+            ],
+            "params": {
+              "model": "{table_model}"
+            }
+          },
+          {
+            "id": "merge",
+            "step": "blocks.merge",
+            "inputs": [
+              "parse",
+              "tables"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "native-first-vlm-fallback",
+      "description": "The text layer where there is one, a VLM's reading where there is not: `blocks.merge_native` takes the parser's blocks as the recognised set and fills the rest from the PDF's own spans. The natural competitor to the baseline's `born-digital-text`, which has no fallback at all.",
+      "slots": {
+        "model": [
+          "paddleocr-vl-1.5",
+          "mineru-2.5"
+        ],
+        "layout_model": [
+          "mineru-2.5"
+        ]
+      },
+      "dag": {
+        "output": "merge",
+        "nodes": [
+          {
+            "id": "layout",
+            "step": "layout.detect",
+            "inputs": [
+              "$page_image"
+            ],
+            "params": {
+              "model": "{layout_model}"
+            }
+          },
+          {
+            "id": "parse",
+            "step": "page.parse_e2e",
+            "inputs": [
+              "$page_image"
+            ],
+            "params": {
+              "model": "{model}"
+            }
+          },
+          {
+            "id": "merge",
+            "step": "blocks.merge_native",
+            "inputs": [
+              "$text_layer",
+              "layout",
+              "parse"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "orient-deskew-layout-region",
+      "description": "Right the page, straighten it, then detect and read. Measurable only on a corpus that contains crooked pages \u2014 `ds-adapt dataset --rotate` is what puts them there.",
+      "slots": {
+        "layout_model": [
+          "mineru-2.5"
+        ],
+        "ocr_model": [
+          "paddleocr-vl-1.5"
+        ],
+        "min_asymmetry": [
+          0.02,
+          1.0
+        ]
+      },
+      "dag": {
+        "output": "text",
+        "nodes": [
+          {
+            "id": "upright",
+            "step": "page.orient",
+            "inputs": [
+              "$page_image"
+            ],
+            "params": {
+              "axis_margin": 1.3,
+              "min_asymmetry": "{min_asymmetry}"
+            }
+          },
+          {
+            "id": "straight",
+            "step": "page.deskew",
+            "inputs": [
+              "upright"
+            ],
+            "params": {
+              "max_deg": 5.0,
+              "min_apply_deg": 0.2
+            }
+          },
+          {
+            "id": "layout",
+            "step": "layout.detect",
+            "inputs": [
+              "straight"
+            ],
+            "params": {
+              "model": "{layout_model}"
+            }
+          },
+          {
+            "id": "text",
+            "step": "region.ocr",
+            "inputs": [
+              "straight",
+              "layout"
+            ],
+            "params": {
+              "model": "{ocr_model}"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "crop-binarize-e2e",
+      "description": "Trim the margins, threshold, parse. The cheapest conditioning chain there is, and the one a scan is most likely to need.",
+      "slots": {
+        "model": [
+          "paddleocr-vl-1.5",
+          "mineru-2.5"
+        ],
+        "binarize_adaptive": [
+          false,
+          true
+        ]
+      },
+      "dag": {
+        "output": "parse",
+        "nodes": [
+          {
+            "id": "trimmed",
+            "step": "page.crop_margins",
+            "inputs": [
+              "$page_image"
+            ],
+            "params": {}
+          },
+          {
+            "id": "bw",
+            "step": "page.binarize",
+            "inputs": [
+              "trimmed"
+            ],
+            "params": {
+              "adaptive": "{binarize_adaptive}"
+            }
+          },
+          {
+            "id": "parse",
+            "step": "page.parse_e2e",
+            "inputs": [
+              "bw"
+            ],
+            "params": {
+              "model": "{model}"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "figure-chart-pipeline",
+      "description": "Detect the layout, cut the figures out at a finer render, and describe them \u2014 charts turned back into tables rather than described in prose. The only shape in the space that reads a figure as anything but a box.",
+      "slots": {
+        "layout_model": [
+          "mineru-2.5"
+        ],
+        "ocr_model": [
+          "paddleocr-vl-1.5"
+        ],
+        "figure_model": [
+          "qwen3-vl"
+        ],
+        "crop_dpi": [
+          200,
+          300
+        ]
+      },
+      "dag": {
+        "output": "merge",
+        "nodes": [
+          {
+            "id": "layout",
+            "step": "layout.detect",
+            "inputs": [
+              "$page_image"
+            ],
+            "params": {
+              "model": "{layout_model}"
+            }
+          },
+          {
+            "id": "text",
+            "step": "region.ocr",
+            "inputs": [
+              "$page_image",
+              "layout"
+            ],
+            "params": {
+              "model": "{ocr_model}"
+            }
+          },
+          {
+            "id": "crops",
+            "step": "figure.crop",
+            "inputs": [
+              "$page_image",
+              "layout"
+            ],
+            "params": {
+              "padding": 0.02,
+              "crop_dpi": "{crop_dpi}"
+            }
+          },
+          {
+            "id": "figures",
+            "step": "chart.to_table",
+            "inputs": [
+              "crops"
+            ],
+            "params": {
+              "model": "{figure_model}"
+            }
+          },
+          {
+            "id": "merge",
+            "step": "blocks.merge",
+            "inputs": [
+              "text",
+              "figures"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "verify-two-model",
+      "description": "Two parsers, and the second one only ever re-scores the first \u2014 membership is the primary's alone. The ablation partner of `e2e-cross-checked`: same two model calls, same inputs, no merge, so the difference between the two reports what the merge is worth.",
+      "slots": {
+        "primary": [
+          "paddleocr-vl-1.5"
+        ],
+        "second": [
+          "mineru-2.5"
+        ],
+        "weight": [
+          0.25,
+          0.5
+        ],
+        "kind_mismatch": [
+          0.0,
+          0.5
+        ]
+      },
+      "dag": {
+        "output": "verify",
+        "nodes": [
+          {
+            "id": "primary",
+            "step": "page.parse_e2e",
+            "inputs": [
+              "$page_image"
+            ],
+            "params": {
+              "model": "{primary}"
+            }
+          },
+          {
+            "id": "second",
+            "step": "page.parse_e2e",
+            "inputs": [
+              "$page_image"
+            ],
+            "params": {
+              "model": "{second}"
+            }
+          },
+          {
+            "id": "verify",
+            "step": "blocks.verify",
+            "inputs": [
+              "primary",
+              "second"
+            ],
+            "params": {
+              "weight": "{weight}",
+              "kind_mismatch": "{kind_mismatch}"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "vote-three-readings",
+      "description": "Three independent readings of the page \u2014 two end-to-end parsers and a layout-plus-OCR pass \u2014 reconciled by majority. Three model calls, so it had better earn them; it is the only shape that can keep a block the primary parser missed.",
+      "slots": {
+        "primary": [
+          "paddleocr-vl-1.5"
+        ],
+        "second": [
+          "mineru-2.5"
+        ],
+        "layout_model": [
+          "mineru-2.5"
+        ],
+        "ocr_model": [
+          "paddleocr-vl-1.5"
+        ],
+        "min_votes": [
+          2
+        ]
+      },
+      "dag": {
+        "output": "vote",
+        "nodes": [
+          {
+            "id": "primary",
+            "step": "page.parse_e2e",
+            "inputs": [
+              "$page_image"
+            ],
+            "params": {
+              "model": "{primary}"
+            }
+          },
+          {
+            "id": "second",
+            "step": "page.parse_e2e",
+            "inputs": [
+              "$page_image"
+            ],
+            "params": {
+              "model": "{second}"
+            }
+          },
+          {
+            "id": "layout",
+            "step": "layout.detect",
+            "inputs": [
+              "$page_image"
+            ],
+            "params": {
+              "model": "{layout_model}"
+            }
+          },
+          {
+            "id": "third",
+            "step": "region.ocr",
+            "inputs": [
+              "$page_image",
+              "layout"
+            ],
+            "params": {
+              "model": "{ocr_model}"
+            }
+          },
+          {
+            "id": "vote",
+            "step": "blocks.vote",
+            "inputs": [
+              "primary",
+              "second",
+              "third"
+            ],
+            "params": {
+              "min_votes": "{min_votes}",
+              "iou": 0.5
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "reordered-e2e",
+      "description": "An end-to-end parse with the reading order recomputed from the geometry. The ablation partner of `e2e` on exactly one metric: membership, boxes and text are identical, so any change in order tau is this node's.",
+      "slots": {
+        "model": [
+          "paddleocr-vl-1.5",
+          "mineru-2.5"
+        ],
+        "full_width": [
+          0.6,
+          0.8
+        ]
+      },
+      "dag": {
+        "output": "order",
+        "nodes": [
+          {
+            "id": "parse",
+            "step": "page.parse_e2e",
+            "inputs": [
+              "$page_image"
+            ],
+            "params": {
+              "model": "{model}"
+            }
+          },
+          {
+            "id": "order",
+            "step": "blocks.reorder",
+            "inputs": [
+              "parse"
+            ],
+            "params": {
+              "full_width": "{full_width}",
+              "gutter": 0.02
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "layout-merge-self-consistent",
+      "description": "Two samples of the layout detector unioned, then one OCR pass over the union. Self-consistency rather than two different detectors, because `layout` is a task only one model in the registry declares \u2014 the slots are separate so that the day a second one is declared this becomes the two-detector shape with no change here. One parse instead of two, and a region either sample missed still gets read.",
+      "slots": {
+        "layout_a": [
+          "mineru-2.5"
+        ],
+        "layout_b": [
+          "mineru-2.5"
+        ],
+        "ocr_model": [
+          "paddleocr-vl-1.5"
+        ],
+        "iou": [
+          0.4,
+          0.6
+        ]
+      },
+      "dag": {
+        "output": "text",
+        "nodes": [
+          {
+            "id": "layout_a",
+            "step": "layout.detect",
+            "inputs": [
+              "$page_image"
+            ],
+            "params": {
+              "model": "{layout_a}"
+            }
+          },
+          {
+            "id": "layout_b",
+            "step": "layout.detect",
+            "inputs": [
+              "$page_image"
+            ],
+            "params": {
+              "model": "{layout_b}"
+            }
+          },
+          {
+            "id": "layout",
+            "step": "layout.merge",
+            "inputs": [
+              "layout_a",
+              "layout_b"
+            ],
+            "params": {
+              "iou": "{iou}"
+            }
+          },
+          {
+            "id": "text",
+            "step": "region.ocr",
+            "inputs": [
+              "$page_image",
+              "layout"
+            ],
+            "params": {
+              "model": "{ocr_model}"
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

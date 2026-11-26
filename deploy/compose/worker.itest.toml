@@ -1,0 +1,83 @@
+# Integration-suite config: the compose stack in this directory.
+#
+# `deploy/docker/worker.toml`, baked into the image, deliberately omits [blob],
+# [postgres] and [qdrant] so a misconfigured container stops at startup instead of
+# coming up pointed at nothing. This file is what supplies them, mounted over it. Hosts
+# are compose service names; the model registry is the tier's, mounted separately.
+#
+# `crates/ds-infra/src/config.rs` loads this in its `example_configs_parse` test, so a
+# key that stops parsing fails a unit test rather than a container.
+
+[blob]
+bucket = "document-suite"
+endpoint = "http://garage:3900"
+region = "garage"
+
+[postgres]
+url = "postgres://ds_app@postgres:5432/document_suite"   # password: DS__POSTGRES__PASSWORD
+max_connections = 8
+
+[qdrant]
+url = "http://qdrant:6334"                               # gRPC; 6333 is REST and will not work
+# Overridden per run with DS__QDRANT__COLLECTION_PREFIX, so a failed run cannot poison
+# the next one — the same convention `crates/ds-vectors/tests/qdrant.rs` uses.
+collection_prefix = "itest"
+
+[models]
+registry = "/etc/ds/models.toml"
+
+[worker]
+# One document and one page at a time. The latency pass needs queueing *outside* the
+# measurement, and a suite that measures contention on a shared CI runner measures the
+# runner. Throughput at real concurrency is a separate, reported figure.
+max_documents = 1
+max_in_flight = 1
+interactive_share = 0.3
+render_dpi = 200
+page_attempts = 3
+max_failed_page_fraction = 0.0            # a failed page fails its document: the suite wants to know
+page_render_timeout_s = 120
+# Recovery on and fast, because the `replicas` profile exists to exercise it.
+lease_ttl_s = 60
+resume_interval_s = 15
+
+[api]
+max_upload_bytes = 268435456              # 256 MiB is far above the generated corpus
+interactive_max_pending = 1000
+# `private` and not `organization`: the suite asserts the refusal, the grant and the
+# revocation, so it needs the visibility the API actually ships with.
+default_visibility = "private"
+tenant_rate_per_s = 0                     # the corpus is uploaded in a tight loop
+
+[auth]
+issuer = "http://keycloak:8080/realms/koki"
+audience = ["ds-api"]
+client_id = "ds-api"
+org_claim = "organization"
+admin_role = "ds-admin"
+
+[classify]
+born_digital_min_chars = 50
+born_digital_min_coverage = 0.8
+trust_ocr_layer = false
+skip_vision_for_text_only_digital = true
+
+[stage2]
+extraction_model = "extract-llm"
+verify_model = "extract-llm"
+embedding_model = "embed-text"
+classifier_model = "page-classifier"
+window_chars = 12000
+type_match_threshold = 0.85
+link_threshold = 0.92
+judge_band = [0.80, 0.92]
+embed_batch_size = 0
+dag_list_refresh_s = 5                    # the suite activates a list and expects it to take effect
+
+[telemetry]
+# An unauthenticated metrics port for the harness. `GET /metrics` on 8080 is behind the
+# admin role on purpose — it publishes request volumes and error rates to anyone who
+# asks — and this port is bound inside a compose network that is not published, so the
+# harness can scrape it without a token and without widening the real API.
+metrics_addr = "0.0.0.0:9464"
+json_logs = true

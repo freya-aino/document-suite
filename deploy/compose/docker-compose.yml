@@ -1,0 +1,150 @@
+# The suite, deployed, for the integration tests. `deploy/compose/README.md` is the
+# entry point; `stack.sh` is how you start it.
+#
+# This is the base: Postgres, the role, the migration, and `ds-suite` itself. The model
+# tier is a *tier overlay* chosen with `-f` — compose.fake.yml, compose.cpu.yml or
+# compose.gpu.yml — because `include:` would pull in every service of an included file
+# unconditionally and cannot put a profile on them, so `deploy/gpu/docker-compose.yml`
+# cannot be gated from here. Real compose profiles are kept for genuine extras: `mcp`,
+# `replicas`.
+#
+# Qdrant, Garage and Keycloak are deliberately NOT defined here. They need several setup
+# commands after they are up (Garage's layout and keys, Keycloak's realm import), and
+# `.github/scripts/services.sh` already does all of it and is shellcheck-linted in CI.
+# `stack.sh` runs that script with NETWORK set so those three join this network under
+# the aliases `qdrant`, `garage` and `keycloak`. One definition, two callers.
+
+name: ds-itest
+
+networks:
+  default:
+    name: ${DS_ITEST_NETWORK:-ds-itest}
+    external: true
+
+services:
+  # ── Postgres ──
+  #
+  # Identical image and credentials to the `services:` container in
+  # .github/workflows/ci.yml, so the compose path and the CI path cannot drift. `ds` is
+  # the schema owner and has CREATEDB, which `sqlx::test` needs.
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: ds
+      POSTGRES_PASSWORD: ds
+      POSTGRES_DB: document_suite
+    ports: ["127.0.0.1:${DS_ITEST_PG_PORT:-57432}:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ds -d document_suite"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  # ── the runtime role ──
+  #
+  # A one-shot, because migration 0003 refuses to run without it. The SQL is shared with
+  # CI rather than inlined twice.
+  pg-role:
+    image: postgres:17-alpine
+    depends_on:
+      postgres: {condition: service_healthy}
+    environment:
+      PGPASSWORD: ds
+    volumes:
+      - ./sql/ds-app-role.sql:/sql/ds-app-role.sql:ro
+    command: ["psql", "-h", "postgres", "-U", "ds", "-d", "document_suite", "-v", "ON_ERROR_STOP=1", "-f", "/sql/ds-app-role.sql"]
+    restart: "no"
+
+  # ── migrations ──
+  #
+  # A deploy step and not a boot step: `ds-suite migrate` runs as the schema **owner**,
+  # while the service runs as `ds_app`. The service's own startup calls
+  # `ds_vault::check_migrations` and refuses to come up if this was skipped, so a missing
+  # migration is a loud failure rather than a strange one.
+  migrate:
+    image: document-suite:itest
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    depends_on:
+      postgres: {condition: service_healthy}
+      pg-role: {condition: service_completed_successfully}
+    environment:
+      DATABASE_URL: postgres://ds:ds@postgres:5432/document_suite
+    command: ["migrate"]
+    restart: "no"
+
+  # ── the service ──
+  ds-suite:
+    image: document-suite:itest
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+    ports:
+      - "127.0.0.1:${DS_ITEST_API_PORT:-57080}:8080"
+      # The unauthenticated metrics port from worker.itest.toml. `GET /metrics` on 8080
+      # is behind the admin role on purpose; this one exists so the harness can scrape
+      # histograms without a token, and it is published to localhost only.
+      - "127.0.0.1:${DS_ITEST_METRICS_PORT:-57464}:9464"
+    volumes:
+      - ./worker.itest.toml:/etc/ds/worker.toml:ro
+      - ${DS_ITEST_MODELS:-./models/fake.toml}:/etc/ds/models.toml:ro
+    environment:
+      DS__POSTGRES__PASSWORD: ds_app
+      # Per-run, so a failed run cannot poison the next: the convention
+      # crates/ds-vectors/tests/qdrant.rs already uses.
+      DS__QDRANT__COLLECTION_PREFIX: ${DS_ITEST_PREFIX:-itest}
+      AWS_ENDPOINT: http://garage:3900
+      AWS_REGION: garage
+      AWS_ALLOW_HTTP: "true"
+      AWS_ACCESS_KEY_ID: GK0123456789abcdef01234567
+      AWS_SECRET_ACCESS_KEY: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+      # Each copy's lease holder id must be distinct, or lease recovery silently does
+      # nothing — which is the whole point of the `replicas` profile below.
+      DS_HOLDER_ID: ds-suite-1
+      RUST_LOG: ${DS_ITEST_LOG:-info,ds_worker=debug}
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:8080/readyz || exit 1"]
+      interval: 3s
+      timeout: 5s
+      retries: 40
+      start_period: 20s
+
+  # ── a second copy, for leases and resume ──
+  ds-suite-2:
+    profiles: ["replicas"]
+    image: document-suite:itest
+    depends_on:
+      ds-suite: {condition: service_healthy}
+    volumes:
+      - ./worker.itest.toml:/etc/ds/worker.toml:ro
+      - ${DS_ITEST_MODELS:-./models/fake.toml}:/etc/ds/models.toml:ro
+    environment:
+      DS__POSTGRES__PASSWORD: ds_app
+      DS__QDRANT__COLLECTION_PREFIX: ${DS_ITEST_PREFIX:-itest}
+      AWS_ENDPOINT: http://garage:3900
+      AWS_REGION: garage
+      AWS_ALLOW_HTTP: "true"
+      AWS_ACCESS_KEY_ID: GK0123456789abcdef01234567
+      AWS_SECRET_ACCESS_KEY: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+      DS_HOLDER_ID: ds-suite-2
+      RUST_LOG: ${DS_ITEST_LOG:-info,ds_worker=debug}
+
+  # ── the LLM tool service, optional ──
+  #
+  # It holds no credentials and forwards the caller's own bearer token (D16), so there is
+  # nothing to configure here but where the API is.
+  ds-mcp:
+    profiles: ["mcp"]
+    image: document-suite-mcp:itest
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.mcp
+    depends_on:
+      ds-suite: {condition: service_healthy}
+    ports: ["127.0.0.1:${DS_ITEST_MCP_PORT:-57082}:8081"]
+    environment:
+      DS_API_URL: http://ds-suite:8080
+      RUST_LOG: ${DS_ITEST_LOG:-info}

@@ -1,0 +1,19 @@
+{
+  "probe": {
+    "cpu_model": "13th Gen Intel(R) Core(TM) i5-1334U",
+    "cores": 12,
+    "tier": "fake",
+    "cpu_ms": 16.657058999999997,
+    "api_ms": 1.1469989999999999
+  },
+  "stage_p50_ms": {
+    "doc": 73.17073170731709,
+    "ingest": 131.57894736842104,
+    "page": 55.55555555555556
+  },
+  "document_p50_ms": 147.0,
+  "document_p95_ms": 171.0,
+  "model_p50_ms": 5.0,
+  "model_share": 0.035905463851109494,
+  "documents": 10
+}

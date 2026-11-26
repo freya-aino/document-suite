@@ -1,0 +1,31 @@
+[package]
+name = "ds-itest"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "The integration suite: the deployed system driven over its public API."
+
+# A crate of its own rather than a test target in `ds-suite`. Two reasons: a harness in
+# `ds-suite` would pull reqwest and the scoring machinery into the deliverable's
+# dev-dependencies, and — the real one — it would sit next to a test that already drives
+# the pipeline in process, which is exactly the shortcut this suite exists not to take.
+[dependencies]
+anyhow.workspace = true
+ds-adapt.workspace = true
+# The API's own response types, rather than mirrors of them: a mirror compiles for ever
+# while disagreeing with the wire format. `ds-vault` for the summaries `ds-api` serves
+# verbatim.
+ds-api.workspace = true
+ds-core.workspace = true
+ds-vault.workspace = true
+# `multipart` on top of the workspace's features: an upload is multipart/form-data, and
+# this is the only crate that sends one.
+reqwest = { workspace = true, features = ["multipart"] }
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+ds-router.workspace = true

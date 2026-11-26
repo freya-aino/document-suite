@@ -1,0 +1,33 @@
+# Tier `fake`: one `ds-fake-models` container answering on all six registry hostnames.
+#
+# This is the tier every pull request runs, and it measures **functionality, not
+# fidelity**. The answers are ours, so a quality threshold against them would be a
+# measurement of the fake. Extraction fidelity is measured on the `gpu` tier only.
+#
+# One container with six network aliases rather than six containers: the fake dispatches
+# on the request's `model` field, so the extra five would be idle copies.
+
+services:
+  fake-models:
+    image: document-suite-fakemodels:itest
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.fakemodels
+    networks:
+      default:
+        aliases:
+          - doc-parse
+          - layout
+          - vlm-general
+          - classifier
+          - llm-extract
+          - embed
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:8000/health || exit 1"]
+      interval: 2s
+      timeout: 5s
+      retries: 20
+
+  ds-suite:
+    depends_on:
+      fake-models: {condition: service_healthy}

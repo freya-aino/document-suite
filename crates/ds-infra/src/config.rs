@@ -574,6 +574,48 @@ mod tests {
         }
     }
 
+    /// The config the integration stack mounts over the image's own.
+    ///
+    /// Separate from the loop above because it deliberately differs: a shorter DAG-list
+    /// refresh, and one document at a time. Here so a key that stops parsing fails a
+    /// unit test rather than a container nobody is watching.
+    #[test]
+    fn the_integration_stack_config_parses() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../deploy/compose/worker.itest.toml");
+
+        // Two things, deliberately separated.
+        //
+        // First: it loads through the real entry point, overrides and all. That is what
+        // the container does, and a key that stops parsing must fail here.
+        Config::load(&path).unwrap_or_else(|e| panic!("worker.itest.toml does not load: {e}"));
+
+        // Second: what the *file* says. Asserted from a plain parse, because
+        // `Config::load` applies `DS__*` overrides from the ambient environment — and
+        // CI's own integration job exports `DS__QDRANT__URL`, `DS__POSTGRES__PASSWORD`
+        // and more. Asserting post-override values made this test pass locally and fail
+        // in exactly one place: the job whose environment it was meant to coexist with.
+        let text = std::fs::read_to_string(&path).expect("readable");
+        let cfg: Config = toml::from_str(&text).unwrap_or_else(|e| panic!("worker.itest.toml: {e}"));
+        // Hosts are compose service names, not localhost: the service reaches its
+        // dependencies inside the network.
+        assert_eq!(cfg.blob.endpoint.as_deref(), Some("http://garage:3900"));
+        assert_eq!(cfg.qdrant.url, "http://qdrant:6334");
+        assert!(cfg.postgres.url.contains("@postgres:5432"));
+        // The issuer is the in-network one. Keycloak stamps `iss` from the request it
+        // answered, so the stack pins its frontend URL to this value and the host-side
+        // driver's tokens are accepted here. A localhost issuer would make every
+        // request a wrong-issuer refusal.
+        let auth = cfg.auth.as_ref().expect("the API refuses to start without [auth]");
+        assert_eq!(auth.issuer, "http://keycloak:8080/realms/koki");
+        // One document and one page at a time, so queueing stays outside the latency
+        // measurement.
+        assert_eq!(cfg.worker.max_documents, 1);
+        assert_eq!(cfg.worker.max_in_flight, 1);
+        // An unauthenticated metrics port for the harness; /metrics on the API is behind
+        // the admin role on purpose.
+        assert_eq!(cfg.telemetry.metrics_addr.as_deref(), Some("0.0.0.0:9464"));
+    }
+
     #[test]
     fn stage2_defaults_when_section_missing() {
         let v: toml::Value = toml::from_str("x = 1\n").unwrap();
