@@ -79,14 +79,33 @@ serde naming rules are stated as rules rather than conventions.
 | `BBox` | `{x0, y0, x1, y1}` normalised floats |
 | `PageProfile` | Classifier output; input to the router |
 | `Block` | One layout region with kind, bbox, reading order, content, text, confidence, provenance |
-| `PageResult` | All blocks of one page from one run + the profile and DAG used |
+| `PageResult` | All blocks of one page from one run + the profile, the DAG used, and the node traces |
+| `NodeTrace` | One DAG node as it ran: step kind, model ref, duration, **executor level**, outcome |
 | `Provenance` | Who/what produced an output (see §5.1 of the system spec) |
 | `Evidence` | Span `(block_hk, char_start, char_end)` or region `(page_hk, bbox)` |
 | `JobSpec` | What the API accepts per document |
 
 ## Versioning
 
-`PageResult::SCHEMA_VERSION` starts at `1`. Readers must reject unknown major versions.
+`PageResult::SCHEMA_VERSION` is `2`. Readers must reject unknown major versions.
+
+Version 2 added `traces`, one entry per DAG node that ran. A block already carries the
+provenance of the node that *produced* it, which is enough to attribute a block and not
+enough to attribute a page's **time**: a node that produced no block — an optional node
+that failed, a page conditioner, a verify pass that only re-scored — left no record at
+all, and the executor's level structure was not recoverable from the blocks either. So
+"was that our code or the model" could be answered in process and not from a stored page.
+
+`ds_core::critical_path_ms` answers it: nodes sharing a `level` ran concurrently, so a
+level costs its slowest node and the page's critical path is the sum over levels, split
+into `(host_ms, model_ms)` by whether the node named a model. A level holding both is
+charged to whichever was slower, which under-counts the other side rather than
+over-counting the total — `host_ms + model_ms <= latency_ms` always, and the remainder is
+the executor's own overhead, which is worth seeing.
+
+The bump is additive and `traces` is `#[serde(default)]`, so a stored version 1 page still
+deserialises, with no traces. `PageResult::critical_path_ms` returns `None` for one rather
+than zero: an absent measurement is not a measurement of zero.
 
 ## Tests
 

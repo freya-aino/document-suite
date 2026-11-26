@@ -125,6 +125,10 @@ impl PageHandler {
         let text_layer_spans = text_layer.spans.clone();
         let out = Executor::new(&self.steps).run(sel.dag, &ctx, image, Artifact::TextLayer(text_layer)).await.map_err(exec_error)?;
 
+        // Taken before the drafts are consumed. Every node that ran, including the ones
+        // that produced no block — which are exactly the ones a block's own provenance
+        // cannot account for.
+        let traces: Vec<ds_core::NodeTrace> = out.traces.iter().map(Into::into).collect();
         let mut blocks = drafts_to_blocks(out, &ctx.page_hk, &t.run_id);
         // Heading levels from the type sizes in the text layer, for the headings no model
         // gave a level and no numbering could supply one. Done here because this is where
@@ -138,7 +142,7 @@ impl PageHandler {
             tracing::debug!(page = t.page_no, headings = levelled, "heading levels taken from type size");
         }
         upload_crops(self.blob.as_ref(), &mut blocks, &image_bytes, &ctx.page_hk, &t.run_id).await?;
-        let result = page_result(t.document_hk.clone(), t.page_no, t.run_id, profile, dag_ref.clone(), width, height, blocks);
+        let result = page_result(t.document_hk.clone(), t.page_no, t.run_id, profile, dag_ref.clone(), width, height, blocks, traces);
         let body = serde_json::to_vec(&result)?;
         self.blob.put(&keys::page_result(doc, &t.run_id.to_string(), t.page_no), body.into(), "application/json").await?;
         self.vault.write_page(&result, rule_id.as_deref()).await?;
@@ -317,6 +321,7 @@ pub fn page_result(
     width: u32,
     height: u32,
     blocks: Vec<Block>,
+    traces: Vec<ds_core::NodeTrace>,
 ) -> PageResult {
     PageResult {
         schema_version: PageResult::SCHEMA_VERSION,
@@ -329,6 +334,7 @@ pub fn page_result(
         profile,
         dag_ref,
         blocks,
+        traces,
     }
 }
 
@@ -438,6 +444,7 @@ mod tests {
             traces: vec![NodeTrace {
                 node_id: "parse".into(),
                 provenance: prov,
+                level: 0,
                 outcome: NodeOutcome::Ok,
                 metrics: Default::default(),
             }],

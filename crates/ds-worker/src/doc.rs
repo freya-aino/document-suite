@@ -433,6 +433,8 @@ mod tests {
         let page_hk = HashKey::page(doc, page_no);
         PageResult {
             schema_version: 1,
+            // Version 1: no traces, which is the case the default exists for.
+            traces: Vec::new(),
             document_hk: doc.clone(),
             page_hk: page_hk.clone(),
             page_no,

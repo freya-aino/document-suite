@@ -22,6 +22,9 @@ pub enum NodeOutcome {
 pub struct NodeTrace {
     pub node_id: String,
     pub provenance: Provenance,
+    /// Zero-based executor level. Nodes of one level ran concurrently, which is the fact
+    /// a critical path needs and which nothing downstream can recover from the timings.
+    pub level: u32,
     pub outcome: NodeOutcome,
     /// What the step reported about how it ran: `StepOutput::metrics`. Empty for a step
     /// that reported nothing, and for a node that failed or was skipped.
@@ -71,7 +74,8 @@ impl<'a> Executor<'a> {
         let mut traces = Vec::new();
         let dag_ref = dag.reference();
 
-        for level in levels {
+        for (level_no, level) in levels.into_iter().enumerate() {
+            let level_no = level_no as u32;
             let futs = level.iter().map(|&i| {
                 let node = &dag.nodes[i];
                 let step = self.registry.get(&node.step).expect("validated");
@@ -129,6 +133,7 @@ impl<'a> Executor<'a> {
                         traces.push(NodeTrace {
                             node_id: node.id.clone(),
                             provenance: prov,
+                            level: level_no,
                             outcome: NodeOutcome::Ok,
                             metrics: out.metrics,
                         });
@@ -150,6 +155,7 @@ impl<'a> Executor<'a> {
                         traces.push(NodeTrace {
                             node_id: node.id.clone(),
                             provenance: prov,
+                            level: level_no,
                             outcome: NodeOutcome::SkippedAfterError(failure.to_string()),
                             // A node that did not produce an artifact reported nothing
                             // about how it produced one.
@@ -191,4 +197,24 @@ fn step_error_reason(e: &StepError) -> &'static str {
 pub fn params_hash(params: &serde_json::Value) -> String {
     let s = serde_json::to_string(params).unwrap_or_default();
     hex::encode(&Sha256::digest(s.as_bytes())[..8])
+}
+
+impl From<&NodeTrace> for ds_core::NodeTrace {
+    /// One conversion, so the stored page's trace and the executor's cannot disagree
+    /// about what a node did.
+    fn from(t: &NodeTrace) -> Self {
+        ds_core::NodeTrace {
+            node_id: t.node_id.clone(),
+            step_kind: t.provenance.step_kind.clone(),
+            model_ref: t.provenance.model_ref.clone(),
+            prompt_ref: t.provenance.prompt_ref.clone(),
+            duration_ms: t.provenance.duration_ms,
+            level: t.level,
+            outcome: match &t.outcome {
+                NodeOutcome::Ok => "ok".into(),
+                NodeOutcome::SkippedAfterError(_) => "skipped_after_error".into(),
+            },
+            metrics: t.metrics.clone(),
+        }
+    }
 }

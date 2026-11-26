@@ -136,6 +136,7 @@ async fn write_page_stores_blocks_with_lineage(pool: PgPool) {
     let page_hk = HashKey::page(&m.document_hk, 1);
     let page = PageResult {
         schema_version: PageResult::SCHEMA_VERSION,
+        traces: Vec::new(),
         document_hk: m.document_hk.clone(),
         page_hk: page_hk.clone(),
         page_no: 1,
@@ -320,6 +321,7 @@ fn page_result(m: &DocumentMeta, r: &RunMeta) -> PageResult {
     let page_hk = HashKey::page(&m.document_hk, 1);
     PageResult {
         schema_version: PageResult::SCHEMA_VERSION,
+        traces: Vec::new(),
         document_hk: m.document_hk.clone(),
         page_hk: page_hk.clone(),
         page_no: 1,

@@ -7,7 +7,7 @@ pub mod job;
 pub mod page;
 pub mod provenance;
 
-pub use block::{Block, BlockContent, BlockKind, PageResult};
+pub use block::{critical_path_ms, Block, BlockContent, BlockKind, NodeTrace, PageResult};
 pub use geometry::BBox;
 pub use ids::{content_sha256, split_ref, HashKey, LanguageTag, RunId, TenantId};
 pub use job::{JobSpec, JobState, Owner, Priority, Profile, Task};

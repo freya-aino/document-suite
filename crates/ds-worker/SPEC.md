@@ -147,10 +147,21 @@ profile  = tier0 rules; + VlmPageClassifier(thumbnail) when stage2.classifier_mo
 sel      = router.select(profile, spec.profile)
 out      = Executor::run(sel.dag, StepContext{..}, page_image, text_layer)
 blocks   = drafts_to_blocks(out)                  (index, block_hk, provenance by node)
+traces   = out.traces                            (every node, with its executor level)
 write PageResult → blob results/<doc>/<run>/page-<n>.json; VaultWriter::write_page(result, rule_id)
 ops.page_finished(job_id, page_no, Done, dag_ref, rule_id)   (status + the doc stage's
                                                               failure threshold)
 ```
+
+`PageResult` is at **schema version 2**: version 2 added `traces`, one entry per node that
+ran, carrying its duration and its executor level. A block already records the node that
+produced it, which is enough to attribute a block and not enough to attribute a page's
+*time*: a node that produced no block — an optional node that failed, a page conditioner,
+a verify pass that only re-scored — left no record at all, and the executor's levels were
+not recoverable from the blocks either. So "was that our code or the model" could be
+answered in process and not from a stored page. `ds_core::critical_path_ms` answers it
+from the traces now, and `traces` is `#[serde(default)]`, so a stored version 1 page still
+reads — with no timings, which is the truth about it.
 
 Stage 2 is idempotent per run, so running it twice for the same run writes nothing new.
 

@@ -122,8 +122,14 @@ earlier levels). Nodes in one level run concurrently.
 - Failure of a non-optional node fails the page with `ExecError::Node { node_id, .. }`.
   Retrying is the worker's job (whole page), not the executor's.
 - Output: final `Vec<BlockDraft>` plus a `NodeTrace` per node (provenance, duration,
-  outcome, and whatever the step reported in `metrics`). The worker turns drafts into
-  `ds_core::Block` with hash keys.
+  **its level**, outcome, and whatever the step reported in `metrics`). The worker turns
+  drafts into `ds_core::Block` with hash keys and the traces into `ds_core::NodeTrace` on
+  the stored `PageResult`.
+  The level is recorded because the timings alone cannot say which nodes waited at the
+  same time: a page's critical path is the sum over levels of the slowest node in each,
+  and `ds_core::critical_path_ms` uses it to split a page into host and model time. Two
+  model calls side by side are one call's wait, and summing them would make a parallel
+  two-parser DAG look twice as slow as it is.
 - Unused branches: nodes not on a path to `output` are skipped (pruned at validation).
 
 ## Step catalogue (v1 kinds)
