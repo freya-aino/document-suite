@@ -44,7 +44,10 @@ crates/
   ds-suite/   [bin] the service: the API, the stages and the sweeps          README
   ds-adapt/   [bin] workflow generation, scoring, selection, corpora        SPEC
   ds-mcp/     [bin] the LLM tool service: MCP tools over the HTTP API       SPEC
+  ds-testkit/ [bin] test doubles: the one fake model tier, shared          README
+  ds-itest/         the integration suite: the deployment, over its API      SPEC
 deploy/             embedding the suite in another deployment               README
+  compose/          the integration stack: the suite, deployed, over HTTP   README
   docker/           the service image (multi-stage, pinned pdfium)
   keycloak/         the development realm the suite verifies against         README
   firecracker/      microVM image, host agent, autoscaler                   SPEC + README
@@ -55,12 +58,14 @@ config/             example models, worker, DAG list, search space, LiteLLM
 
 ## Status
 
-All 18 crates compile together and the workspace is green: **448 tests pass with nothing
-running**, and **504 with the stack up** — the 56 extra touch a live Postgres, Qdrant,
-Garage or Keycloak, one of them takes a document through the whole pipeline into both
-stores, one asks the development realm for a token and verifies it, two take a generated
-corpus through the entire adaptation chain, and four drive the MCP tools against the real
-API router. `cargo clippy --workspace
+All 19 crates compile together and the workspace is green: **515 tests pass with nothing
+running**, and **580 with the stack up** — the 65 extra touch a live Postgres, Qdrant,
+Garage or Keycloak, or need pdfium: one takes a document through the whole pipeline into
+both stores, one asks the development realm for a token and verifies it, two take a
+generated corpus through the entire adaptation chain, four drive the MCP tools against the
+real API router, four drive the **deployed** system over HTTP behind a real Keycloak
+realm, and three check the perturbed corpus against pdfium's own pixels rather than
+against the arithmetic that derived the labels. `cargo clippy --workspace
 --all-targets -- -D warnings` is clean. No `todo!()` or `unimplemented!()` anywhere in the
 tree.
 
@@ -113,10 +118,15 @@ repository:
   OpenAI-compatible server on a real socket answering adaptively so that grounding and
   verification are exercised rather than skipped. **No VLM has ever parsed a page here**,
   so extraction quality is entirely unmeasured.
-- **The corpus is synthetic.** `ds-adapt dataset` writes clean, born-digital, single-font
-  PDFs labelled from the geometry that drew them. That makes the *machinery* provable and
-  calibrates nothing: no skew, no scanner noise, no handwriting, no photographs, no
-  entities to extract. Content-aware routing (goal G2) is still an untested claim.
+- **The corpus is synthetic.** `ds-adapt dataset` writes single-font PDFs labelled from
+  the geometry that drew them, and it can now rotate them (`--rotate`), skew them
+  (`--skew`) and scan them (`--scan-dpi`: render, blur, noise, JPEG, re-wrap as an
+  image-only PDF) — so the page conditioners and `region.ocr` finally have something to
+  work on, and the labels stay derived rather than annotated. What that still is not: no
+  handwriting, no photographs, no perspective, no entities to extract, and above all
+  **one generator**. Pages sharing a template are not independent samples, and
+  self-generated ground truth measures agreement with our own generator rather than with
+  real documents. Content-aware routing (goal G2) is still an untested claim.
 - **No GPU has run this.** Every vLLM flag, memory fraction and HPA threshold in
   `deploy/gpu` is a reasoned starting point.
 - **No fleet has run this.** `fleet.sh` is exercised by `--dry-run` and by hand; booting
@@ -239,7 +249,7 @@ isolation with. What each request is verified against is in
 
 ### Tests
 
-`cargo test --workspace` runs the 448 tests that need nothing (PDF tests need
+`cargo test --workspace` runs the 462 tests that need nothing (PDF tests need
 `PDFIUM_DYNAMIC_LIB_PATH`, set by devenv). The other 56 touch a real service, or render a
 corpus, and are `#[ignore]`d; with the stack profile running:
 
@@ -296,14 +306,26 @@ a run exists.
 The adaptation chain needs documents and labels, and generates both when you have none:
 
 ```sh
-ds-adapt dataset --out corpus/                    # four page shapes, labelled exactly
-ds-adapt generate --search-space config/search-space.example.json --out candidates.json
+# Four page shapes, labelled exactly. `--rotate`, `--skew` and `--scan-dpi` perturb the
+# pages so the conditioning steps have something to repair; the labels follow analytically
+# and stay derived rather than annotated.
+ds-adapt dataset --out corpus/ --rotate 0,90 --skew -2,0,2 --scan-dpi 200
+ds-adapt generate --search-space config/search-space.itest.json --out candidates.json
+ds-adapt propose  --seeds config/dag-list.example.json --out mutants.json   # or mutate the incumbent
 ds-adapt run   --manifest corpus/manifest.jsonl --candidates candidates.json --out runs/ --models models.toml
 ds-adapt score --runs runs/runs.jsonl --out evals.jsonl
+# Choose on `train` …
 ds-adapt select --evals evals.jsonl --candidates candidates.json --version $(date +%F) \
-                --out dag-list.json --report report.md
+                --out dag-list.json --report report-train.md --split train
+# … and measure the same list on pages it was not chosen on. Only this one is quotable.
+ds-adapt report --list dag-list.json --evals evals.jsonl --split holdout --out report-holdout.md
 ds-adapt classify-score --manifest corpus/manifest.jsonl --out classify/ --report classifier.md
 ```
+
+Run it in **release**. `page.denoise`'s median filter takes 2.1 s over a 200-dpi A4 page
+released and 36.4 s in a debug build — past the step's own 60 s timeout — so a debug chain
+scores every image conditioner as a failure and biases the search against exactly the
+templates it exists to compare.
 
 That corpus is synthetic and says so everywhere it appears: it proves the chain runs and
 calibrates nothing. Pointing the same commands at real labelled documents is the one piece
