@@ -78,6 +78,36 @@ enum Cmd {
         #[arg(long, default_value = "config/models.example.toml")]
         models: PathBuf,
     },
+    /// Propose DAG *structures* by mutating ones that already work.
+    ///
+    /// `generate` explores the parameters of shapes a person wrote; this explores the
+    /// shapes. It inserts and removes page conditioners, swaps model ids and toggles
+    /// optionality, validating every candidate against the step catalogue and dropping
+    /// what does not type-check.
+    ///
+    /// The seeds — normally the active DAG list — are always carried through as
+    /// candidates, because `report`'s comparison can only cover pages where the DAG the
+    /// current list routes to was itself evaluated.
+    ///
+    /// Nothing here promotes anything: `select` chooses and a human activates (D4).
+    Propose {
+        /// A DAG list to mutate, usually the current one.
+        #[arg(long)]
+        seeds: PathBuf,
+        #[arg(long)]
+        out: PathBuf,
+        #[arg(long, default_value = "config/models.example.toml")]
+        models: PathBuf,
+        #[arg(long, default_value_t = 200)]
+        max_candidates: usize,
+        /// Nodes a proposal may have at all.
+        #[arg(long, default_value_t = 10)]
+        max_nodes: usize,
+        /// Model-calling nodes a proposal may have beyond the thriftiest seed. This is
+        /// what keeps "fan out to every model and merge" from crowding out the field.
+        #[arg(long, default_value_t = 1)]
+        max_extra_model_nodes: usize,
+    },
     /// Execute candidates on a dataset (stage cluster) with successive halving.
     Run {
         #[arg(long)]
@@ -264,6 +294,39 @@ async fn main() -> anyhow::Result<()> {
             for r in &g.rejected {
                 println!("  rejected {}: {}", r.id, r.error);
             }
+            Ok(())
+        }
+        Cmd::Propose { seeds, out, models, max_candidates, max_nodes, max_extra_model_nodes } => {
+            let list: ds_router::DagList = read_json(&seeds)?;
+            let registry_models =
+                ModelRegistry::load(&models).map_err(|e| anyhow::anyhow!("models {}: {e}", models.display()))?;
+            // Each model with the tasks its registry entry declares, so a swap can only
+            // put a model where it is capable of doing the job.
+            let choices: Vec<ds_adapt::propose::ModelChoice> = registry_models
+                .all()
+                .map(|m| ds_adapt::propose::ModelChoice { id: m.id.clone(), tasks: m.task.iter().cloned().collect() })
+                .collect();
+            let steps = ds_steps::production_registry(Arc::new(OpenAiClient::new(registry_models)));
+            let kinds: Vec<&str> = steps.kinds().copied().collect();
+            let budget = ds_adapt::propose::Budget { max_candidates, max_nodes, max_extra_model_nodes };
+
+            let p = ds_adapt::propose::propose(&list.dags, &steps, &kinds, &choices, &budget);
+            std::fs::write(&out, serde_json::to_string_pretty(&p.candidates)?)?;
+            println!(
+                "wrote {} with {} candidates from {} seeds ({} rejected, {} over the budget)",
+                out.display(),
+                p.candidates.len(),
+                list.dags.len(),
+                p.rejected.len(),
+                p.truncated
+            );
+            for (kind, n) in ds_adapt::propose::summary(&p) {
+                println!("  {kind}: {n}");
+            }
+            for r in &p.rejected {
+                println!("  rejected {}: {}", r.id, r.error);
+            }
+            println!("next: ds-adapt run --manifest <manifest> --candidates {} --out <run-dir>", out.display());
             Ok(())
         }
         Cmd::Run {

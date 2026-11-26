@@ -3,6 +3,7 @@
 pub mod classify_score;
 pub mod dataset;
 pub mod generate;
+pub mod propose;
 pub mod metrics;
 pub mod records;
 pub mod report;
