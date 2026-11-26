@@ -251,6 +251,7 @@ impl Default for MetricWeights {
 pub fn labelled_metrics(pred: &[EvalBlock], gt: &[EvalBlock]) -> Metrics {
     let gt_text = metrics::reading_order_text(gt);
     let has_text = gt.iter().any(|b| metrics::is_text_kind(b.kind));
+    let prf = metrics::layout_prf_at(pred, gt, metrics::DEFAULT_MIN_IOU);
     Metrics {
         text: has_text.then(|| metrics::normalised_text_similarity(&metrics::reading_order_text(pred), &gt_text)),
         tables: metrics::per_block_mean(pred, gt, BlockKind::Table, |p, g| match (&p.html, &g.html) {
@@ -265,9 +266,13 @@ pub fn labelled_metrics(pred: &[EvalBlock], gt: &[EvalBlock]) -> Metrics {
             metrics::latex_similarity(pl, gl)
         }),
         reading_order: (gt.len() >= 2).then(|| metrics::reading_order_score(pred, gt)),
-        layout: (!gt.is_empty()).then(|| metrics::layout_f1(pred, gt)),
+        layout: (!gt.is_empty()).then_some(prf.2),
         judge: None,
         agreement: None,
+        layout_precision: (!gt.is_empty()).then_some(prf.0),
+        layout_recall: (!gt.is_empty()).then_some(prf.1),
+        layout_f1_strict: (!gt.is_empty()).then(|| metrics::layout_prf_at(pred, gt, 0.75).2),
+        order_tau: metrics::order_tau_matched(pred, gt, metrics::DEFAULT_MIN_IOU),
     }
 }
 
@@ -553,6 +558,47 @@ mod tests {
             confidence: 0.9,
             tier: ClassifierTier::Rules,
         }
+    }
+
+    fn ev(kind: BlockKind, b: (f32, f32, f32, f32), order: u32, text: &str, html: Option<&str>) -> EvalBlock {
+        EvalBlock {
+            kind,
+            bbox: BBox::new(b.0, b.1, b.2, b.3).unwrap(),
+            order,
+            text: text.into(),
+            html: html.map(str::to_string),
+            latex: None,
+        }
+    }
+
+    /// The table metric used to reward the wrong behaviour outright, and this is the
+    /// test that says so. Ground truth was one block **per cell** with no `html`, and
+    /// `per_block_mean` matched every one of those cells to the single best-overlapping
+    /// prediction — so a correct whole-table block was scored against each cell's text
+    /// in turn (`text_similarity("Method Acc F1 ...", "92.1")`, near zero) while a dump
+    /// of twelve cell blocks matched cell-for-cell and scored near one. `metrics::teds`,
+    /// the actual table-structure metric, never executed on this corpus at all.
+    #[test]
+    fn a_correct_table_scores_above_a_cell_dump() {
+        let html = "<table><tr><td>Method</td><td>Acc</td></tr><tr><td>Ours</td><td>92.1</td></tr></table>";
+        let gt = vec![ev(BlockKind::Table, (0.1, 0.1, 0.9, 0.4), 0, "Method Acc Ours 92.1", Some(html))];
+
+        // What a working parser returns: one table, with structure.
+        let correct = vec![ev(BlockKind::Table, (0.1, 0.1, 0.9, 0.4), 0, "Method Acc Ours 92.1", Some(html))];
+        // What the old metric preferred: the cells, loose, with no structure.
+        let dump = vec![
+            ev(BlockKind::Table, (0.1, 0.1, 0.5, 0.2), 0, "Method", None),
+            ev(BlockKind::Table, (0.5, 0.1, 0.9, 0.2), 1, "Acc", None),
+            ev(BlockKind::Table, (0.1, 0.2, 0.5, 0.4), 2, "Ours", None),
+            ev(BlockKind::Table, (0.5, 0.2, 0.9, 0.4), 3, "92.1", None),
+        ];
+
+        let good = labelled_metrics(&correct, &gt).tables.expect("the page has a table");
+        let bad = labelled_metrics(&dump, &gt).tables.expect("the page has a table");
+        assert!((good - 1.0).abs() < 1e-6, "an exact table is an exact match, got {good}");
+        assert!(good > bad, "a correct table ({good}) must beat a cell dump ({bad})");
+        // And TEDS is what produced that number, rather than the text fallback.
+        assert_eq!(metrics::teds(html, html), 1.0);
     }
 
     /// `agreement` is a diagnostic and the reference DAG has none, because comparing it

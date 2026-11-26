@@ -351,17 +351,80 @@ pub fn kind_family_eq(a: BlockKind, b: BlockKind) -> bool {
 /// Micro F1 over all blocks: a prediction is a true positive if it matches a ground-truth
 /// block of the same kind family with IoU ≥ 0.5 (one-to-one).
 pub fn layout_f1(pred: &[EvalBlock], gt: &[EvalBlock]) -> f32 {
+    layout_prf_at(pred, gt, DEFAULT_MIN_IOU).2
+}
+
+/// The IoU a predicted box must reach to count as the same block as a labelled one.
+///
+/// 0.5 and not higher, and that is a statement about the *labels* rather than a choice
+/// of strictness. A generated label's box is the em box — `AVG_ADVANCE` wide, ascent
+/// plus descent tall — while a parser returns the ink box, so a correct prediction for
+/// an all-lowercase line sits at roughly 0.55 against its own label. No threshold above
+/// 0.5 can be met on this corpus by a correct reading, which is why `layout_prf_at` is
+/// public: report two thresholds and the gap says how label-limited the number is.
+pub const DEFAULT_MIN_IOU: f32 = 0.5;
+
+/// Precision, recall and F1 of block detection at an explicit IoU threshold.
+///
+/// Returned separately because one F1 hides whether a DAG is missing blocks or
+/// inventing them, and because `reading_order_score` is computed from the same
+/// matching, so the two are not independent evidence.
+pub fn layout_prf_at(pred: &[EvalBlock], gt: &[EvalBlock], min_iou: f32) -> (f32, f32, f32) {
     if pred.is_empty() && gt.is_empty() {
-        return 1.0;
+        return (1.0, 1.0, 1.0);
     }
-    let tp = match_by_iou(pred, gt, 0.5, true).len() as f32;
-    let (p, g) = (pred.len() as f32, gt.len() as f32);
+    let tp = match_by_iou(pred, gt, min_iou, true).len() as f32;
     if tp == 0.0 {
-        return 0.0;
+        return (0.0, 0.0, 0.0);
     }
-    let precision = tp / p;
-    let recall = tp / g;
-    2.0 * precision * recall / (precision + recall)
+    let precision = tp / pred.len() as f32;
+    let recall = tp / gt.len() as f32;
+    (precision, recall, 2.0 * precision * recall / (precision + recall))
+}
+
+/// Reading order alone, over the blocks that matched: Kendall tau-b between predicted
+/// and labelled order. `None` with fewer than two matches.
+///
+/// This exists because `reading_order_score` is not a reading-order metric. It compares
+/// the matched subsequence against the *full* label list, so every unmatched label
+/// counts as a deletion: find k of n blocks in perfectly correct order and it returns
+/// `k / n` — detection recall, which `layout_prf_at` already reports from the same
+/// matching. A low value does not say which of the two failed.
+///
+/// Tau is computed over matched pairs only, so it answers the separate question: of the
+/// blocks this DAG found, did it put them in the right order?
+pub fn order_tau_matched(pred: &[EvalBlock], gt: &[EvalBlock], min_iou: f32) -> Option<f32> {
+    let matched = match_by_iou(pred, gt, min_iou, false);
+    if matched.len() < 2 {
+        return None;
+    }
+    let pairs: Vec<(u32, u32)> = matched.iter().map(|(i, j, _)| (pred[*i].order, gt[*j].order)).collect();
+    let (mut concordant, mut discordant, mut tied_p, mut tied_g) = (0i64, 0i64, 0i64, 0i64);
+    for a in 0..pairs.len() {
+        for b in (a + 1)..pairs.len() {
+            let dp = pairs[a].0.cmp(&pairs[b].0);
+            let dg = pairs[a].1.cmp(&pairs[b].1);
+            use std::cmp::Ordering::Equal;
+            match (dp, dg) {
+                (Equal, Equal) => {
+                    tied_p += 1;
+                    tied_g += 1;
+                }
+                (Equal, _) => tied_p += 1,
+                (_, Equal) => tied_g += 1,
+                _ if dp == dg => concordant += 1,
+                _ => discordant += 1,
+            }
+        }
+    }
+    // tau-b, because a parser may emit equal reading-order values for blocks it did not
+    // order, and tau-a would read those ties as disagreement.
+    let n0 = (pairs.len() * (pairs.len() - 1) / 2) as i64;
+    let denom = (((n0 - tied_p) * (n0 - tied_g)) as f64).sqrt();
+    if denom <= 0.0 {
+        return None;
+    }
+    Some(((concordant - discordant) as f64 / denom) as f32)
 }
 
 /// Reading order: match predicted blocks to ground truth by IoU (≥ 0.5, any kind), list
@@ -410,14 +473,29 @@ pub fn per_block_mean(pred: &[EvalBlock], gt: &[EvalBlock], kind: BlockKind, sco
         return None;
     }
     let preds: Vec<&EvalBlock> = pred.iter().filter(|b| b.kind == kind).collect();
+    // One-to-one, highest overlap first. Matching each label independently let one
+    // prediction stand in for every label: a correct whole-table block was selected as
+    // the best match for all twelve cells of a per-cell ground truth and scored against
+    // each cell's text, so a cell dump beat a correct reading. A label with no
+    // prediction left to pair with scores zero, which is what a miss is.
+    let mut pairs: Vec<(usize, usize, f32)> = Vec::new();
+    for (i, p) in preds.iter().enumerate() {
+        for (j, g) in gts.iter().enumerate() {
+            let iou = p.bbox.intersection_over_union(&g.bbox);
+            if iou > 0.0 {
+                pairs.push((i, j, iou));
+            }
+        }
+    }
+    pairs.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal).then(a.0.cmp(&b.0)).then(a.1.cmp(&b.1)));
+    let mut used_p = vec![false; preds.len()];
+    let mut used_g = vec![false; gts.len()];
     let mut total = 0.0;
-    for g in &gts {
-        let best = preds
-            .iter()
-            .filter(|p| p.bbox.intersection_over_union(&g.bbox) > 0.0)
-            .max_by(|a, b| a.bbox.intersection_over_union(&g.bbox).partial_cmp(&b.bbox.intersection_over_union(&g.bbox)).unwrap_or(std::cmp::Ordering::Equal));
-        if let Some(p) = best {
-            total += score(p, g);
+    for (i, j, _) in pairs {
+        if !used_p[i] && !used_g[j] {
+            used_p[i] = true;
+            used_g[j] = true;
+            total += score(preds[i], gts[j]);
         }
     }
     Some(total / gts.len() as f32)
@@ -429,6 +507,73 @@ mod tests {
 
     fn blk(kind: BlockKind, b: (f32, f32, f32, f32), order: u32, text: &str) -> EvalBlock {
         EvalBlock { kind, bbox: BBox::new(b.0, b.1, b.2, b.3).unwrap(), order, text: text.into(), html: None, latex: None }
+    }
+
+    #[test]
+    fn per_block_mean_pairs_one_to_one() {
+        // Three labelled cells, one prediction overlapping all of them. Matching each
+        // label independently scored that one prediction three times; one-to-one scores
+        // it once and leaves the other two labels unmatched, which is what a miss is.
+        let gt = vec![
+            blk(BlockKind::Table, (0.0, 0.0, 0.3, 0.1), 0, "a"),
+            blk(BlockKind::Table, (0.3, 0.0, 0.6, 0.1), 1, "b"),
+            blk(BlockKind::Table, (0.6, 0.0, 0.9, 0.1), 2, "c"),
+        ];
+        let pred = vec![blk(BlockKind::Table, (0.0, 0.0, 0.9, 0.1), 0, "a")];
+        let got = per_block_mean(&pred, &gt, BlockKind::Table, |p, g| normalised_text_similarity(&p.text, &g.text)).unwrap();
+        assert!((got - 1.0 / 3.0).abs() < 1e-6, "one match of three labels, got {got}");
+    }
+
+    #[test]
+    fn order_tau_says_what_the_order_score_cannot() {
+        let gt: Vec<EvalBlock> = (0..4)
+            .map(|i| blk(BlockKind::Paragraph, (0.0, i as f32 * 0.25, 1.0, i as f32 * 0.25 + 0.2), i, "x"))
+            .collect();
+
+        // Found two of four, in the right order.
+        let partial = vec![gt[0].clone(), gt[1].clone()];
+        // Found all four, in exactly the wrong order.
+        let permuted: Vec<EvalBlock> = gt
+            .iter()
+            .enumerate()
+            .map(|(i, b)| {
+                let mut b = b.clone();
+                b.order = (3 - i) as u32;
+                b
+            })
+            .collect();
+
+        // The composite's metric cannot tell these apart in the way it appears to: with
+        // correct ordering it is just recall, so a half-detected page scores 0.5 and a
+        // fully-detected but reversed page scores higher than it should on a metric
+        // named "reading order".
+        let partial_order = reading_order_score(&partial, &gt);
+        assert!((partial_order - 0.5).abs() < 1e-6, "two of four in order is recall 0.5, got {partial_order}");
+
+        // Tau answers the separate question, and gives opposite answers for the two.
+        assert_eq!(order_tau_matched(&partial, &gt, DEFAULT_MIN_IOU), Some(1.0), "the blocks it found were in order");
+        assert_eq!(order_tau_matched(&permuted, &gt, DEFAULT_MIN_IOU), Some(-1.0), "every pair is inverted");
+        // Fewer than two matches is no evidence about order at all.
+        assert_eq!(order_tau_matched(&gt[..1], &gt, DEFAULT_MIN_IOU), None);
+    }
+
+    #[test]
+    fn layout_prf_separates_precision_from_recall_and_tightens_with_iou() {
+        let gt = vec![
+            blk(BlockKind::Paragraph, (0.0, 0.0, 1.0, 0.2), 0, "a"),
+            blk(BlockKind::Paragraph, (0.0, 0.3, 1.0, 0.5), 1, "b"),
+        ];
+        // One exact hit, one spurious block: recall 0.5, precision 0.5.
+        let pred = vec![gt[0].clone(), blk(BlockKind::Paragraph, (0.0, 0.8, 1.0, 0.95), 1, "c")];
+        let (p, r, f1) = layout_prf_at(&pred, &gt, DEFAULT_MIN_IOU);
+        assert!((p - 0.5).abs() < 1e-6 && (r - 0.5).abs() < 1e-6 && (f1 - 0.5).abs() < 1e-6);
+        assert!((layout_f1(&pred, &gt) - f1).abs() < 1e-6, "layout_f1 is this at the default threshold");
+
+        // A box that is close but not that close: matched at 0.5, dropped at 0.75. This
+        // is the sensitivity the suite has to report rather than pick a side of.
+        let loose = vec![blk(BlockKind::Paragraph, (0.0, 0.0, 1.0, 0.33), 0, "a")];
+        assert!(layout_prf_at(&loose, &gt[..1], 0.5).2 > 0.0);
+        assert_eq!(layout_prf_at(&loose, &gt[..1], 0.75).2, 0.0);
     }
 
     #[test]

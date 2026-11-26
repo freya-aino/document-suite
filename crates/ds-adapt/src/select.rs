@@ -26,7 +26,27 @@ pub struct Metrics {
     /// Judge VLM rating (judge-trust evals only).
     pub judge: Option<f32>,
     /// Text agreement with the reference DAG (judge-trust evals only).
+    ///
+    /// A **diagnostic**, not a quality term: it measures consensus, so DAGs sharing a
+    /// parse model agree with each other and disagree with a better one. It is excluded
+    /// from `quality`, and it is `None` for the reference DAG itself, whose agreement
+    /// with its own text is 1.0 by construction.
     pub agreement: Option<f32>,
+    // ── detection and order, reported separately ──
+    //
+    // `layout` and `reading_order` are computed from the same matching, so they are not
+    // independent: with correct ordering `reading_order` reduces to detection recall.
+    // These four say what the composite cannot.
+    /// Block-detection precision at `metrics::DEFAULT_MIN_IOU`.
+    pub layout_precision: Option<f32>,
+    /// Block-detection recall at `metrics::DEFAULT_MIN_IOU`.
+    pub layout_recall: Option<f32>,
+    /// Block-detection F1 at IoU 0.75. Reported beside `layout` (0.5): the gap is how
+    /// much of the number is the label's box convention rather than the DAG.
+    pub layout_f1_strict: Option<f32>,
+    /// Kendall tau-b of reading order over the matched blocks only — order alone, with
+    /// detection factored out.
+    pub order_tau: Option<f32>,
 }
 
 /// Score of one DAG on one page.
