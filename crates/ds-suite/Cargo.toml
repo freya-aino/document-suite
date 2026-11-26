@@ -32,6 +32,8 @@ metrics.workspace = true
 metrics-exporter-prometheus.workspace = true
 
 [dev-dependencies]
+# The shared fake model tier, so this test and the compose stack cannot answer differently.
+ds-testkit.workspace = true
 async-trait.workspace = true
 chrono.workspace = true
 futures.workspace = true

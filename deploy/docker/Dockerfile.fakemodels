@@ -1,0 +1,53 @@
+# syntax=docker/dockerfile:1.7
+#
+# The fake model tier as a service: `ds-fake-models`, the `fake` tier of
+# deploy/compose. It is the same `ds_testkit::models::router()` the unit tests serve
+# in-process, so the model tier a pull request exercises is the code the tests exercise.
+#
+#   docker build -f deploy/docker/Dockerfile.fakemodels -t document-suite-fakemodels:dev .
+#
+# Build it from the repository root: the context is the workspace, because the build
+# compiles it.
+#
+# **This image answers with our own fabricated output.** It exists to prove the suite is
+# wired — upload, ingest, routing, the executor, both stores, the API — and a fidelity
+# number measured against it would be a measurement of this image. Extraction fidelity is
+# measured on the `gpu` tier, against a real model.
+#
+# No pdfium and no config file: it renders nothing and reads no TOML. One dispatch on the
+# prompt, one JSON answer.
+
+# ───────────────────────────── build ─────────────────────────────
+# The same pinned toolchain as the service image, so one bump moves all three.
+FROM rust:1.100-bookworm AS build
+WORKDIR /src
+COPY Cargo.toml Cargo.lock ./
+COPY crates ./crates
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/src/target,sharing=locked \
+    cargo build --release --locked -p ds-testkit --bin ds-fake-models \
+ && cp target/release/ds-fake-models /usr/local/bin/ds-fake-models
+
+# ───────────────────────────── runtime ─────────────────────────────
+FROM debian:bookworm-slim
+# curl only for the HEALTHCHECK, which is also what compose waits on. No ca-certificates:
+# it is a server, and it calls nothing.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends curl \
+ && rm -rf /var/lib/apt/lists/* \
+ && useradd --system --uid 10001 --shell /usr/sbin/nologin --home-dir /nonexistent ds
+
+COPY --from=build /usr/local/bin/ds-fake-models /usr/local/bin/ds-fake-models
+
+ENV DS_FAKE_MODELS_ADDR=0.0.0.0:8000 \
+    RUST_LOG=info
+
+# 8000 and not 8080: the vLLM pools in deploy/gpu serve on 8000 inside their containers,
+# so the registry endpoints are the same whichever tier is mounted.
+EXPOSE 8000
+USER ds
+
+HEALTHCHECK --interval=10s --timeout=3s --start-period=2s --retries=5 \
+  CMD ["/bin/sh", "-c", "curl -fsS \"http://127.0.0.1:${DS_FAKE_MODELS_ADDR##*:}/health\" >/dev/null || exit 1"]
+
+ENTRYPOINT ["/usr/local/bin/ds-fake-models"]

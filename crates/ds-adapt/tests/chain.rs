@@ -31,74 +31,14 @@ use ds_adapt::score::{score as score_runs, MetricWeights, ScoreOptions};
 use ds_adapt::select::{select, Objective};
 use ds_adapt::{report, RunRecord};
 
-/// An OpenAI-compatible server that answers every request with the same block list.
-///
-/// In-process and on a real socket, for the same reason the suite's own pipeline test
-/// does it that way: a fake *client* would skip the transport, the registry's health
-/// ejection and the parser, which is most of what the run path is.
-async fn fake_models() -> (String, tokio::task::JoinHandle<()>) {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
-    let port = listener.local_addr().expect("addr").port();
-    let handle = tokio::spawn(async move {
-        loop {
-            let Ok((mut sock, _)) = listener.accept().await else { return };
-            tokio::spawn(async move {
-                // Read to the end of the headers and then the declared body; the client
-                // sends `content-length`, so there is no need to guess.
-                let mut buf = Vec::new();
-                let mut chunk = [0u8; 8192];
-                loop {
-                    match sock.read(&mut chunk).await {
-                        Ok(0) | Err(_) => return,
-                        Ok(n) => buf.extend_from_slice(&chunk[..n]),
-                    }
-                    let text = String::from_utf8_lossy(&buf);
-                    if let Some(i) = text.find("\r\n\r\n") {
-                        let len: usize = text[..i]
-                            .to_ascii_lowercase()
-                            .lines()
-                            .find_map(|l| l.strip_prefix("content-length:").map(|v| v.trim().parse().unwrap_or(0)))
-                            .unwrap_or(0);
-                        if buf.len() >= i + 4 + len {
-                            break;
-                        }
-                    }
-                }
-                let body = String::from_utf8_lossy(&buf).to_ascii_lowercase();
-                // A layout request wants regions and nothing else; everything else wants
-                // text. The shapes differ, so a DAG asking for one cannot be served the
-                // other by accident.
-                let blocks = if body.contains("layout") {
-                    r#"[{"label":"title","bbox":[0.12,0.08,0.60,0.11]},
-                        {"label":"paragraph","bbox":[0.12,0.19,0.88,0.22]},
-                        {"label":"paragraph","bbox":[0.12,0.24,0.88,0.27]}]"#
-                } else {
-                    r#"[{"label":"title","bbox":[0.12,0.08,0.60,0.11],"text":"Report prose-01, page 1"},
-                        {"label":"paragraph","bbox":[0.12,0.19,0.88,0.22],"text":"The measured value for sample 11 was within the stated tolerance."},
-                        {"label":"paragraph","bbox":[0.12,0.24,0.88,0.27],"text":"The measured value for sample 12 was within the stated tolerance."}]"#
-                };
-                let content = serde_json::json!({ "blocks": serde_json::from_str::<serde_json::Value>(blocks).expect("blocks") }).to_string();
-                let payload = serde_json::json!({
-                    "id": "fake",
-                    "object": "chat.completion",
-                    "model": "fake-parse",
-                    "choices": [{ "index": 0, "message": { "role": "assistant", "content": content }, "finish_reason": "stop" }],
-                    "usage": { "prompt_tokens": 10, "completion_tokens": 40, "total_tokens": 50 }
-                })
-                .to_string();
-                let res = format!(
-                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{payload}",
-                    payload.len()
-                );
-                let _ = sock.write_all(res.as_bytes()).await;
-                let _ = sock.flush().await;
-            });
-        }
-    });
-    (format!("http://127.0.0.1:{port}/v1"), handle)
-}
+// The fake model tier is `ds_testkit::models` — in-process and on a real socket, for the
+// same reason the suite's own pipeline test does it that way: a fake *client* would skip
+// the transport, the registry's health ejection and the parser, which is most of what the
+// run path is.
+//
+// It used to be a hand-rolled copy here, one of three in the workspace, each with its own
+// idea of what a model answers. A fake that disagrees with itself across three files can
+// make two tests pass for contradictory reasons.
 
 /// Whether pdfium can be bound at all. Without it nothing here can render a page, and
 /// the test says so and returns rather than failing — the same convention
@@ -175,13 +115,17 @@ async fn the_whole_chain_runs_on_a_generated_corpus() {
     std::fs::create_dir_all(&out).expect("out");
 
     // ── dataset ──
-    let spec = Spec { docs_per_shape: 1, pages_per_doc: 1, holdout_share: 0.0, language: "en".into() };
+    // Two documents per shape and half of them held out, so the chain exercises the one
+    // thing that makes any of its numbers quotable: a selection made on `train` and
+    // measured on `holdout`. At one document per shape `round(1 * share)` is zero and
+    // there is no holdout to confirm on, which is correct and useless here.
+    let spec = Spec { docs_per_shape: 2, pages_per_doc: 1, holdout_share: 0.5, ..Default::default() };
     let written = dataset::write(&corpus, &spec).expect("corpus");
-    assert_eq!(written.documents, 4, "one document of each page shape");
+    assert_eq!(written.documents, 8, "two documents of each of the four page shapes");
     let manifest: Vec<ManifestEntry> = read_jsonl(&written.manifest).expect("manifest");
 
     // ── run ──
-    let (endpoint, server) = fake_models().await;
+    let (endpoint, server) = ds_testkit::models::spawn().await;
     let client = Arc::new(ds_models::OpenAiClient::new(ds_models::ModelRegistry::from_toml(&registry_toml(&endpoint)).expect("registry")));
     let registry = ds_steps::production_registry(client.clone());
     let dags = candidates();
@@ -227,7 +171,7 @@ async fn the_whole_chain_runs_on_a_generated_corpus() {
     };
 
     let pages = runner.prepare(&manifest).await.expect("prepare");
-    assert_eq!(pages.len(), 4, "one page per document");
+    assert_eq!(pages.len(), 8, "one page per document");
     assert!(pages.iter().all(|p| p.ground_truth.as_ref().is_some_and(|gt| !gt.is_empty())), "every page must arrive labelled");
     assert!(pages.iter().all(|p| p.profile.born_digital), "the generated PDFs carry a text layer");
 
@@ -262,7 +206,27 @@ async fn the_whole_chain_runs_on_a_generated_corpus() {
     let md = report::render(&list, &evals, &objective, None);
     assert!(md.contains("# DAG list `chain-test-1`"));
     assert!(md.contains("## Parse paths"), "the report must say how the output was parsed");
-    assert!(md.contains("Pages evaluated: **4**"), "{md}");
+    assert!(md.contains("Pages evaluated: **8**"), "{md}");
+    // The size of the thing these numbers were measured on, printed beside them: a
+    // single winner out of C candidates on n pages implies a discrimination this corpus
+    // may not contain, and the report says so with the actual C and n.
+    assert!(md.contains("Selection bias"), "the report must state the winner's curse: {md}");
+    assert!(md.contains("Documents:"), "{md}");
+    // Where the time went, from the executor's own levels. The fake answers in
+    // milliseconds, so the numbers are small — the claim is that the attribution exists
+    // and that host and model are told apart, not that either is large.
+    assert!(md.contains("## Latency attribution"), "{md}");
+    assert!(evals.iter().any(|e| e.model_ms > 0), "no eval attributed any time to the model tier");
+
+    // ── the confirmation pass ──
+    //
+    // The same list, reported over the split it was *not* selected on. This is what
+    // `ds-adapt report --split holdout` does, and the only report whose numbers are
+    // quotable: selection on n pages out of C candidates inflates the winner.
+    let holdout: Vec<_> = evals.iter().filter(|e| e.split.as_deref() == Some("holdout")).cloned().collect();
+    assert!(!holdout.is_empty(), "the corpus must have a holdout split for a confirmation pass to be possible");
+    let confirmation = report::render(&list, &holdout, &objective, None);
+    assert!(confirmation.contains("holdout"), "the confirmation report must say which split it is: {confirmation}");
 
     server.abort();
     std::fs::remove_dir_all(&dir).ok();
@@ -290,7 +254,7 @@ async fn the_classifier_is_scored_against_the_corpus_labels() {
     let corpus = dir.join("corpus");
     let out = dir.join("run");
     std::fs::create_dir_all(&out).expect("out");
-    let spec = Spec { docs_per_shape: 1, pages_per_doc: 1, holdout_share: 0.0, language: "en".into() };
+    let spec = Spec { docs_per_shape: 1, pages_per_doc: 1, holdout_share: 0.0, ..Default::default() };
     let written = dataset::write(&corpus, &spec).expect("corpus");
     let manifest: Vec<ManifestEntry> = read_jsonl(&written.manifest).expect("manifest");
 

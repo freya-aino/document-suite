@@ -19,6 +19,7 @@ members = [
     "crates/ds-suite",
     "crates/ds-adapt",
     "crates/ds-mcp",
+    "crates/ds-testkit",
 ]
 
 [workspace.package]
@@ -35,6 +36,7 @@ publish = false
 [workspace.dependencies]
 # internal
 ds-core = { path = "crates/ds-core" }
+ds-testkit = { path = "crates/ds-testkit" }
 ds-infra = { path = "crates/ds-infra" }
 ds-ingest = { path = "crates/ds-ingest" }
 ds-classify = { path = "crates/ds-classify" }

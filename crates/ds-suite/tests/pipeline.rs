@@ -13,12 +13,13 @@
 //! What is substituted, and why:
 //!
 //! - **The models.** A real VLM would make the assertions non-deterministic, and a test
-//!   that cannot say what the output should be is not a test. The fake server speaks the
-//!   OpenAI-compatible wire protocol over a real socket through the real `OpenAiClient`,
-//!   and answers *adaptively* — it reads the block labels out of the prompt it was sent
-//!   and quotes that block's own text back. That matters: a canned answer would be
-//!   dropped by grounding, so this is the only shape of fake that exercises the grounding
-//!   path rather than skipping it.
+//!   that cannot say what the output should be is not a test. `ds_testkit::models` — the
+//!   same fake the compose stack serves in a container — speaks the OpenAI-compatible
+//!   wire protocol over a real socket through the real `OpenAiClient`, and answers
+//!   *adaptively*: it reads the block labels out of the prompt it was sent and quotes
+//!   that block's own text back. That matters: a canned answer would be dropped by
+//!   grounding, so this is the only shape of fake that exercises the grounding path
+//!   rather than skipping it.
 //!
 //! And that is all that is substituted. There used to be a second entry here for the
 //! task bus, an in-process queue standing in for JetStream while the stages were three
@@ -34,153 +35,23 @@ use sqlx::PgPool;
 
 use ds_core::{HashKey, JobSpec, JobState, LanguageTag, Priority, Profile, RunId, TenantId};
 use ds_infra::{BlobStore, Config, ObjectBlobStore};
+use ds_testkit::models::DIMS;
 use ds_vault::ops::Ops;
 use ds_worker::{build_pipeline, Deps};
 
-const DIMS: usize = 8;
 const TENANT: &str = "t_pipeline";
 
 // ───────────────────────── the fake model tier ─────────────────────────
 
-/// Serves the three OpenAI-compatible endpoints the pipeline calls, dispatching on the
-/// request's `model` field rather than on the prompt's content — a prompt is a brittle
-/// thing to match on, a model id is the registry's own name for a job.
-async fn fake_models() -> u16 {
-    let app = axum::Router::new()
-        .route("/v1/chat/completions", axum::routing::post(chat))
-        .route("/v1/embeddings", axum::routing::post(embeddings));
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
-    let port = listener.local_addr().expect("addr").port();
-    tokio::spawn(async move { axum::serve(listener, app).await.expect("serve") });
-    port
-}
-
-fn completion(content: Value) -> Value {
-    json!({ "choices": [{ "message": { "content": content.to_string() } }], "usage": { "prompt_tokens": 10, "completion_tokens": 20 } })
-}
-
-async fn chat(axum::Json(req): axum::Json<Value>) -> axum::Json<Value> {
-    let model = req["model"].as_str().unwrap_or_default().to_string();
-    let text: String = req["messages"]
-        .as_array()
-        .map(|ms| {
-            ms.iter()
-                .filter_map(|m| match &m["content"] {
-                    Value::String(s) => Some(s.clone()),
-                    Value::Array(parts) => Some(parts.iter().filter_map(|p| p["text"].as_str()).collect::<Vec<_>>().join("\n")),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join("\n")
-        })
-        .unwrap_or_default();
-
-    let body = match model.as_str() {
-        // Counted, so the two pages read differently. Identical pages would give the
-        // extractor two identical windows, and two identical claims collapse to one row
-        // by content hash — true of the store and a poor thing to build a count on.
-        "parse-vlm" => {
-            static CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-            let n = CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
-            completion(json!({
-                "blocks": [
-                    { "kind": "title", "bbox": [0.1, 0.05, 0.9, 0.1], "text": format!("Section {n}: retrieval quality") },
-                    { "kind": "text", "bbox": [0.1, 0.15, 0.9, 0.25], "text": format!("Supplier{n} Holdings reported a recall of 0.9{n} on the invoice set.") }
-                ]
-            }))
-        }
-        "extract-llm" => completion(extraction(&text)),
-        "verify-llm" => completion(verdicts(&text)),
-        other => panic!("the pipeline called an unexpected model {other:?}"),
-    };
-    axum::Json(body)
-}
-
-/// Builds an extraction that *grounds*: the quote is copied out of the block the prompt
-/// showed, so `parse::ground_output` keeps it. Returning a plausible-looking constant
-/// instead would be silently dropped and the test would pass while asserting nothing.
-fn extraction(prompt: &str) -> Value {
-    let Some((label, body)) = first_block(prompt) else {
-        return json!({ "entities": [], "assertions": [] });
-    };
-    // A quote has to be verbatim, so take a real substring of the block.
-    let quote: String = body.split_whitespace().take(4).collect::<Vec<_>>().join(" ");
-    let name = body.split_whitespace().next().unwrap_or("Thing").trim_end_matches(&[',', '.'][..]).to_string();
-    json!({
-        "entities": [{
-            "id": "e1",
-            "name": name,
-            "type": "organisation",
-            "mentions": [{ "block": label, "quote": quote }],
-        }],
-        "assertions": [
-            {
-                "predicate": "mentions_metric",
-                "kind": "attribute",
-                "args": [
-                    { "role": "subject", "entity": "e1", "literal": null },
-                    { "role": "value", "entity": null, "literal": { "value": quote.clone(), "unit": null } },
-                ],
-                "qualifiers": { "negated": false, "hedged": false, "condition": null, "time": null },
-                "evidence": [{ "block": label, "quote": quote }],
-                "confidence": 0.9,
-            },
-            // Deliberately identical in every window: same predicate, same literal, no
-            // entity arg. The store is content-addressed, so the two windows' copies must
-            // land as one row — the property that made the first draft of this test's
-            // counts wrong, and worth pinning now that it is understood.
-            {
-                "predicate": "document_is_about",
-                "kind": "attribute",
-                "args": [{ "role": "value", "entity": null, "literal": { "value": "invoices", "unit": null } }],
-                "qualifiers": { "negated": false, "hedged": false, "condition": null, "time": null },
-                "evidence": [{ "block": label, "quote": quote }],
-                "confidence": 0.7,
-            },
-        ],
-    })
-}
-
-/// `[B1] the block's text` — the format `ds_extract::window::render_window` produces.
-///
-/// Scanned, not read off the first line: the rendered window opens with `Document:` and
-/// `Section:` headers, so anything that insists on a label at line 1 finds nothing.
-fn first_block(prompt: &str) -> Option<(String, String)> {
-    prompt.lines().find_map(|line| {
-        let rest = line.trim().strip_prefix('[')?;
-        let (label, body) = rest.split_once("] ")?;
-        (label.starts_with('B') && !body.trim().is_empty()).then(|| (label.to_string(), body.trim().to_string()))
-    })
-}
-
-/// Supports every assertion it is shown. The ids come out of the prompt, which is the
-/// whole contract: a verdict for an id the extractor did not emit is ignored, so a
-/// hard-coded id would silently verify nothing.
-fn verdicts(prompt: &str) -> Value {
-    let ids: Vec<&str> = prompt.lines().filter_map(|l| l.trim().strip_prefix("- id: ")).map(str::trim).collect();
-    json!({ "verdicts": ids.iter().map(|id| json!({ "id": id, "supported": true })).collect::<Vec<_>>() })
-}
-
-async fn embeddings(axum::Json(req): axum::Json<Value>) -> axum::Json<Value> {
-    let n = match &req["input"] {
-        Value::Array(a) => a.len(),
-        _ => 1,
-    };
-    // Distinct vectors, so a mix-up between two embed targets is visible rather than
-    // hidden behind identical points.
-    let data: Vec<Value> = (0..n)
-        .map(|i| {
-            let v: Vec<f32> = (0..DIMS).map(|d| ((i + d) % 7) as f32 / 7.0 + 0.01).collect();
-            json!({ "embedding": v, "index": i })
-        })
-        .collect();
-    axum::Json(json!({ "data": data }))
-}
+// There used to be a copy of it here. It lives in `ds-testkit` now, shared with
+// `ds-adapt`'s chain test and with the `ds-fake-models` container the compose stack runs,
+// so the three cannot drift into answering differently. It dispatches on the *task read
+// from the prompt* rather than on the model id, because one registry entry serves several
+// tasks and the id alone cannot decide.
 
 /// A registry naming the three fakes, written next to the config so `[models].registry`
 /// can point at it.
-fn registry_toml(port: u16) -> String {
-    let ep = format!("http://127.0.0.1:{port}/v1");
+fn registry_toml(ep: &str) -> String {
     format!(
         r#"
 [[model]]
@@ -288,11 +159,11 @@ async fn a_document_goes_from_upload_to_both_stores(pool: PgPool) {
     // --nocapture` is how you find out which stage dropped something, which is the
     // question this test raises when it fails.
     let _ = tracing_subscriber::fmt().with_env_filter(tracing_subscriber::EnvFilter::from_default_env()).try_init();
-    let port = fake_models().await;
+    let (endpoint, _models) = ds_testkit::models::spawn().await;
     let dir = std::env::temp_dir().join(format!("ds-pipeline-{}", RunId::new()));
     std::fs::create_dir_all(&dir).expect("scratch dir");
     let registry_path = dir.join("models.toml");
-    std::fs::write(&registry_path, registry_toml(port)).expect("write registry");
+    std::fs::write(&registry_path, registry_toml(&endpoint)).expect("write registry");
     let prefix = format!("itest_{}", RunId::new().to_string().replace('-', ""));
     let config_path = dir.join("worker.toml");
     std::fs::write(&config_path, worker_toml(&registry_path, &prefix, &dir)).expect("write config");
@@ -334,34 +205,44 @@ async fn a_document_goes_from_upload_to_both_stores(pool: PgPool) {
     assert_eq!(job.pages_done, 2);
     assert_eq!(job.pages_failed, 0);
 
-    // Exact counts, not lower bounds: the fake parser returns two blocks per page, so
-    // everything downstream of it is determined. A lower bound here would pass while the
-    // second page quietly went missing.
+    // Exact counts, not lower bounds: the fake parser returns three blocks per page —
+    // a title, a paragraph and a table — so everything downstream of it is determined. A
+    // lower bound here would pass while the second page quietly went missing.
     let counts = row_counts(&pool, &document_hk, run_id).await;
     assert_eq!(counts["hub_document"], 1, "{counts:#?}");
     assert_eq!(counts["hub_page"], 2, "{counts:#?}");
     assert_eq!(counts["lnk_document_page"], 2, "{counts:#?}");
-    assert_eq!(counts["hub_block"], 4, "two blocks per page:\n{counts:#?}");
-    assert_eq!(counts["sat_block_content"], 4, "every block needs its content:\n{counts:#?}");
+    assert_eq!(counts["hub_block"], 6, "three blocks per page:\n{counts:#?}");
+    assert_eq!(counts["sat_block_content"], 6, "every block needs its content:\n{counts:#?}");
     // Every block must be reachable from the document, or a citation cannot be resolved,
     // which is what the vault layer exists for.
-    assert_eq!(counts["lnk_page_block"], 4, "{counts:#?}");
+    assert_eq!(counts["lnk_page_block"], 6, "{counts:#?}");
 
     // Two windows × two assertions = four extracted, but one of the two is identical in
     // both windows and the store is content-addressed, so three rows. This is the
     // insert-only vault behaving as designed, and nothing else in the suite tests it
     // across two separately extracted windows.
-    assert_eq!(counts["hub_assertion"], 3, "{counts:#?}");
-    assert_eq!(counts["hub_entity"], 2, "one entity per window, resolved apart:\n{counts:#?}");
+    //
+    // Plus one `result`, and that one is worth naming: it comes from the **table**, by
+    // `ds_extract::tables` reading the recognised HTML, with no model in the path. The
+    // fake this test used to carry returned no table block, so that derivation had never
+    // reached the vault from end to end — the shared fake does return one, and this is
+    // the assertion that now covers it.
+    assert_eq!(counts["hub_assertion"], 4, "{counts:#?}");
+    // Two from the windows (`Supplier1`, `Supplier2` — resolved apart, as a page apiece),
+    // two more from the table's row and column headers.
+    assert_eq!(counts["hub_entity"], 4, "{counts:#?}");
     // The write path that produced these failed for months on a NULL `assertion_hk`, so
     // assert the links and not only the hub.
     //
-    // Two arg links, not three: `lnk_assertion_arg` carries `entity_hk NOT NULL`, so it
+    // Four arg links, not eight: `lnk_assertion_arg` carries `entity_hk NOT NULL`, so it
     // holds only the args that point at an entity. `document_is_about` has a literal and
     // nothing else, and its value lives in `sat_assertion_detail.literals`. A reader
-    // looking for an assertion's arguments has to read both.
-    assert_eq!(counts["lnk_assertion_arg"], 2, "{counts:#?}");
-    assert_eq!(counts["lnk_assertion_evidence"], 3, "every assertion must be citable:\n{counts:#?}");
+    // looking for an assertion's arguments has to read both. So: one subject per
+    // `mentions_metric`, two entity args on the table's `result`, none for
+    // `document_is_about`.
+    assert_eq!(counts["lnk_assertion_arg"], 4, "{counts:#?}");
+    assert_eq!(counts["lnk_assertion_evidence"], 4, "every assertion must be citable:\n{counts:#?}");
     // The verify model supported everything it was shown, so the flag must have come back
     // through `parse_verdicts` and reached the satellite. Nothing else tests that round
     // trip: it is the one place a model's answer changes a stored row.
@@ -373,12 +254,16 @@ async fn a_document_goes_from_upload_to_both_stores(pool: PgPool) {
     .fetch_one(&pool)
     .await
     .expect("counting verified assertions");
-    assert_eq!(verified, 3, "every assertion was supported by the verify model");
+    // Three of the four: the verify model supported both windows' claims and the shared
+    // `document_is_about`. The table's `result` is *derived* from recognised HTML rather
+    // than claimed by a model, so nothing asks a model to confirm it and it stays
+    // unverified — which is the right answer and not a gap.
+    assert_eq!(verified, 3, "the three model-claimed assertions were all supported");
 
     // Per collection, not a total: a regression that wrote the blocks and dropped the
     // entities would pass a total.
     let points = qdrant_points(&cfg, &prefix).await;
-    assert_eq!(points["blocks"], 4, "one point per block with text: {points:?}");
+    assert_eq!(points["blocks"], 6, "one point per block with text: {points:?}");
     assert!(points["sections"] >= 1, "the stitched sections were not indexed: {points:?}");
     assert!(points["entities"] >= 1, "the resolved entities were not indexed: {points:?}");
 

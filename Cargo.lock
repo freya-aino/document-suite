@@ -747,6 +747,7 @@ dependencies = [
  "ds-models",
  "ds-router",
  "ds-steps",
+ "ds-testkit",
  "futures",
  "hex",
  "image",
@@ -1016,6 +1017,7 @@ dependencies = [
  "ds-ingest",
  "ds-models",
  "ds-steps",
+ "ds-testkit",
  "ds-vault",
  "ds-worker",
  "futures",
@@ -1030,6 +1032,16 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+]
+
+[[package]]
+name = "ds-testkit"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "reqwest",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
