@@ -383,6 +383,325 @@ pub fn text_agreement(a: &str, b: &str) -> f32 {
     2.0 * shared as f32 / (ta.len() + tb.len()) as f32
 }
 
+/// `blocks, blocks, blocks → blocks`
+pub struct VoteBlocks;
+
+/// How three readings of a page are reconciled.
+#[derive(Debug, serde::Deserialize)]
+#[serde(default)]
+pub struct VoteParams {
+    /// Overlap at which blocks from two readings count as the *same* block. Matches
+    /// `blocks.merge` and `blocks.verify`, so the three steps agree about identity.
+    pub iou: f32,
+    /// How many of the three readings must have seen a block for it to survive.
+    pub min_votes: u32,
+    /// Whether an output confidence is scaled by the share of readings that voted for
+    /// the block. On by default: a block two of three parsers saw is not as certain as
+    /// one all three saw, and nothing downstream can recover that from the membership.
+    pub weight_by_votes: bool,
+}
+
+impl Default for VoteParams {
+    fn default() -> Self {
+        Self { iou: 0.5, min_votes: 2, weight_by_votes: true }
+    }
+}
+
+#[async_trait]
+impl Step for VoteBlocks {
+    fn kind(&self) -> &'static str {
+        "blocks.vote"
+    }
+    fn signature(&self) -> Signature {
+        Signature { inputs: vec![ArtifactKind::Blocks, ArtifactKind::Blocks, ArtifactKind::Blocks], output: ArtifactKind::Blocks }
+    }
+    fn default_timeout_ms(&self) -> u64 {
+        5_000
+    }
+    async fn run(&self, _ctx: &StepContext, inputs: &[&Artifact], params: &serde_json::Value) -> Result<StepOutput, StepError> {
+        let mut readings: Vec<&[BlockDraft]> = Vec::with_capacity(inputs.len());
+        for a in inputs {
+            let Artifact::Blocks(b) = a else {
+                return Err(StepError::InvalidParams("unexpected input kinds".into()));
+            };
+            readings.push(b);
+        }
+        let p: VoteParams =
+            if params.is_null() { VoteParams::default() } else { serde_json::from_value(params.clone()).map_err(|e| StepError::InvalidParams(e.to_string()))? };
+        if !(0.0..=1.0).contains(&p.iou) || p.iou.is_nan() {
+            return Err(StepError::InvalidParams(format!("iou must be within 0..=1, got {}", p.iou)));
+        }
+        // 0 would keep everything and `> readings` would keep nothing, and both read as
+        // "the step did nothing" from the outside.
+        if p.min_votes == 0 || p.min_votes as usize > readings.len() {
+            return Err(StepError::InvalidParams(format!("min_votes must be within 1..={}, got {}", readings.len(), p.min_votes)));
+        }
+        Ok(StepOutput::plain(Artifact::Blocks(vote_blocks(&readings, &p))))
+    }
+}
+
+/// Keeps the blocks that enough independent readings of the page agree on.
+///
+/// This is the thing two-input `blocks.verify` structurally cannot do. Verify re-scores
+/// the primary reading and never changes membership, so a block the primary missed stays
+/// missing however many other parsers saw it, and a block only the primary saw stays
+/// present with a reduced confidence. A vote decides membership *by agreement*: with
+/// `min_votes = 2` a block two parsers saw is kept even if the primary missed it, and a
+/// block only one saw is dropped.
+///
+/// Identity is positional (IoU), and a block in one reading may be matched by at most one
+/// block from each other reading — otherwise a parser that split a paragraph in two would
+/// cast two votes for the same region.
+pub fn vote_blocks(readings: &[&[BlockDraft]], p: &VoteParams) -> Vec<BlockDraft> {
+    struct Cluster {
+        members: Vec<BlockDraft>,
+        /// Which readings have already voted, so one cannot vote twice.
+        voters: Vec<usize>,
+    }
+    let mut clusters: Vec<Cluster> = Vec::new();
+
+    for (r, reading) in readings.iter().enumerate() {
+        for block in reading.iter() {
+            // Highest overlap first, among the clusters this reading has not voted for.
+            let best = clusters
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| !c.voters.contains(&r))
+                .filter_map(|(i, c)| {
+                    let iou = c.members.iter().map(|m| m.bbox.intersection_over_union(&block.bbox)).fold(0.0f32, f32::max);
+                    (iou >= p.iou).then_some((i, iou))
+                })
+                .max_by(|a, b| a.1.total_cmp(&b.1))
+                .map(|(i, _)| i);
+            match best {
+                Some(i) => {
+                    clusters[i].members.push(block.clone());
+                    clusters[i].voters.push(r);
+                }
+                None => clusters.push(Cluster { members: vec![block.clone()], voters: vec![r] }),
+            }
+        }
+    }
+
+    let n = readings.len() as f32;
+    let mut out: Vec<BlockDraft> = clusters
+        .iter()
+        .filter(|c| c.voters.len() as u32 >= p.min_votes)
+        .map(|c| {
+            // The most confident reading supplies the geometry and the text: averaging
+            // two boxes would invent a region no parser reported, and averaging two
+            // strings is not defined.
+            let rep = c.members.iter().max_by(|a, b| a.confidence.total_cmp(&b.confidence)).expect("a cluster has a member");
+            let mut block = rep.clone();
+            // The kind is the majority's, which is the one field a vote can decide
+            // without inventing anything: three readings of a region are three opinions
+            // about what it is.
+            let mut tally: Vec<(BlockKind, usize)> = Vec::new();
+            for m in &c.members {
+                match tally.iter_mut().find(|(k, _)| *k == m.kind) {
+                    Some((_, n)) => *n += 1,
+                    None => tally.push((m.kind, 1)),
+                }
+            }
+            let top = tally.iter().map(|(_, n)| *n).max().unwrap_or(0);
+            // A tie is not a majority, so the representative keeps its own kind rather
+            // than the first one encountered winning by list order.
+            if tally.iter().filter(|(_, n)| *n == top).count() == 1 {
+                block.kind = tally.iter().find(|(_, n)| *n == top).expect("a top kind").0;
+            }
+            let mean = c.members.iter().map(|m| m.confidence).sum::<f32>() / c.members.len() as f32;
+            block.confidence = if p.weight_by_votes { mean * (c.voters.len() as f32 / n) } else { mean };
+            block
+        })
+        .collect();
+
+    out.sort_by_key(|b| b.reading_order);
+    out
+}
+
+/// `blocks → blocks`
+pub struct ReorderBlocks;
+
+/// How reading order is recovered from geometry.
+#[derive(Debug, serde::Deserialize)]
+#[serde(default)]
+pub struct ReorderParams {
+    /// A block at least this wide (as a share of the page) is treated as *spanning* —
+    /// a title or a full-width table that belongs between the column groups rather than
+    /// inside one.
+    pub full_width: f32,
+    /// Normalised horizontal gap below which two blocks are taken to share a column.
+    /// Columns are found by overlap of the blocks' own x-extents, and this widens each
+    /// extent so that a short line does not start a column of its own.
+    pub gutter: f32,
+}
+
+impl Default for ReorderParams {
+    fn default() -> Self {
+        Self { full_width: 0.6, gutter: 0.02 }
+    }
+}
+
+#[async_trait]
+impl Step for ReorderBlocks {
+    fn kind(&self) -> &'static str {
+        "blocks.reorder"
+    }
+    fn signature(&self) -> Signature {
+        Signature { inputs: vec![ArtifactKind::Blocks], output: ArtifactKind::Blocks }
+    }
+    fn default_timeout_ms(&self) -> u64 {
+        2_000
+    }
+    async fn run(&self, _ctx: &StepContext, inputs: &[&Artifact], params: &serde_json::Value) -> Result<StepOutput, StepError> {
+        let Artifact::Blocks(blocks) = inputs[0] else {
+            return Err(StepError::InvalidParams("unexpected input kinds".into()));
+        };
+        let p: ReorderParams =
+            if params.is_null() { ReorderParams::default() } else { serde_json::from_value(params.clone()).map_err(|e| StepError::InvalidParams(e.to_string()))? };
+        for (name, v) in [("full_width", p.full_width), ("gutter", p.gutter)] {
+            if !(0.0..=1.0).contains(&v) || v.is_nan() {
+                return Err(StepError::InvalidParams(format!("{name} must be within 0..=1, got {v}")));
+            }
+        }
+        Ok(StepOutput::plain(Artifact::Blocks(reorder_blocks(blocks, &p))))
+    }
+}
+
+/// Recovers reading order from the blocks' geometry, changing nothing else.
+///
+/// The only step in the catalogue that can move an order metric without changing the
+/// parse: membership, boxes, text and kinds come out exactly as they went in, and only
+/// `reading_order` is rewritten. That is what makes it measurable — a change in the order
+/// score after inserting it is attributable to it alone.
+///
+/// An XY-cut with one simplification that matters on real pages: a block spanning most of
+/// the width (a title, a full-width table) cuts the page into horizontal stripes, and
+/// column grouping happens *within* a stripe. Without that, a spanning block's x-extent
+/// overlaps every column and collapses the page into a single column, which is the
+/// classic way a naive column sort reads a two-column page with a headline straight down
+/// the middle.
+pub fn reorder_blocks(blocks: &[BlockDraft], p: &ReorderParams) -> Vec<BlockDraft> {
+    // Indices throughout, so the output is a permutation of the input by construction.
+    let spanning: Vec<usize> = (0..blocks.len()).filter(|&i| blocks[i].bbox.x1 - blocks[i].bbox.x0 >= p.full_width).collect();
+    let body: Vec<usize> = (0..blocks.len()).filter(|&i| !spanning.contains(&i)).collect();
+
+    // Stripe boundaries: the top edge of each spanning block, in page order.
+    let mut cuts: Vec<f32> = spanning.iter().map(|&i| blocks[i].bbox.y0).collect();
+    cuts.sort_by(|a, b| a.total_cmp(b));
+
+    let stripe_of = |y: f32| cuts.iter().filter(|&&c| c <= y).count();
+
+    let mut order: Vec<usize> = Vec::with_capacity(blocks.len());
+    // Stripe 0 is above the first spanning block; stripe k is below the k-th one.
+    for stripe in 0..=cuts.len() {
+        if stripe > 0 {
+            // The spanning block that opened this stripe comes first.
+            let y = cuts[stripe - 1];
+            let mut openers: Vec<usize> = spanning.iter().copied().filter(|&i| blocks[i].bbox.y0 == y).collect();
+            openers.sort_by(|&a, &b| blocks[a].bbox.x0.total_cmp(&blocks[b].bbox.x0));
+            order.extend(openers);
+        }
+        let mut here: Vec<usize> = body.iter().copied().filter(|&i| stripe_of(blocks[i].bbox.y0) == stripe).collect();
+        if here.is_empty() {
+            continue;
+        }
+        // Columns: x-extents widened by half a gutter each side, grouped transitively by
+        // overlap. Left to right.
+        here.sort_by(|&a, &b| blocks[a].bbox.x0.total_cmp(&blocks[b].bbox.x0));
+        let mut columns: Vec<(f32, Vec<usize>)> = Vec::new();
+        for &i in &here {
+            let (x0, x1) = (blocks[i].bbox.x0 - p.gutter / 2.0, blocks[i].bbox.x1 + p.gutter / 2.0);
+            match columns.last_mut().filter(|(right, _)| x0 <= *right) {
+                Some((right, members)) => {
+                    *right = right.max(x1);
+                    members.push(i);
+                }
+                None => columns.push((x1, vec![i])),
+            }
+        }
+        for (_, mut members) in columns {
+            members.sort_by(|&a, &b| blocks[a].bbox.y0.total_cmp(&blocks[b].bbox.y0).then(blocks[a].bbox.x0.total_cmp(&blocks[b].bbox.x0)));
+            order.extend(members);
+        }
+    }
+
+    order
+        .into_iter()
+        .enumerate()
+        .map(|(n, i)| BlockDraft { reading_order: n as u32, ..blocks[i].clone() })
+        .collect()
+}
+
+/// `layout, layout → layout`
+pub struct MergeLayout;
+
+/// How two layout readings are unioned.
+#[derive(Debug, serde::Deserialize)]
+#[serde(default)]
+pub struct MergeLayoutParams {
+    /// Overlap at which two regions are the same region.
+    pub iou: f32,
+}
+
+impl Default for MergeLayoutParams {
+    fn default() -> Self {
+        Self { iou: 0.5 }
+    }
+}
+
+#[async_trait]
+impl Step for MergeLayout {
+    fn kind(&self) -> &'static str {
+        "layout.merge"
+    }
+    fn signature(&self) -> Signature {
+        Signature { inputs: vec![ArtifactKind::Layout, ArtifactKind::Layout], output: ArtifactKind::Layout }
+    }
+    fn default_timeout_ms(&self) -> u64 {
+        2_000
+    }
+    async fn run(&self, _ctx: &StepContext, inputs: &[&Artifact], params: &serde_json::Value) -> Result<StepOutput, StepError> {
+        let (Artifact::Layout(a), Artifact::Layout(b)) = (inputs[0], inputs[1]) else {
+            return Err(StepError::InvalidParams("unexpected input kinds".into()));
+        };
+        let p: MergeLayoutParams = if params.is_null() {
+            MergeLayoutParams::default()
+        } else {
+            serde_json::from_value(params.clone()).map_err(|e| StepError::InvalidParams(e.to_string()))?
+        };
+        if !(0.0..=1.0).contains(&p.iou) || p.iou.is_nan() {
+            return Err(StepError::InvalidParams(format!("iou must be within 0..=1, got {}", p.iou)));
+        }
+        Ok(StepOutput::plain(Artifact::Layout(merge_layout(a, b, &p))))
+    }
+}
+
+/// Unions two layout readings, the better-scored region winning where they overlap.
+///
+/// The counterpart of `blocks.merge` one artifact earlier. Merging *layouts* and then
+/// parsing once is not the same pipeline as parsing twice and merging blocks: it pays for
+/// one parse instead of two, and a region only the second detector saw still gets read.
+/// Which of the two is better is a question for the search, and until this step existed it
+/// could not be asked.
+pub fn merge_layout(a: &[LayoutRegion], b: &[LayoutRegion], p: &MergeLayoutParams) -> Vec<LayoutRegion> {
+    let mut out = a.to_vec();
+    for nr in b {
+        match out.iter_mut().find(|x| x.bbox.intersection_over_union(&nr.bbox) >= p.iou) {
+            Some(existing) if nr.score > existing.score => {
+                // The order is the primary reading's: a detector's own numbering is not
+                // comparable across detectors, and `blocks.reorder` is the step that
+                // exists to decide order on purpose.
+                *existing = LayoutRegion { reading_order: existing.reading_order, ..nr.clone() };
+            }
+            Some(_) => {}
+            None => out.push(nr.clone()),
+        }
+    }
+    out.sort_by_key(|r| r.reading_order);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -585,5 +904,162 @@ mod tests {
         let out = VerifyBlocks.run(&ctx, &[&blocks, &blocks], &serde_json::Value::Null).await.unwrap();
         let Artifact::Blocks(out) = out.artifact else { panic!("wrong kind") };
         assert!((out[0].confidence - 0.5).abs() < 1e-6);
+    }
+
+    /// A block at an arbitrary place, for the geometry-only steps.
+    fn at(x0: f32, y0: f32, x1: f32, y1: f32, order: u32) -> BlockDraft {
+        BlockDraft {
+            kind: BlockKind::Paragraph,
+            bbox: BBox::new(x0, y0, x1, y1).unwrap(),
+            reading_order: order,
+            content: BlockContent::Text { text: format!("{x0},{y0}") },
+            text: format!("{x0},{y0}"),
+            level: None,
+            confidence: 0.8,
+            node_id: "n".into(),
+        }
+    }
+
+    #[test]
+    fn a_vote_decides_membership_where_verify_cannot() {
+        // The point of the step, stated as a test: the primary missed a block two other
+        // readings saw, and it is kept; the primary saw a block nobody else did, and it
+        // is dropped. `blocks.verify` can do neither — it only re-scores.
+        let p = VoteParams::default();
+        let shared = draft(BlockKind::Paragraph, 0.1, "everyone saw this", 0.9);
+        let primary_only = draft(BlockKind::Paragraph, 0.5, "only the primary", 0.9);
+        let missed = draft(BlockKind::Paragraph, 0.75, "the primary missed this", 0.6);
+        let out = vote_blocks(&[&[shared.clone(), primary_only], &[shared.clone(), missed.clone()], &[shared.clone(), missed]], &p);
+        let texts: Vec<&str> = out.iter().map(|b| b.text.as_str()).collect();
+        assert!(texts.contains(&"everyone saw this"));
+        assert!(texts.contains(&"the primary missed this"), "two votes is a majority: {texts:?}");
+        assert!(!texts.contains(&"only the primary"), "one vote is not: {texts:?}");
+    }
+
+    #[test]
+    fn a_vote_is_weighted_by_how_many_saw_it() {
+        let p = VoteParams::default();
+        let b = draft(BlockKind::Paragraph, 0.1, "x", 0.9);
+        let one = std::slice::from_ref(&b);
+        let unanimous = vote_blocks(&[one, one, one], &p);
+        assert!((unanimous[0].confidence - 0.9).abs() < 1e-6, "3/3 keeps its confidence");
+        let two_thirds = vote_blocks(&[one, one, &[]], &p);
+        assert!((two_thirds[0].confidence - 0.6).abs() < 1e-6, "2/3 of 0.9, got {}", two_thirds[0].confidence);
+        // Off, the membership decision stays and the scaling goes — the knob exists
+        // because a downstream threshold tuned on a parser's own confidences should not
+        // have to be retuned to insert a vote.
+        let plain = vote_blocks(&[one, one, &[]], &VoteParams { weight_by_votes: false, ..VoteParams::default() });
+        assert!((plain[0].confidence - 0.9).abs() < 1e-6);
+    }
+
+    #[test]
+    fn one_reading_cannot_cast_two_votes_for_a_region() {
+        // A parser that split one paragraph in two must not thereby elect it alone.
+        let p = VoteParams::default();
+        let whole = at(0.1, 0.1, 0.5, 0.3, 0);
+        let split_a = at(0.1, 0.1, 0.5, 0.2, 0);
+        let split_b = at(0.1, 0.11, 0.5, 0.21, 1);
+        let out = vote_blocks(&[&[split_a, split_b], &[], &[]], &p);
+        assert!(out.is_empty(), "two halves from one parser are one vote each, not a majority: {out:?}");
+        // And with a genuine second witness the region survives.
+        let out = vote_blocks(&[&[at(0.1, 0.1, 0.5, 0.3, 0)], &[whole], &[]], &p);
+        assert_eq!(out.len(), 1);
+    }
+
+    #[test]
+    fn a_vote_takes_the_majority_kind_but_not_a_tie() {
+        let p = VoteParams::default();
+        let table = BlockDraft { kind: BlockKind::Table, ..draft(BlockKind::Table, 0.1, "x", 0.5) };
+        let para = draft(BlockKind::Paragraph, 0.1, "x", 0.9);
+        // Two tables against one paragraph: the paragraph is the most confident reading
+        // and so supplies text and geometry, but the kind is the majority's.
+        let (one_para, one_table) = (std::slice::from_ref(&para), std::slice::from_ref(&table));
+        let out = vote_blocks(&[one_para, one_table, one_table], &p);
+        assert_eq!(out[0].kind, BlockKind::Table);
+        assert_eq!(out[0].text, "x");
+        // One each is no majority, so the representative keeps its own kind rather than
+        // list order deciding.
+        let out = vote_blocks(&[one_para, one_table], &VoteParams { min_votes: 2, ..VoteParams::default() });
+        assert_eq!(out[0].kind, BlockKind::Paragraph, "a tie is not a majority");
+    }
+
+    #[tokio::test]
+    async fn the_vote_step_rejects_a_quorum_it_cannot_reach() {
+        let ctx = test_ctx("vote");
+        let blocks = Artifact::Blocks(vec![draft(BlockKind::Paragraph, 0.1, "x", 0.5)]);
+        for bad in [serde_json::json!({"min_votes": 0}), serde_json::json!({"min_votes": 4}), serde_json::json!({"iou": 1.5})] {
+            let err = VoteBlocks.run(&ctx, &[&blocks, &blocks, &blocks], &bad).await.unwrap_err();
+            assert!(matches!(err, StepError::InvalidParams(_)), "{bad} gave {err:?}");
+        }
+        assert!(VoteBlocks.run(&ctx, &[&blocks, &blocks, &blocks], &serde_json::Value::Null).await.is_ok());
+    }
+
+    #[test]
+    fn reorder_reads_two_columns_down_and_not_across() {
+        // Interleaved on the page, the way a parser that sorted by y alone would emit
+        // them: left-top, right-top, left-bottom, right-bottom.
+        let blocks = vec![
+            at(0.08, 0.20, 0.45, 0.30, 0),
+            at(0.55, 0.21, 0.92, 0.31, 1),
+            at(0.08, 0.40, 0.45, 0.50, 2),
+            at(0.55, 0.41, 0.92, 0.51, 3),
+        ];
+        let out = reorder_blocks(&blocks, &ReorderParams::default());
+        let xs: Vec<f32> = out.iter().map(|b| b.bbox.x0).collect();
+        assert_eq!(xs, vec![0.08, 0.08, 0.55, 0.55], "a column is read to its foot before the next one starts: {xs:?}");
+        assert_eq!(out.iter().map(|b| b.reading_order).collect::<Vec<_>>(), vec![0, 1, 2, 3], "the order is renumbered densely");
+    }
+
+    #[test]
+    fn a_headline_cuts_the_page_rather_than_collapsing_the_columns() {
+        // The failure this step's stripe logic exists for: a full-width title overlaps
+        // both columns' x-extents, so a naive column sort finds one column and reads the
+        // page straight down the middle.
+        let blocks = vec![
+            at(0.05, 0.05, 0.95, 0.12, 0),
+            at(0.08, 0.20, 0.45, 0.30, 1),
+            at(0.55, 0.21, 0.92, 0.31, 2),
+            at(0.05, 0.60, 0.95, 0.66, 3),
+            at(0.08, 0.70, 0.45, 0.80, 4),
+            at(0.55, 0.71, 0.92, 0.81, 5),
+        ];
+        let out = reorder_blocks(&blocks, &ReorderParams::default());
+        let ys: Vec<f32> = out.iter().map(|b| b.bbox.y0).collect();
+        assert_eq!(ys, vec![0.05, 0.20, 0.21, 0.60, 0.70, 0.71], "title, its two columns, second title, its two columns: {ys:?}");
+    }
+
+    #[test]
+    fn reorder_changes_nothing_but_the_order() {
+        let blocks = vec![at(0.55, 0.21, 0.92, 0.31, 0), at(0.08, 0.20, 0.45, 0.30, 1)];
+        let out = reorder_blocks(&blocks, &ReorderParams::default());
+        // A permutation: same multiset of everything that is not the order. This is the
+        // property that makes a change in the order metric attributable to this step.
+        let key = |b: &BlockDraft| (b.text.clone(), format!("{:?}", b.kind), b.bbox.x0.to_bits(), b.confidence.to_bits());
+        let mut before: Vec<_> = blocks.iter().map(key).collect();
+        let mut after: Vec<_> = out.iter().map(key).collect();
+        before.sort();
+        after.sort();
+        assert_eq!(before, after);
+        assert_eq!(out[0].bbox.x0, 0.08, "and it did reorder them");
+    }
+
+    #[test]
+    fn merging_layouts_unions_and_the_better_score_wins() {
+        let a = vec![
+            LayoutRegion { kind: BlockKind::Paragraph, bbox: BBox::new(0.1, 0.1, 0.5, 0.2).unwrap(), reading_order: 0, score: 0.6 },
+            LayoutRegion { kind: BlockKind::Paragraph, bbox: BBox::new(0.1, 0.3, 0.5, 0.4).unwrap(), reading_order: 1, score: 0.9 },
+        ];
+        let b = vec![
+            // The same first region, read as a table and more confidently.
+            LayoutRegion { kind: BlockKind::Table, bbox: BBox::new(0.1, 0.1, 0.5, 0.2).unwrap(), reading_order: 7, score: 0.95 },
+            // One only the second detector saw.
+            LayoutRegion { kind: BlockKind::Figure, bbox: BBox::new(0.6, 0.6, 0.9, 0.9).unwrap(), reading_order: 9, score: 0.5 },
+        ];
+        let out = merge_layout(&a, &b, &MergeLayoutParams::default());
+        assert_eq!(out.len(), 3, "union, not replacement: {out:?}");
+        let first = out.iter().find(|r| r.bbox.y0 == 0.1).expect("the shared region");
+        assert_eq!(first.kind, BlockKind::Table, "the better-scored reading wins");
+        assert_eq!(first.reading_order, 0, "but not its order — orders are not comparable across detectors");
+        assert!(out.iter().any(|r| r.kind == BlockKind::Figure), "a region only the second saw is kept");
     }
 }

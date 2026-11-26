@@ -147,6 +147,9 @@ earlier levels). Nodes in one level run concurrently.
 | `blocks.merge_native` | CPU | native text layer + layout (+ recognised tables/formulas) → blocks |
 | `blocks.merge` | CPU | merge several block sets (union by IoU, keeps highest-confidence) |
 | `blocks.verify` | CPU | re-scores one block set by how far a second reading corroborates it; adds and drops nothing |
+| `blocks.vote` | CPU | three readings reconciled by majority; **the only step that can change membership by agreement** — keeps a block the primary missed and drops one only it saw |
+| `blocks.reorder` | CPU | recomputes reading order from the geometry (column-aware XY-cut); the only step that moves an order metric without changing the parse |
+| `layout.merge` | CPU | unions two layout readings, the better-scored region winning; `blocks.merge` one artifact earlier, so one parse pays for two detections |
 | `page.orient` | CPU | turns a sideways or upside-down page (quarter turns are measured, the flip is a gated judgement) |
 | `page.deskew` | CPU | straightens a crooked scan (projection profile) |
 | `page.denoise` | CPU | median filter for speckled scans and photos |

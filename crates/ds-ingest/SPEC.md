@@ -9,7 +9,7 @@ Implemented: magic-byte format detection, the pdfium PDF rasterizer with a crash
 render-child pool (hangs killed on timeout, crashes retried once on a fresh child), the
 PNG/JPEG/TIFF rasterizer with bit-depth normalisation and WhiteIsZero inversion, EXIF
 orientation, native text-layer extraction, tier-0 page signals, classifier thumbnails, and
-4 CPU DAG steps. 20 unit tests pass, plus pool, raster and pre-processing integration
+7 CPU DAG steps. 30 unit tests pass, plus pool, raster and pre-processing integration
 tests.
 
 Tier-0 signals for a raster page now include **`ruling_lines`** and
@@ -173,6 +173,46 @@ rendered page per child is held before upload.
 | `blocks.merge_native` | `text_layer, layout, blocks → blocks` | Assigns native text spans to layout regions (span centre inside region); text regions get native text; regions already covered by recognised blocks (tables, formulas) take those. Spans outside every region become `other` blocks. Confidence: 0.99 for native text. |
 | `blocks.merge` | `blocks, blocks → blocks` | Union of two block sets; overlapping blocks (IoU ≥ 0.5, same kind family) keep the higher-confidence one. |
 | `blocks.verify` | `blocks, blocks → blocks` | Re-scores the first set by how far the second corroborates it. Membership is unchanged (see below). |
+| `blocks.vote` | `blocks, blocks, blocks → blocks` | Keeps the blocks that at least `min_votes` of the three readings agree on (see below). |
+| `blocks.reorder` | `blocks → blocks` | Recomputes `reading_order` from the geometry and changes nothing else (see below). |
+| `layout.merge` | `layout, layout → layout` | Union of two layout readings; overlapping regions (IoU ≥ `iou`) keep the better-scored one, with the first reading's order. |
+
+### `blocks.vote`
+
+- Params: `{"iou": f32, "min_votes": u32, "weight_by_votes": bool}`, defaults
+  `0.5`/`2`/`true`. `min_votes` outside `1..=inputs` is `InvalidParams`, because 0 would
+  keep everything and 4 would keep nothing and both read as "the step did nothing".
+- **The one step that can change membership by agreement.** `blocks.verify` takes two
+  inputs and never changes membership, so a block the primary parser missed stays missing
+  however many other parsers saw it, and a block only the primary saw stays present with a
+  reduced confidence. A majority decides: at `min_votes = 2` a block two readings saw is
+  kept even if the primary missed it, and a block only one saw is dropped.
+- Identity is positional, and a reading may cast **at most one vote per region** —
+  otherwise a parser that split one paragraph in two would elect it by itself.
+- The most confident member supplies geometry and text (averaging two boxes invents a
+  region no parser reported, and averaging two strings is not defined); the **kind** is the
+  majority's, which is the one field a vote can decide without inventing anything. A tie
+  is not a majority and leaves the representative's own kind.
+- With `weight_by_votes`, the output confidence is the members' mean scaled by the share
+  of readings that voted — a block two of three saw is not as certain as one all three
+  saw, and nothing downstream can recover that from the membership. Off, the membership
+  decision stays and the scaling goes, so a threshold tuned on a parser's own confidences
+  does not have to be retuned to insert a vote.
+
+### `blocks.reorder`
+
+- Params: `{"full_width": f32, "gutter": f32}`, defaults `0.6`/`0.02`, each within
+  `0..=1`.
+- The output is a **permutation of the input**: membership, boxes, text, kinds and
+  confidences are identical and only `reading_order` is rewritten, densely from 0. That is
+  what makes it measurable — a change in an order metric after inserting it is
+  attributable to it alone, which is true of no other step.
+- An XY-cut with one thing a naive column sort gets wrong: a block at least `full_width`
+  wide cuts the page into horizontal **stripes**, and columns are grouped within a stripe.
+  Without that a headline's x-extent overlaps every column, the page collapses into one
+  column, and a two-column page with a headline is read straight down the middle.
+- Columns come from transitive overlap of the blocks' own x-extents, each widened by half
+  a `gutter`, so a short line does not start a column of its own. Left to right, then down.
 
 ### `blocks.verify`
 

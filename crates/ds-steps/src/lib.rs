@@ -15,6 +15,13 @@ pub fn production_registry(client: Arc<OpenAiClient>) -> StepRegistry {
     reg.register(Arc::new(ds_ingest::steps::MergeNative))
         .register(Arc::new(ds_ingest::steps::MergeBlocks))
         .register(Arc::new(ds_ingest::steps::VerifyBlocks))
+        // Three-way agreement, which two-input `blocks.verify` structurally cannot do:
+        // verify never changes membership, so a block the primary missed stays missing.
+        .register(Arc::new(ds_ingest::steps::VoteBlocks))
+        // The only step that can move an order metric without changing the parse.
+        .register(Arc::new(ds_ingest::steps::ReorderBlocks))
+        // `blocks.merge`, one artifact earlier: merge the layouts and parse once.
+        .register(Arc::new(ds_ingest::steps::MergeLayout))
         .register(Arc::new(ds_ingest::steps::FigureCrop))
         // Pre-processing. Steps rather than a fixed pass so `ds-adapt` can measure
         // whether each one helps a given page class instead of assuming it does.

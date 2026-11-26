@@ -51,6 +51,14 @@ fn production_registry_step_signatures() {
     expect("blocks.merge", &[Blocks, Blocks], Blocks);
     expect("blocks.merge_native", &[TextLayer, Layout, Blocks], Blocks);
     expect("blocks.verify", &[Blocks, Blocks], Blocks);
+    // Three inputs, which is the point of it: two-input `blocks.verify` cannot take a
+    // majority and so cannot change membership.
+    expect("blocks.vote", &[Blocks, Blocks, Blocks], Blocks);
+    // One in, one out: the only step that can move an order metric without changing the
+    // parse, which is what makes a change in order tau attributable to it.
+    expect("blocks.reorder", &[Blocks], Blocks);
+    // `blocks.merge` one artifact earlier.
+    expect("layout.merge", &[Layout, Layout], Layout);
     // Pre-processing is page_image -> page_image, which is what lets it compose and lets
     // a DAG apply none, one or several operations.
     for kind in ["page.orient", "page.deskew", "page.denoise", "page.normalize", "page.binarize", "page.crop_margins"] {
@@ -70,12 +78,15 @@ fn production_registry_step_signatures() {
         vec![
             "blocks.merge",
             "blocks.merge_native",
+            "blocks.reorder",
             "blocks.verify",
+            "blocks.vote",
             "chart.to_table",
             "figure.crop",
             "figure.describe",
             "formula.recognize",
             "layout.detect",
+            "layout.merge",
             "page.binarize",
             "page.crop_margins",
             "page.denoise",
