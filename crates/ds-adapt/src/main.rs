@@ -36,6 +36,57 @@ enum Cmd {
         pages_per_doc: u32,
         #[arg(long, default_value = "en")]
         language: String,
+        /// Page rotations to cycle across each shape's documents, e.g. `0,90,180,270`.
+        ///
+        /// Off by default: the clean corpus is what every existing number was measured
+        /// on. Switched on, it is the only way the `page.orient` and `page.deskew`
+        /// templates in the search space can be scored against anything — on upright
+        /// pages a conditioner repairs nothing and can only lose on latency, so the
+        /// search's one available conclusion is "skip the repair steps".
+        ///
+        /// The labels are rotated with the page, analytically, so they stay exact.
+        #[arg(long, value_delimiter = ',')]
+        rotate: Vec<u16>,
+        /// Page skews in degrees to cycle across each shape's documents, e.g.
+        /// `-2,0,2`.
+        ///
+        /// What `/Rotate` cannot express: the degree or two a page was fed in at, applied
+        /// to the text matrix so the glyphs themselves tilt. This is the perturbation
+        /// `page.deskew` exists for.
+        ///
+        /// Unlike rotation, the labels become **loose by a stated amount**: a label is
+        /// axis-aligned, so a skewed block is labelled by the hull of a tilted box and a
+        /// model that is exactly right cannot score a perfect IoU against it. The command
+        /// prints that ceiling, and a skewed corpus's layout numbers must not be compared
+        /// against an unskewed one's.
+        #[arg(long, value_delimiter = ',', allow_hyphen_values = true)]
+        skew: Vec<f32>,
+        /// Also write a **scanned** copy of every document, at this dpi, and point the
+        /// manifest at it.
+        ///
+        /// Off by default, and a second pass rather than part of generation: writing the
+        /// corpus is a pure function and several tests depend on that, while this needs
+        /// pdfium and a render child. It is the perturbation that matters most, because
+        /// a clean text layer makes `blocks.merge_native` win by construction and
+        /// `region.ocr` is then never scored against anything.
+        ///
+        /// The labels do not move — the page is rendered, its pixels are degraded, and
+        /// the result is wrapped as a page of the same size — so they stay exact. What
+        /// changes is that the page no longer has a text layer.
+        #[arg(long)]
+        scan_dpi: Option<u32>,
+        /// Gaussian blur sigma, sensor noise amplitude and JPEG quality of the scan.
+        /// Only read when `--scan-dpi` is given.
+        #[arg(long, default_value_t = 0.6)]
+        scan_blur: f32,
+        #[arg(long, default_value_t = 8)]
+        scan_noise: u8,
+        #[arg(long, default_value_t = 60)]
+        scan_quality: u8,
+        /// Path to `ds-render-child`, if it is not beside this binary. Only read when
+        /// `--scan-dpi` is given.
+        #[arg(long)]
+        render_child: Option<PathBuf>,
     },
     /// Score the page classifier against the dataset's labels, and calibrate its
     /// confidence.
@@ -281,6 +332,14 @@ fn filter_split(all: Vec<PageEval>, want: Option<&str>) -> anyhow::Result<Vec<Pa
     Ok(kept)
 }
 
+/// `ds-render-child`, which is a separate auto-discovered bin and not this binary.
+fn render_child_path(given: Option<PathBuf>) -> anyhow::Result<PathBuf> {
+    match given {
+        Some(p) => Ok(p),
+        None => std::env::current_exe()?.parent().map(|d| d.join("ds-render-child")).ok_or_else(|| anyhow::anyhow!("cannot locate ds-render-child")),
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into())).init();
@@ -422,12 +481,41 @@ async fn main() -> anyhow::Result<()> {
             println!("wrote {} runs ({} ok, {} failed) to {}", records.len(), ok, records.len() - ok, out.join("runs.jsonl").display());
             Ok(())
         }
-        Cmd::Dataset { out, docs_per_shape, pages_per_doc, language } => {
-            let spec = ds_adapt::dataset::Spec { docs_per_shape, pages_per_doc, language, ..Default::default() };
+        Cmd::Dataset { out, docs_per_shape, pages_per_doc, language, rotate, skew, scan_dpi, scan_blur, scan_noise, scan_quality, render_child } => {
+            let perturb = ds_adapt::dataset::Perturb { rotate_deg: rotate, skew_deg: skew };
+            let spec = ds_adapt::dataset::Spec { docs_per_shape, pages_per_doc, language, perturb, ..Default::default() };
             let w = ds_adapt::dataset::write(&out, &spec)?;
             println!("wrote {} documents ({} pages) and {}", w.documents, w.pages, w.manifest.display());
+            if !spec.perturb.rotate_deg.is_empty() {
+                println!("  rotations cycled across each shape: {:?}", spec.perturb.rotate_deg);
+            }
+            if !spec.perturb.skew_deg.is_empty() {
+                println!("  skews cycled across each shape: {:?}", spec.perturb.skew_deg);
+                if let Some(iou) = w.skew_label_iou {
+                    // The ceiling, said out loud. A correct answer cannot beat it, so a
+                    // layout score on this corpus is not comparable with an unskewed one.
+                    println!("  label ceiling from skew: a correct block scores at most IoU {iou:.2} against its own label");
+                    if iou < 0.5 {
+                        println!("  WARNING: below the 0.5 matcher threshold — a correct answer will not match at all");
+                    }
+                }
+            }
             for (shape, n) in &w.by_shape {
                 println!("  {shape}: {n} documents");
+            }
+            if let Some(dpi) = scan_dpi {
+                let child = render_child_path(render_child)?;
+                let size = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2);
+                let pool = ds_adapt::scan::render_pool(child, size);
+                let s = ds_adapt::scan::Scan { dpi, blur_sigma: scan_blur, noise: scan_noise, jpeg_quality: scan_quality };
+                let scanned = ds_adapt::scan::scan(&w.manifest, &pool, &s).await?;
+                println!(
+                    "scanned {} documents ({} pages) at {dpi} dpi: blur {scan_blur}, noise {scan_noise}, jpeg q{scan_quality}",
+                    scanned.documents, scanned.pages
+                );
+                // Said plainly, because it is the difference between measuring the
+                // recognition path and measuring the text layer.
+                println!("  the manifest now points at the scans; born_digital is false and there is no text layer to read");
             }
             println!("next: ds-adapt run --manifest {} --candidates <candidates.json> --out <run-dir>", w.manifest.display());
             Ok(())

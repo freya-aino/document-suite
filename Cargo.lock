@@ -749,6 +749,7 @@ dependencies = [
  "ds-steps",
  "futures",
  "hex",
+ "image",
  "reqwest",
  "serde",
  "serde_json",
